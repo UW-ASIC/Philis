@@ -604,3 +604,228 @@ mod tests {
         }
     }
 }
+
+/// Step-2 coverage: the pin tables, the slot order, the matcher and the
+/// selection, against their doc comments and the catalog's invariants.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::tests::{fet, nets, ota};
+    use pnr_core::netlist::{Device, Netlist};
+
+    /// Slots slot `k` references through its kind or size rule.
+    fn refs(s: &Slot) -> Vec<u8> {
+        let kr = match s.kind {
+            SlotKind::AnyFet | SlotKind::Kind(_) => None,
+            SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) | SlotKind::SameKindAs(r) => Some(r),
+        };
+        let sr = match s.size_match {
+            SizeMatch::Any => None,
+            SizeMatch::ExactAs(r) | SizeMatch::SameLAs(r) => Some(r),
+        };
+        [kr, sr].into_iter().flatten().collect()
+    }
+
+    /// The catalog invariants `Pattern` documents: references to earlier
+    /// slots only, link ends in range, unique names.
+    #[test]
+    fn catalog_respects_pattern_invariants() {
+        let mut names: Vec<&str> = PATTERNS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        let n = names.len();
+        names.dedup();
+        assert_eq!(names.len(), n, "pattern names are unique");
+        for p in PATTERNS {
+            assert!(!p.slots.is_empty(), "{}", p.name);
+            for (k, s) in p.slots.iter().enumerate() {
+                assert!(refs(s).iter().all(|&r| (r as usize) < k), "{} slot {k} references a later slot", p.name);
+            }
+            for l in p.links {
+                assert!((l.a as usize) < p.slots.len() && (l.b as usize) < p.slots.len(), "{} link out of range", p.name);
+            }
+        }
+    }
+
+    /// `slot_order` is a permutation starting at slot 0 in which every slot's
+    /// references are placed before it.
+    #[test]
+    fn slot_order_is_a_dependency_respecting_permutation() {
+        for p in PATTERNS {
+            let order = slot_order(p);
+            assert_eq!(order[0], 0, "{}", p.name);
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..p.slots.len()).collect::<Vec<_>>(), "{}", p.name);
+            let pos = |k: usize| order.iter().position(|&o| o == k).unwrap();
+            for (k, s) in p.slots.iter().enumerate() {
+                assert!(refs(s).iter().all(|&r| pos(r as usize) < pos(k)), "{} slot {k}", p.name);
+            }
+        }
+    }
+
+    /// A strong link (not S/B to S/B) is preferred over a rail-only one.
+    #[test]
+    fn slot_order_prefers_strong_links() {
+        static SLOTS: [Slot; 3] = [
+            Slot { kind: SlotKind::AnyFet, size_match: SizeMatch::Any, diode: DiodeReq::Any, gate_is_signal: false },
+            Slot { kind: SlotKind::AnyFet, size_match: SizeMatch::Any, diode: DiodeReq::Any, gate_is_signal: false },
+            Slot { kind: SlotKind::AnyFet, size_match: SizeMatch::Any, diode: DiodeReq::Any, gate_is_signal: false },
+        ];
+        static LINKS: [PinLink; 2] = [
+            PinLink { a: 0, pin_a: "S", b: 1, pin_b: "S", rel: PinRel::Same },
+            PinLink { a: 0, pin_a: "D", b: 2, pin_b: "G", rel: PinRel::Same },
+        ];
+        static P: Pattern = Pattern { name: "t", priority: 1, slots: &SLOTS, links: &LINKS };
+        assert_eq!(slot_order(&P), [0, 2, 1]);
+    }
+
+    #[test]
+    fn pin_tables() {
+        assert_eq!(["G", "D", "S", "B", "C", "E", "P", "N"].map(pin_index), [0usize, 1, 2, 3, 4, 5, 6, 7].map(Some));
+        assert_eq!(pin_index("X"), None);
+        let odd = Device { name: "R".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("P".into(), NetId(0)), ("Q".into(), NetId(1))], params: vec![] };
+        let nl = Netlist {
+            devices: vec![fet("M1", DeviceKind::Pmos, 0, 1, 2, 2, 1_000, 1_000), odd, fet("M2", DeviceKind::Nmos, 0, 0, 1, 1, 1_000, 1_000)],
+            nets: nets(&["a", "b", "c"]),
+            ..Default::default()
+        };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let p = pins(&hg);
+        assert_eq!(p[1][6], Some(NetId(0)));
+        assert!(p[1].iter().enumerate().all(|(i, n)| i == 6 || n.is_none()), "an unknown pin name reads as absent");
+        assert_eq!(pin_net(&hg, 1, "Q"), Some(NetId(1)), "pin_net reads any name");
+        assert_eq!(pin_of(&p, 1, "Q"), None);
+        assert_eq!(pin_net(&hg, 0, "C"), None);
+        let on = on_pin(&hg, &p);
+        assert_eq!(on.len(), 3);
+        assert_eq!(on[0][1], [0], "PMOS gate on a: column 2·G + 1");
+        assert_eq!(on[0][0], [2], "NMOS gate on a: column 2·G");
+        assert_eq!(on[0][2], [2], "NMOS drain on a");
+        assert!(on[0][12].is_empty() && on[0][13].is_empty(), "the resistor is not listed");
+        assert!(is_diode(&p, DeviceKind::Nmos, 2) && !is_diode(&p, DeviceKind::Pmos, 0));
+    }
+
+    #[test]
+    fn bjt_diode_is_c_equals_b() {
+        let q = |c: u16, b: u16| Device {
+            name: "Q".into(),
+            kind: DeviceKind::Npn,
+            model: String::new(),
+            terminals: vec![("C".into(), NetId(c)), ("B".into(), NetId(b)), ("E".into(), NetId(2))],
+            params: vec![],
+        };
+        let nl = Netlist { devices: vec![q(0, 0), q(0, 1)], nets: nets(&["a", "b", "e"]), ..Default::default() };
+        let p = pins(&BipartiteHypergraph::from_netlist(&nl));
+        assert!(is_diode(&p, DeviceKind::Npn, 0));
+        assert!(!is_diode(&p, DeviceKind::Npn, 1));
+    }
+
+    /// Every match's instances are distinct devices, in range, and its
+    /// template and priority mirror its pattern.
+    #[test]
+    fn matches_are_well_formed() {
+        let nl = crate::tests::three_stage();
+        let (hg, drawn, models, roles) = tables(&nl);
+        let canon = canonical_labels(&hg, &drawn, &models, &roles);
+        let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
+        let all = recognize_all(&hg, &drawn, &roles, &AnnotationConfig::default(), &canon, &names);
+        assert!(!all.is_empty());
+        for m in &all {
+            assert_eq!(m.instances.len(), m.pattern.slots.len());
+            assert_eq!((m.template, m.priority), (m.pattern.name, m.pattern.priority));
+            let mut v = m.instances.clone();
+            v.sort_unstable();
+            v.dedup();
+            assert_eq!(v.len(), m.instances.len(), "{m:?} repeats a device");
+            assert!(m.instances.iter().all(|&d| (d as usize) < nl.devices.len()));
+        }
+        let mut sets: Vec<(&str, Vec<u32>)> = all.iter().map(|m| {
+            let mut v = m.instances.clone();
+            v.sort_unstable();
+            (m.template, v)
+        }).collect();
+        let n = sets.len();
+        sets.sort();
+        sets.dedup();
+        assert_eq!(sets.len(), n, "one match per (template, device set)");
+    }
+
+    fn tables(nl: &Netlist) -> (BipartiteHypergraph, Vec<Drawn>, Vec<String>, Vec<NetRole>) {
+        let hg = BipartiteHypergraph::from_netlist(nl);
+        let roles = crate::netrole::classify_nets(&hg, &AnnotationConfig::default());
+        let mut models = Vec::new();
+        let drawn: Vec<Drawn> = nl.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
+        (hg, drawn, models, roles)
+    }
+
+    /// `(template, sorted member names)` of every match and of the selection.
+    fn named(nl: &Netlist) -> (Vec<(String, Vec<String>)>, Vec<(String, Vec<String>)>) {
+        let (hg, drawn, models, roles) = tables(nl);
+        let canon = canonical_labels(&hg, &drawn, &models, &roles);
+        let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
+        let all = recognize_all(&hg, &drawn, &roles, &AnnotationConfig::default(), &canon, &names);
+        let key = |m: &PatternMatch| (m.template.to_string(), m.instances.iter().map(|&d| names[d as usize].to_string()).collect::<Vec<_>>());
+        let mut a: Vec<_> = all.iter().map(key).collect();
+        let s: Vec<_> = select_disjoint(&all, &canon, &names).iter().map(key).collect();
+        a.sort();
+        (a, s)
+    }
+
+    /// Metamorphic: reversing the device order changes neither the matches
+    /// (slot assignment included) nor the selection order.
+    #[test]
+    fn recognition_is_device_order_invariant() {
+        for nl in [ota(), crate::tests::three_stage()] {
+            let rev = Netlist { devices: nl.devices.iter().rev().cloned().collect(), nets: nl.nets.clone(), ..Default::default() };
+            assert_eq!(named(&nl), named(&rev));
+        }
+    }
+
+    /// Labels are a function of the device, not its id.
+    #[test]
+    fn canonical_labels_follow_the_device() {
+        let nl = ota();
+        let rev = Netlist { devices: nl.devices.iter().rev().cloned().collect(), nets: nl.nets.clone(), ..Default::default() };
+        let label = |nl: &Netlist| {
+            let (hg, drawn, models, roles) = tables(nl);
+            let c = canonical_labels(&hg, &drawn, &models, &roles);
+            let mut v: Vec<(String, u64)> = nl.devices.iter().zip(c).map(|(d, l)| (d.name.clone(), l)).collect();
+            v.sort();
+            v
+        };
+        let a = label(&nl);
+        assert_eq!(a, label(&rev));
+        let of = |n: &str| a.iter().find(|x| x.0 == n).unwrap().1;
+        assert_eq!(of("XM1"), of("XM2"), "the input pair is automorphic");
+        assert_ne!(of("XM1"), of("XM5"), "the tail is not");
+        let (hg, drawn, models, roles) = tables(&Netlist::default());
+        assert!(canonical_labels(&hg, &drawn, &models, &roles).is_empty());
+    }
+
+    #[test]
+    fn config_skips_devices_and_templates() {
+        let nl = ota();
+        let (hg, drawn, models, roles) = tables(&nl);
+        let canon = canonical_labels(&hg, &drawn, &models, &roles);
+        let names: Vec<&str> = nl.devices.iter().map(|d| d.name.as_str()).collect();
+        let mut cfg = AnnotationConfig::default();
+        cfg.do_not_identify.insert(0);
+        cfg.do_not_use.insert("diff_pair".into());
+        let all = recognize_all(&hg, &drawn, &roles, &cfg, &canon, &names);
+        assert!(all.iter().all(|m| !m.instances.contains(&0) && m.template != "diff_pair"));
+        cfg.do_not_use = PATTERNS.iter().map(|p| p.name.to_string()).collect();
+        assert!(recognize_all(&hg, &drawn, &roles, &cfg, &canon, &names).is_empty());
+    }
+
+    #[test]
+    fn select_disjoint_edges() {
+        assert!(select_disjoint(&[], &[], &[]).is_empty());
+        // A higher priority wins an overlap whatever the labels.
+        use crate::catalog::{DIFF_PAIR, PUSH_PULL_PAIR};
+        let m = |p: &'static Pattern, i: Vec<u32>, priority| PatternMatch { template: p.name, pattern: p, instances: i, priority };
+        let all = [m(&DIFF_PAIR, vec![0, 1], 1), m(&PUSH_PULL_PAIR, vec![1, 2], 9)];
+        let got = select_disjoint(&all, &[0, 0, 0], &["a", "b", "c"]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].instances, [1, 2]);
+    }
+}
