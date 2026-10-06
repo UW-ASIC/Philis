@@ -443,8 +443,9 @@ pub(crate) fn intent(
         let (mut inn, mut outg, mut known) = (0.0f64, 0.0f64, true);
         for (dev, d) in netlist.devices.iter().zip(draws) {
             for (t, _) in dev.terminals.iter().filter(|(_, n)| *n == c.net) {
-                known &= d.is_some();
                 let ua = d.iter().flatten().find(|(x, _)| x == t).map_or(0.0, |&(_, ua)| ua);
+                // A non-finite simulated current is as unknown as a missing one.
+                known &= d.is_some() && ua.is_finite();
                 if ua > 0.0 { inn += ua } else { outg -= ua }
             }
         }
@@ -560,8 +561,9 @@ pub(crate) fn layer_specs(pdk: &Pdk, layers: &[LayerId], cuts: &[Cut], pin_acces
     let ceil = |v: i32| ((v + p0 - 1) / p0).max(0);
     for s in &mut specs {
         s.stride = ceil(s.wire + s.space).max(1) as u32;
-        s.halo_wire = (ceil(s.wire + s.space) - 1).max(0) as u8;
-        s.halo_via = (ceil(s.pad_along / 2 + s.pad_along.max(s.wire) / 2 + s.space) - 1).max(0) as u8;
+        // Clamped, never wrapped: a halo past 255 tracks reads as 255.
+        s.halo_wire = (ceil(s.wire + s.space) - 1).clamp(0, 255) as u8;
+        s.halo_via = (ceil(s.pad_along / 2 + s.pad_along.max(s.wire) / 2 + s.space) - 1).clamp(0, 255) as u8;
     }
     (p0, specs)
 }

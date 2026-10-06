@@ -147,7 +147,8 @@ pub fn spice_report(text: &str, opts: &ParseOptions) -> Result<(Netlist, ParseRe
         }
     };
 
-    let mut flat = Flat { opts, subckts: &subckts, by_name, globals, file_params, nl: Netlist::default(), net_index: HashMap::new() };
+    let models = opts.models.iter().map(|(n, k)| (n.to_ascii_lowercase(), *k)).collect();
+    let mut flat = Flat { opts, subckts: &subckts, by_name, globals, file_params, nl: Netlist::default(), net_index: HashMap::new(), models };
     let mut scope = flat.file_params.clone();
     if let Some(t) = top {
         for (k, v) in &subckts[t].defaults {
@@ -224,6 +225,8 @@ struct Flat<'a> {
     nl: Netlist,
     /// Lower-case net name → its id in `nl.nets`.
     net_index: HashMap<String, NetId>,
+    /// `opts.models` with lower-case names.
+    models: Vec<(String, DeviceKind)>,
 }
 
 impl Flat<'_> {
@@ -295,9 +298,14 @@ impl Flat<'_> {
                     let (mut val, mut idents) = (None, Vec::new());
                     for &t in rest {
                         if val.is_none() && letter != 'd' {
-                            if let Ok(v) = value(t, &f.scope) {
-                                val = Some(v);
-                                continue;
+                            match value(t, &f.scope) {
+                                Ok(v) => {
+                                    val = Some(v);
+                                    continue;
+                                }
+                                // `{…}`/`'…'` is an expression, never a model name.
+                                Err(e) if t.starts_with(['{', '\'']) => return Err(format!("device {name}: {e}")),
+                                Err(_) => {}
                             }
                         }
                         idents.push(t);
@@ -324,8 +332,8 @@ impl Flat<'_> {
     /// The deck table's kind for lower-case `model`: exact, or one is the
     /// other behind a vendor `__` prefix (as `Pdk::deck_model`).
     fn table(&self, model: &str) -> Option<DeviceKind> {
-        let hit = |n: &str| n == model || n.ends_with(&format!("__{model}")) || model.ends_with(&format!("__{n}"));
-        self.opts.models.iter().find(|(n, _)| hit(&n.to_ascii_lowercase())).map(|&(_, k)| k)
+        let behind = |long: &str, short: &str| long.strip_suffix(short).is_some_and(|p| p.ends_with("__"));
+        self.models.iter().find(|(n, _)| n == model || behind(n, model) || behind(model, n)).map(|&(_, k)| k)
     }
 
     /// Records instance `name` of `subckts[si]` and expands its body in a
@@ -425,7 +433,7 @@ impl Flat<'_> {
             if self.opts.size == SizeConvention::PerFinger {
                 let nf = find_param(&params, "nf").map_or(1, |v| v.max(1));
                 if let Some((_, w)) = params.iter_mut().find(|(k, _)| k == "w") {
-                    *w *= nf;
+                    *w = w.saturating_mul(nf);
                 }
             }
         }
@@ -608,6 +616,9 @@ fn value(tok: &str, scope: &Scope) -> Result<f64, String> {
     if e.i < e.s.len() {
         return Err(format!("value `{tok}`: unexpected `{}`", &inner[e.i..]));
     }
+    if !v.is_finite() {
+        return Err(format!("value `{tok}` is not finite"));
+    }
     Ok(v)
 }
 
@@ -689,7 +700,7 @@ impl Expr<'_> {
         let start = self.i;
         let c = self.s.get(start).copied().unwrap_or(0);
         if c.is_ascii_digit() || c == b'.' {
-            return Ok(self.number());
+            return self.number();
         }
         if !(c.is_ascii_alphabetic() || c == b'_') {
             return Err(format!("expected a value at `{}`", String::from_utf8_lossy(&self.s[start..])));
@@ -719,7 +730,7 @@ impl Expr<'_> {
 
     /// Digits, fraction, exponent, then an SI suffix (`meg t g k m u n p f
     /// a`); any further letters are a unit and ignored (`1pF`, `1.8V`).
-    fn number(&mut self) -> f64 {
+    fn number(&mut self) -> Result<f64, String> {
         let start = self.i;
         let digit = |s: &Self, i: usize| s.s.get(i).is_some_and(u8::is_ascii_digit);
         while digit(self, self.i) || self.s.get(self.i) == Some(&b'.') {
@@ -734,7 +745,8 @@ impl Expr<'_> {
                 }
             }
         }
-        let v: f64 = std::str::from_utf8(&self.s[start..self.i]).ok().and_then(|n| n.parse().ok()).unwrap_or(f64::NAN);
+        let digits = &self.s[start..self.i];
+        let v: f64 = std::str::from_utf8(digits).ok().and_then(|n| n.parse().ok()).ok_or_else(|| format!("malformed number `{}`", String::from_utf8_lossy(digits)))?;
         let letters = self.i;
         while self.s.get(self.i).is_some_and(u8::is_ascii_alphabetic) {
             self.i += 1;
@@ -742,9 +754,13 @@ impl Expr<'_> {
         let suffix = self.s[letters..self.i].to_ascii_lowercase();
         // Dividing by the inverse keeps `10u` exactly the double nearest 1e-5.
         if suffix.starts_with(b"meg") {
-            return v * 1e6;
+            return Ok(v * 1e6);
         }
-        match suffix.first() {
+        // `mil` = 1/1000 inch = 25.4 µm (SPICE), checked before milli.
+        if suffix.starts_with(b"mil") {
+            return Ok(v * 25.4e-6);
+        }
+        Ok(match suffix.first() {
             Some(b't') => v * 1e12,
             Some(b'g') => v * 1e9,
             Some(b'k') => v * 1e3,
@@ -755,7 +771,7 @@ impl Expr<'_> {
             Some(b'f') => v / 1e15,
             Some(b'a') => v / 1e18,
             _ => v,
-        }
+        })
     }
 }
 

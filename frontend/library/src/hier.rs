@@ -68,10 +68,11 @@ pub(crate) fn eligible(nl: &Netlist, min_devices: usize) -> Vec<String> {
         let local = ids.iter().flat_map(|d| &nl.devices[d.0 as usize].terminals).all(|(_, n)| x.ports.contains(n) || nl.nets[n.0 as usize].name.starts_with(&prefix));
         distinct && local && ids.len() >= min_devices
     };
+    let fine: Vec<bool> = (0..nl.insts.len()).map(ok).collect();
     let mut out: Vec<String> = Vec::new();
     for j in (0..nl.insts.len()).rev() {
         let s = &nl.insts[j].subckt;
-        if !out.contains(s) && nl.insts.iter().enumerate().filter(|(_, x)| &x.subckt == s).all(|(k, _)| ok(k)) {
+        if !out.contains(s) && nl.insts.iter().zip(&fine).filter(|(x, _)| &x.subckt == s).all(|(_, &f)| f) {
             out.push(s.clone());
         }
     }
@@ -84,19 +85,23 @@ pub(crate) fn eligible(nl: &Netlist, min_devices: usize) -> Vec<String> {
 pub(crate) fn local(nl: &Netlist, i: u32) -> (Netlist, Vec<DeviceId>, Vec<NetId>) {
     let x = &nl.insts[i as usize];
     let devs = member_ids(nl, i);
+    // Parent net → local id (`u16::MAX` = not yet seen); nets are < 65 535.
     let mut nets: Vec<NetId> = Vec::new();
-    let map = |n: NetId, nets: &mut Vec<NetId>| {
-        NetId(nets.iter().position(|&m| m == n).unwrap_or_else(|| {
+    let mut local_of = vec![u16::MAX; nl.nets.len()];
+    let mut map = |n: NetId| {
+        let slot = &mut local_of[n.0 as usize];
+        if *slot == u16::MAX {
+            *slot = nets.len() as u16;
             nets.push(n);
-            nets.len() - 1
-        }) as u16)
+        }
+        NetId(*slot)
     };
-    let ports: Vec<NetId> = x.ports.iter().map(|&n| map(n, &mut nets)).collect();
-    let devices = devs
+    let ports: Vec<NetId> = x.ports.iter().map(|&n| map(n)).collect();
+    let devices: Vec<_> = devs
         .iter()
         .map(|d| {
             let mut dev = nl.devices[d.0 as usize].clone();
-            dev.terminals.iter_mut().for_each(|t| t.1 = map(t.1, &mut nets));
+            dev.terminals.iter_mut().for_each(|t| t.1 = map(t.1));
             dev
         })
         .collect();
@@ -111,12 +116,16 @@ pub(crate) fn local(nl: &Netlist, i: u32) -> (Netlist, Vec<DeviceId>, Vec<NetId>
         false
     };
     let kept: Vec<u32> = (0..nl.insts.len() as u32).filter(|&j| j != i && under(Some(j))).collect();
-    let new_of = |j: u32| kept.iter().position(|&k| k == j).map(|p| p as u32);
+    let mut new_index = vec![None; nl.insts.len()];
+    for (p, &j) in kept.iter().enumerate() {
+        new_index[j as usize] = Some(p as u32);
+    }
+    let new_of = |j: u32| new_index.get(j as usize).copied().flatten();
     let insts = kept
         .iter()
         .map(|&j| {
             let y = &nl.insts[j as usize];
-            SubcktInst { path: y.path.clone(), subckt: y.subckt.clone(), parent: y.parent.and_then(new_of), ports: y.ports.iter().map(|&n| map(n, &mut nets)).collect() }
+            SubcktInst { path: y.path.clone(), subckt: y.subckt.clone(), parent: y.parent.and_then(new_of), ports: y.ports.iter().map(|&n| map(n)).collect() }
         })
         .collect();
     let device_inst = devs.iter().map(|d| nl.device_inst.get(d.0 as usize).copied().flatten().and_then(new_of)).collect();
@@ -235,6 +244,10 @@ fn child_config(cfg: &Config) -> Config {
 /// Translates `mac` so the bbox of its shapes has its corner at the origin,
 /// and sets `bbox` to it; pins and keep-outs move with the shapes.
 fn to_origin(mac: &mut Macro) {
+    if mac.shapes.is_empty() {
+        mac.bbox = Rect::default();
+        return;
+    }
     let (x0, y0) = mac.shapes.iter().fold((i32::MAX, i32::MAX), |a, s| (a.0.min(s.rect.x), a.1.min(s.rect.y)));
     let (x1, y1) = mac.shapes.iter().fold((i32::MIN, i32::MIN), |a, s| (a.0.max(s.rect.x + s.rect.w), a.1.max(s.rect.y + s.rect.h)));
     let shift = |r: &mut Rect| (r.x, r.y) = (r.x - x0, r.y - y0);
