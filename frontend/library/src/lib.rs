@@ -9,7 +9,7 @@ mod fill;
 mod geometry;
 mod hier;
 mod parse;
-pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
+pub use parse::{retarget, spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
 
 /// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
@@ -517,10 +517,13 @@ pub fn model_table(pdk: &Pdk) -> Vec<(String, pnr_core::DeviceKind)> {
 /// `injected` maps instance names to user-drawn macros: those devices are used
 /// as drawn, never reshaped or moved by `dp`.
 pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<Solution, FlowError> {
-    // 1. Parse, naming each device by the deck's model.
+    // 1. Parse, naming each device by the deck's model; what the netlist
+    //    leaves to the PDK (ideal R/C, a FET's missing W/L) filled in.
     let opts = ParseOptions { size: cfg.size_convention, models: model_table(pdk), top: cfg.top.clone(), ..Default::default() };
     let mut netlist = parse::spice_with(spice, &opts).map_err(FlowError::Parse)?;
     deck_models(&mut netlist, pdk);
+    let notes = parse::retarget(&mut netlist, pdk);
+    notes.iter().for_each(|n| eprintln!("[parse] {n}"));
     if let Some(i) = &cfg.interface {
         let is_port = |n: &str| netlist.ports.iter().any(|p| netlist.nets[p.0 as usize].name == n);
         let bad: Vec<&str> = i.pins.iter().map(|p| p.net.as_str()).filter(|n| !is_port(n)).collect();
@@ -547,6 +550,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let mut sol = solve(&netlist, pdk, injected, cfg, bias, &placed)?;
     sol.stats.block_solves = blocks.len() as u32;
     sol.blocks = blocks.into_iter().map(|b| (b.subckt, b.metadata)).collect();
+    sol.diagnostics.extend(notes.into_iter().map(|message| analog::intent::Diagnostic { kind: "parse", devices: Vec::new(), message }));
     Ok(sol)
 }
 

@@ -312,7 +312,7 @@ fn an_undrawable_device_is_one_finding() {
     let pdk = verify::Pdk::from_json(&std::fs::read_to_string(&deck).expect("read deck")).expect("deck loads");
     for name in ["bjt_mirror", "rc_filter"] {
         let raw = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("read fixture");
-        let spice = fixtures::preprocess_spice(&raw, &deck).expect("retarget");
+        let spice = fixtures::retarget(&raw, &pdk);
         let cfg = library::Config { feedback_iters: 1, ..Default::default() };
         let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let report = library::signoff(&sol, &pdk).report;

@@ -57,9 +57,11 @@ not comparable to published finfet results.
   (`fixtures.rs: REPOS`) and removed again when the run ends. Local fixtures and
   `competition/` survive cleanup.
 
-Netlists are preprocessed before parsing: backslash-continuation joining,
-`.param` resolution, bare R/C rewritten to real PDK devices via cap density and
-sheet resistance, and `nfin` → `W` synthesis.
+A fixture's MOS channels below the deck's legal minimum are raised to it
+(`fixtures::retarget`). The rest is the flow's own, as for `philis run`
+(`library::retarget`): backslash joins and `.param`s are parsed, an ideal R/C
+becomes the PDK's resistor or LVS-recognised capacitor sized from its value,
+`nfin` becomes `W`, and a FET without W or L takes the deck's minimum.
 
 ## Output
 

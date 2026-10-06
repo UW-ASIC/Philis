@@ -2,7 +2,8 @@
 //! flattened, `.param` expressions evaluated, R/C/L values kept, `V I E F G H
 //! B K` cards kept as evidence, and each `X` target classified by the file's
 //! sub-circuits, then the deck's model table, then a model-token rule — never
-//! by a default.
+//! by a default. [`retarget`] then fills in what a generic netlist leaves to
+//! the PDK (ideal R/C, `nfin`, a FET's missing W/L).
 
 use std::collections::{HashMap, HashSet};
 
@@ -287,6 +288,12 @@ impl Flat<'_> {
                         }
                         idents.push(t);
                     }
+                    // `R1 a b resistor r=1k`: the value as a keyword.
+                    if val.is_none() {
+                        if let Some((_, v)) = kv.iter().find(|(k, _)| matches!((letter, k.as_str()), ('r', "r") | ('c', "c"))) {
+                            val = Some(value(v, &f.scope)?);
+                        }
+                    }
                     let mut nodes = pos[..2].to_vec();
                     if idents.len() >= 2 {
                         nodes.push(idents[0]);
@@ -429,6 +436,103 @@ impl Flat<'_> {
         self.nl.sources.push(SourceCard { name, kind: letter.to_ascii_uppercase(), nodes, dc, waveform });
         Ok(())
     }
+}
+
+/// What a generic netlist leaves to the PDK, filled in from `pdk` ([`crate::run`]
+/// calls it after parsing): an ideal `R`/`C` card (a value and no deck model, or
+/// the bare word `resistor`/`res`/`capacitor`/`cap`) becomes the deck's resistor or
+/// capacitor sized from its value; a MOS card without `w` takes `nfin` fins per
+/// finger on a fin deck, else the deck's minimum width per finger, and one without
+/// `l` the deck's minimum length. One note per change, one per card left ideal,
+/// and one per source card (testbench evidence, never drawn).
+pub fn retarget(nl: &mut Netlist, pdk: &verify::Pdk) -> Vec<String> {
+    use pnr_core::Process as _;
+    let get = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
+    let fin_pitch = pdk.width("fin").zip(pdk.space("fin")).map(|(w, s)| i64::from(w + s));
+    let ideal = |m: &str| matches!(m.to_ascii_lowercase().as_str(), "" | "resistor" | "res" | "capacitor" | "cap") && pdk.deck_model(m).is_none();
+    let mut notes = Vec::new();
+    for d in &mut nl.devices {
+        let sized = get(d, "w").is_some() && get(d, "l").is_some();
+        match d.kind {
+            DeviceKind::Nmos | DeviceKind::Pmos => {
+                let (l_min, w_min) = pdk.min_channel(d.kind == DeviceKind::Pmos, &d.model);
+                // A finger as narrow as the generator draws by default (sky130 420 nm, not diff's 150).
+                let w_min = w_min.max(cells::builder::dim(pdk, "min_finger_width"));
+                let nf = get(d, "nf").unwrap_or(1).max(1);
+                if get(d, "w").is_none() {
+                    let (w, why) = match (fin_pitch, get(d, "nfin")) {
+                        (Some(p), n) => (n.unwrap_or(1).max(1) * nf * p, format!("{} fin(s) × {nf} finger(s) at the {p} nm fin pitch", n.unwrap_or(1).max(1))),
+                        (None, _) => (nf * i64::from(w_min), format!("the deck's minimum finger {w_min} nm × {nf} finger(s)")),
+                    };
+                    d.params.push(("w".into(), w));
+                    notes.push(format!("{}: no w, drawn at w = {w} nm ({why})", d.name));
+                }
+                if get(d, "l").is_none() {
+                    d.params.push(("l".into(), i64::from(l_min)));
+                    notes.push(format!("{}: no l, drawn at the deck's minimum l = {l_min} nm", d.name));
+                }
+            }
+            DeviceKind::Resistor if ideal(&d.model) => {
+                let Some(recipe) = pdk.recipe("resistor", "") else {
+                    notes.push(format!("{}: ideal resistor left as written: this PDK has no resistor", d.name));
+                    continue;
+                };
+                let ov = verify::pdk::Overlay { pdk, recipe };
+                let w = ov.rule("res_min_width", 0).max(ov.width("rpoly").unwrap_or(0));
+                let ohm = get(d, "r_mohm").map(|v| v as f64 / 1e3).filter(|&r| r > 0.0);
+                // The recipe's own model (body plus heads), else the deck's body sheet.
+                let l = ohm.filter(|_| !sized && w > 0).and_then(|r| match cells::resistor::ResModel::of(&ov) {
+                    Some(m) => m.seg_len(w, r, 1, 0, 1, i32::MAX),
+                    None => ov.sheet_ohm("rpoly").filter(|&s| s > 0.0).map(|s| ((r * f64::from(w) / f64::from(s)).round() as i32).max(w)),
+                });
+                match (sized, l) {
+                    (true, _) => notes.push(format!("{}: drawn as {}", d.name, ov.recipe.model)),
+                    (false, Some(l)) => {
+                        d.params.extend([("w".to_string(), i64::from(w)), ("l".to_string(), i64::from(l))]);
+                        notes.push(format!("{}: ideal {} Ω drawn as {} w = {w} nm, l = {l} nm", d.name, ohm.unwrap_or(0.0), ov.recipe.model));
+                    }
+                    (false, None) => {
+                        notes.push(format!("{}: ideal resistor left as written: no value, or none {} can be sized to", d.name, ov.recipe.model));
+                        continue;
+                    }
+                }
+                d.model = ov.recipe.model;
+            }
+            DeviceKind::Capacitor if ideal(&d.model) => {
+                // The first recipe the deck's LVS recognises, the default first.
+                let recipes = pdk.cell.get("capacitors").and_then(|t| t.get("recipes")).and_then(|r| r.as_object());
+                let models = recipes.into_iter().flat_map(|r| r.values()).filter_map(|r| r.get("model")?.as_str());
+                let recipe = std::iter::once("").chain(models).filter_map(|m| pdk.recipe("capacitor", m)).find(|r| pdk.deck_model(&r.model).is_some());
+                let Some(recipe) = recipe else {
+                    notes.push(format!("{}: ideal capacitor left as written: no capacitor this PDK's LVS recognises", d.name));
+                    continue;
+                };
+                let rule = |k: &str| recipe.rules.iter().find(|(n, _)| n == k).map_or(0.0, |&(_, v)| f64::from(v));
+                let (area, perim, dw) = (rule("c_area_af_um2"), rule("c_perim_af_um"), rule("c_dw_nm"));
+                let ov = verify::pdk::Overlay { pdk, recipe };
+                // A square plate: C = area·s² + 4·perim·s, s the drawn side plus `c_dw`.
+                let side = get(d, "c_af").map(|c| c as f64).filter(|&c| c > 0.0 && area > 0.0 && !sized).map(|c| {
+                    let s_um = (-4.0 * perim + (16.0 * perim * perim + 4.0 * area * c).sqrt()) / (2.0 * area);
+                    ((s_um * 1e3 - dw).round() as i32).max(ov.width("plate").unwrap_or(0))
+                });
+                match (sized, side) {
+                    (true, _) => notes.push(format!("{}: drawn as {}", d.name, ov.recipe.model)),
+                    (false, Some(s)) => {
+                        d.params.extend([("w".to_string(), i64::from(s)), ("l".to_string(), i64::from(s))]);
+                        notes.push(format!("{}: ideal {} fF drawn as {} w = l = {s} nm", d.name, get(d, "c_af").unwrap_or(0) as f64 / 1e3, ov.recipe.model));
+                    }
+                    (false, None) => {
+                        notes.push(format!("{}: ideal capacitor left as written: no value, or {} states no area capacitance", d.name, ov.recipe.model));
+                        continue;
+                    }
+                }
+                d.model = ov.recipe.model;
+            }
+            _ => {}
+        }
+    }
+    notes.extend(nl.sources.iter().map(|s| format!("{}: {} card, testbench evidence only: not drawn", s.name, s.kind)));
+    notes
 }
 
 /// Logical statements: `*` comment lines dropped, inline `;` and ` $ `
@@ -881,6 +985,45 @@ X2 a b c cell wu={2*lu}
         assert_eq!(nodes(4), ["o5", "0", "d", "g"]);
         assert!(!nl.nets.iter().any(|n| n.name.to_ascii_lowercase().starts_with("poly")));
         assert!(spice(&format!("{base}E1 o1 0 d\n")).err().unwrap().contains("too few tokens"));
+    }
+
+    /// Field report: a FET card without W/L, an ideal R/C and a source must
+    /// not fail the flow. On sky130 the R/C become the deck's resistor and the
+    /// capacitor its LVS recognises, sized from the value.
+    #[test]
+    fn retarget_fills_what_a_generic_netlist_leaves_to_sky130() {
+        use pnr_core::Process as _;
+        let pdk = verify::Pdk::builtin("sky130").unwrap();
+        let mut nl = spice("XM1 d g 0 0 nfet_01v8 nf=2\nR1 d out 10k\nC1 d 0 100f\nR2 a b resistor r=1k\nV1 vdd 0 1.8\n").unwrap();
+        let notes = retarget(&mut nl, &pdk);
+        let (l_min, _) = pdk.min_channel(false, "nfet_01v8");
+        let d = &nl.devices;
+        assert_eq!((param(&d[0], "w"), param(&d[0], "l")), (Some(2 * 420), Some(i64::from(l_min))));
+        assert_eq!(d[1].model, "sky130_fd_pr__res_high_po");
+        let ov = verify::pdk::Overlay { pdk: &pdk, recipe: pdk.recipe("resistor", &d[1].model).unwrap() };
+        let ohm = cells::resistor::ResModel::of(&ov).unwrap().ohm(param(&d[1], "w").unwrap() as i32, param(&d[1], "l").unwrap() as i32);
+        assert!((ohm - 10e3).abs() < 10.0, "R1 drawn at {ohm} Ω");
+        assert_eq!(d[2].model, "sky130_fd_pr__cap_mim_m3_1");
+        assert!(param(&d[2], "w").is_some_and(|w| w >= i64::from(ov.pdk.width("capm").unwrap_or(1))) && param(&d[2], "w") == param(&d[2], "l"));
+        assert_eq!(param(&d[3], "r_mohm"), Some(1_000_000), "r= is R2's value");
+        assert_eq!(d[3].model, "sky130_fd_pr__res_high_po");
+        assert!(notes.iter().any(|n| n.starts_with("V1:")), "{notes:?}");
+        assert_eq!(notes.len(), 6, "{notes:?}");
+    }
+
+    /// On ASAP7 a FET's width is its fins (`nfin`, else one per finger) and
+    /// its length the deck's gate; an ideal R stays ideal, with a note.
+    #[test]
+    fn retarget_on_asap7_counts_fins_and_keeps_an_unbuildable_r_ideal() {
+        let pdk = verify::Pdk::builtin("asap7").unwrap();
+        let mut nl = spice("M1 d g 0 0 nmos_rvt nfin=4 l=20n\nM2 d g vdd vdd pmos_lvt nf=2\nR1 d out 10k\nC1 d 0 1f\n").unwrap();
+        let notes = retarget(&mut nl, &pdk);
+        let d = &nl.devices;
+        assert_eq!((param(&d[0], "w"), param(&d[0], "l")), (Some(4 * 27), Some(20)));
+        assert_eq!((param(&d[1], "w"), param(&d[1], "l")), (Some(2 * 27), Some(20)));
+        assert_eq!((d[2].model.as_str(), param(&d[2], "w")), ("", None));
+        assert!(notes.iter().any(|n| n.starts_with("R1: ideal resistor left as written")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.starts_with("C1: ideal capacitor left as written")), "{notes:?}");
     }
 
     #[test]

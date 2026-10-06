@@ -1,18 +1,14 @@
-//! Discover and preprocess benchmark circuit fixtures (ALIGN, MAGICAL, TinyTapeout).
+//! Discover benchmark circuit fixtures (ALIGN, MAGICAL, TinyTapeout) and raise
+//! their MOS channels to the deck's legal minimum ([`retarget`]).
 //!
 //! Repos clone on demand into `benchmarks/fixtures/` and are cleaned up after use.
-//! Generic SPICE netlists are preprocessed to PDK-compatible format before parsing.
-//!
-//! Ported verbatim from `tools/benchmark/src/fixtures.rs` — this machinery is
-//! PDK/flow-agnostic (it only produces preprocessed `.spice` text + paths), so it
-//! carries over to the new `library`-based flow unchanged.
+//! What a generic netlist leaves to the PDK (ideal R/C, nfin, missing W/L) is
+//! `library::run`'s own (`library::retarget`).
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // Repo registry
@@ -415,11 +411,10 @@ pub fn cleanup_fixtures() {
 }
 
 // ---------------------------------------------------------------------------
-// SPICE preprocessing: generic netlists → PDK-compatible format
+// The benchmark's retarget. Ideal R/C, nfin and missing W/L are the library's
+// (`library::retarget`, run by `library::run`); only raising a fixture's MOS
+// channel to the deck's legal minimum is the bench's own.
 // ---------------------------------------------------------------------------
-
-/// FinFET nfin → planar W mapping (µm per fin).
-const UM_PER_FIN: f64 = 0.1;
 
 const SI_SUFFIXES: &[(&str, f64)] = &[
     ("meg", 1e6),
@@ -466,58 +461,6 @@ fn is_numeric(s: &str) -> bool {
     base.parse::<f64>().is_ok()
 }
 
-fn resolve_param<'a>(s: &'a str, params: &'a HashMap<String, String>) -> String {
-    let mut val = s.to_ascii_lowercase();
-    let mut seen = std::collections::HashSet::new();
-    while let Some(next) = params.get(&val) {
-        if !seen.insert(val.clone()) {
-            break;
-        }
-        val = next.to_ascii_lowercase();
-    }
-    val
-}
-
-fn collect_spice_params(text: &str) -> HashMap<String, String> {
-    let mut params = HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim().to_ascii_lowercase();
-        if !trimmed.starts_with(".param") {
-            continue;
-        }
-        for tok in line.split_whitespace().skip(1) {
-            if let Some((k, v)) = tok.split_once('=') {
-                let v = v.trim_end_matches(',');
-                params.insert(
-                    k.trim().to_ascii_lowercase(),
-                    v.trim().to_owned(),
-                );
-            }
-        }
-    }
-    params
-}
-
-fn join_backslash(text: &str) -> String {
-    let mut joined = Vec::new();
-    for line in text.split('\n') {
-        if let Some(last) = joined.last_mut() {
-            let s: &mut String = last;
-            if s.ends_with('\\') {
-                s.pop();
-                while s.ends_with(' ') {
-                    s.pop();
-                }
-                s.push(' ');
-                s.push_str(line.trim_start());
-                continue;
-            }
-        }
-        joined.push(line.to_owned());
-    }
-    joined.join("\n")
-}
-
 fn fmt_um(val_um: f64) -> String {
     format!("{:.4}", val_um)
         .trim_end_matches('0')
@@ -526,246 +469,10 @@ fn fmt_um(val_um: f64) -> String {
         + "u"
 }
 
-/// PDK data extracted for SPICE preprocessing.
-struct PdkPreprocess {
-    cap_model: Option<String>,
-    res_model: Option<String>,
-    cap_density: f64,
-    r_sheet: f64,
-    res_w: f64,
-    um_per_fin: f64,
-    /// The deck, for each MOS card's legal channel.
-    pdk: verify::Pdk,
-}
-
-impl PdkPreprocess {
-    /// The resistor is the sidecar's default recipe, sized by its body's
-    /// deck sheet resistance and min width; no recipe (or no sheet R), no
-    /// rewrite. Cap density is the sidecar's `cap_density_ff_um2`, else 1.
-    fn load(sidecar: &str) -> Result<Self, String> {
-        use pnr_core::Process;
-        let pdk = verify::Pdk::from_json(sidecar)?;
-        let recipe = pdk.recipe("resistor", "");
-        let body = recipe.clone().map(|recipe| verify::pdk::Overlay { pdk: &pdk, recipe });
-        let r_sheet = body.as_ref().and_then(|o| o.sheet_ohm("rpoly")).map_or(0.0, f64::from);
-        let res_w = body.as_ref().and_then(|o| o.width("rpoly")).map_or(0.0, |w| f64::from(w) / 1e3);
-        let res_model = recipe.map(|r| r.model).filter(|m| !m.is_empty() && r_sheet > 0.0 && res_w > 0.0);
-        // Neither deck defines a capacitor recogniser — `library::parse`
-        // classifies X-instances by model token (`cap`) and `cells::capacitor`
-        // draws them, so a bare "cap" model word is all a rewrite needs.
-        let cap_density = pdk.cell.get("cap_density_ff_um2").and_then(Value::as_f64).unwrap_or(1.0);
-        // A fin's share of W is the deck's fin pitch; a planar deck has none.
-        let um_per_fin = pdk.width("fin").zip(pdk.space("fin")).map_or(UM_PER_FIN, |(w, s)| f64::from(w + s) / 1e3);
-        Ok(Self { cap_model: Some("cap".to_owned()), res_model, cap_density, r_sheet, res_w, um_per_fin, pdk })
-    }
-}
-
-/// Rewrite generic SPICE into PDK-compatible format.
-///
-/// - Backslash continuation joining
-/// - Bare caps/resistors with real W/L from cap density / sheet-R
-/// - Bare R/C with .param value references resolved
-/// - FinFET nfin→W synthesis when W is absent on MOSFET lines
-/// - MOS L and W below the deck's shortest legal channel raised to it
-pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
-    let text = join_backslash(text);
-    let pdk = PdkPreprocess::load(&fs::read_to_string(pdk_path).map_err(|e| e.to_string())?)?;
-    let spice_params = collect_spice_params(&text);
-
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let stripped = line.trim();
-        if stripped.is_empty()
-            || stripped.starts_with('*')
-            || stripped.starts_with('.')
-            || stripped.starts_with('+')
-        {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let tokens: Vec<&str> = stripped.split_whitespace().collect();
-        if tokens.len() < 3 {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let first = tokens[0].as_bytes()[0].to_ascii_lowercase();
-
-        // --- nfin→W synthesis for MOSFET lines ---
-        if first == b'm' || first == b'x' {
-            let kv: HashMap<String, &str> = tokens
-                .iter()
-                .filter_map(|t| t.split_once('='))
-                .map(|(k, v)| (k.to_ascii_lowercase(), v))
-                .collect();
-            let mut extra = String::new();
-            if !kv.contains_key("w")
-                && (kv.contains_key("nfin") || kv.contains_key("nf"))
-            {
-                let nfin_raw = kv.get("nfin").or_else(|| kv.get("nf")).unwrap_or(&"1");
-                let resolved = resolve_param(nfin_raw, &spice_params);
-                let nfin_val = parse_si(&resolved).max(1.0);
-                extra.push_str(&format!(" w={}", fmt_um(nfin_val * pdk.um_per_fin)));
-            }
-            if !kv.contains_key("l") {
-                extra.push_str(" l=0.15u");
-            }
-            if !extra.is_empty() {
-                out.push(format!("{stripped}{extra}"));
-                continue;
-            }
-            out.push(line.to_owned());
-            continue;
-        }
-
-        // --- bare C/R rewriting ---
-        if first != b'c' && first != b'r' {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let kv_start = tokens[1..]
-            .iter()
-            .position(|t| t.contains('='))
-            .map(|i| i + 1)
-            .unwrap_or(tokens.len());
-        let positional = &tokens[1..kv_start];
-
-        if positional.len() < 2 {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let kv: HashMap<String, String> = tokens[kv_start..]
-            .iter()
-            .filter_map(|t| t.split_once('='))
-            .map(|(k, v)| {
-                (
-                    k.to_ascii_lowercase(),
-                    resolve_param(v, &spice_params),
-                )
-            })
-            .collect();
-        let last_pos = positional.last().unwrap();
-        let last_lower = last_pos.to_ascii_lowercase();
-        let generic_model = matches!(
-            last_lower.as_str(),
-            "resistor" | "res" | "capacitor" | "cap"
-        );
-        let resolved = resolve_param(last_pos, &spice_params);
-
-        let (nodes, value) = if is_numeric(&resolved) {
-            (&positional[..positional.len() - 1], parse_si(&resolved))
-        } else if generic_model {
-            if first == b'c' && kv.contains_key("w") && kv.contains_key("l") {
-                if let Some(ref cap_model) = pdk.cap_model {
-                    let inst = tokens[0];
-                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
-                        inst.to_owned()
-                    } else {
-                        format!("X{inst}")
-                    };
-                    let kvs: Vec<String> = tokens[kv_start..]
-                        .iter()
-                        .filter_map(|t| t.split_once('='))
-                        .map(|(k, v)| {
-                            format!(
-                                "{}={}",
-                                k.to_ascii_lowercase(),
-                                resolve_param(v, &spice_params)
-                            )
-                        })
-                        .collect();
-                    out.push(format!(
-                        "{new_inst} {} {cap_model} {}",
-                        positional[..positional.len() - 1].join(" "),
-                        kvs.join(" "),
-                    ));
-                    continue;
-                }
-            }
-            let val_kv = if first == b'r' { kv.get("r") } else { kv.get("c") };
-            match val_kv.filter(|v| is_numeric(v)) {
-                Some(v) => (&positional[..positional.len() - 1], parse_si(v)),
-                None => {
-                    out.push(line.to_owned());
-                    continue;
-                }
-            }
-        } else {
-            out.push(line.to_owned());
-            continue;
-        };
-        let kv_params: Vec<String> = tokens[kv_start..]
-            .iter()
-            .filter_map(|t| t.split_once('='))
-            .filter(|(k, _)| {
-                let k = k.to_ascii_lowercase();
-                k != "r" && k != "c"
-            })
-            .map(|(k, v)| {
-                format!(
-                    "{}={}",
-                    k.to_ascii_lowercase(),
-                    resolve_param(v, &spice_params)
-                )
-            })
-            .collect();
-        let inst = tokens[0];
-
-        if first == b'c' {
-            if let Some(ref cap_model) = pdk.cap_model {
-                if value != 0.0 {
-                    let c_ff = value.abs() * 1e15;
-                    let area_um2 = c_ff / pdk.cap_density;
-                    let side = area_um2.sqrt().max(0.5);
-                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
-                        inst.to_owned()
-                    } else {
-                        format!("X{inst}")
-                    };
-                    let new_line = format!(
-                        "{new_inst} {} {cap_model} W={} L={} {}",
-                        nodes.join(" "),
-                        fmt_um(side),
-                        fmt_um(side),
-                        kv_params.join(" "),
-                    );
-                    out.push(new_line.trim_end().to_owned());
-                    continue;
-                }
-            }
-        } else if first == b'r' {
-            if let Some(ref res_model) = pdk.res_model {
-                if value != 0.0 {
-                    let r_val = value.abs();
-                    let w = pdk.res_w;
-                    let l = (r_val * w / pdk.r_sheet).max(w);
-                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
-                        inst.to_owned()
-                    } else {
-                        format!("X{inst}")
-                    };
-                    let new_line = format!(
-                        "{new_inst} {} {res_model} W={} L={} {}",
-                        nodes.join(" "),
-                        fmt_um(w),
-                        fmt_um(l),
-                        kv_params.join(" "),
-                    );
-                    out.push(new_line.trim_end().to_owned());
-                    continue;
-                }
-            }
-        }
-
-        out.push(line.to_owned());
-    }
-
-    let mut result = out.join("\n");
-    result.push('\n');
-    Ok(raise_channels(result, library::model_table(&pdk.pdk), |d| pdk.pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model)))
+/// `text` with each MOS card's numeric `l`/`w` below `pdk`'s legal channel
+/// raised to it ([`raise_channels`]).
+pub fn retarget(text: &str, pdk: &verify::Pdk) -> String {
+    raise_channels(text.to_owned(), library::model_table(pdk), |d| pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model))
 }
 
 /// A generic fixture's MOS cards retargeted to the deck's shortest legal
@@ -832,25 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn generic_model_word_rc_rewrites() {
-        let pdk_json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("pdks/sky130.json");
-        let text = ".param rl=500 Csw=5u\n\
-                    R1 vps vout resistor r=rl\n\
-                    C4 a b capacitor w=Csw l=Csw\n";
-        let out = preprocess_spice(text, &pdk_json).expect("preprocess");
-        // The deck states no resistor body sheet R: the card stays as written.
-        let r_line = out.lines().find(|l| l.contains("vps vout")).unwrap();
-        assert!(r_line.starts_with("R1 "), "resistor untouched: {r_line}");
-        let c_line = out.lines().find(|l| l.contains("a b")).unwrap();
-        assert!(c_line.starts_with("XC4 "), "cap instance: {c_line}");
-        assert!(c_line.contains("w=5u") && c_line.contains("l=5u"), "{c_line}");
-        assert!(!c_line.contains("capacitor"), "{c_line}");
-    }
-
-    #[test]
     fn mos_channels_below_the_deck_minimum_are_raised() {
         // `XM4`'s model names no MOS token: only the deck table makes it one.
         let text = "XM1 d g s b pfet_01v8 W=1u L=0.15u\nXM2 d g s b nfet_01v8 W=0.1u L=2u\nXR1 a b res_generic_po W=0.1u L=2u\nXM4 d g s b fet33p W=1u L=0.15u\n";
@@ -870,28 +558,6 @@ mod tests {
         assert!(is_numeric("-3.3p"));
         assert!(!is_numeric("vdd"));
         assert!(!is_numeric(""));
-    }
-
-    #[test]
-    fn backslash_join() {
-        let input = "line1 \\\n  continued\nline2";
-        assert_eq!(join_backslash(input), "line1 continued\nline2");
-    }
-
-    #[test]
-    fn param_resolution() {
-        let mut params = HashMap::new();
-        params.insert("wn".into(), "0.5u".into());
-        params.insert("wp".into(), "wn".into());
-        assert_eq!(resolve_param("wp", &params), "0.5u");
-    }
-
-    #[test]
-    fn spice_param_collection() {
-        let text = ".param wn=0.5u wp=1u\n.param rval=10k";
-        let p = collect_spice_params(text);
-        assert_eq!(p["wn"], "0.5u");
-        assert_eq!(p["rval"], "10k");
     }
 
     #[test]

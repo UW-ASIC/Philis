@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use fixtures::{
-    cleanup_fixtures, clone_repos_if_needed, discover_all, preprocess_spice, BenchmarkCircuit,
+    cleanup_fixtures, clone_repos_if_needed, discover_all, retarget, BenchmarkCircuit,
     Suite,
 };
 use library::visualizer;
@@ -159,8 +159,8 @@ fn op_config(pdk_json: &Path) -> Option<library::oppoint::OpConfig> {
 /// Parse, size-gate and run the full flow on `c`; `Err` is the outcome text.
 fn solve(c: &BenchmarkCircuit, pdk: &Pdk, pdk_json_path: &Path, seed: u64) -> Result<library::Solution, String> {
     let raw = std::fs::read_to_string(&c.spice_path).map_err(|e| format!("read failed: {e}"))?;
-    // Generic-netlist preprocessing (backslash joins, bare R/C, nfin->W).
-    let text = preprocess_spice(&raw, pdk_json_path).unwrap_or(raw);
+    // MOS channels raised to the deck's minimum; the rest is `library::run`'s.
+    let text = retarget(&raw, pdk);
 
     // Pre-parse only to size-gate before committing to the full flow. Uses the
     // exact parser and deck model table `run` uses, so the count is authoritative.
