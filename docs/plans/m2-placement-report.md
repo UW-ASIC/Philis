@@ -118,8 +118,12 @@ Before `1df326d` against PLC-13 `cd443cb` (the parent of the parent, with the st
 | tt_ota | 5/5 | 1.2678 | 1.2678 | +0.0% | 1/1/3/1/1 | 1/1/3/1/1 | 41/42/39/42/41 | 41/42/39/42/41 | 0 | 0 |
 | mean of medians | | 1.1719 | 1.1719 | +0.0% |
 
-- **T2: within +5 %.** It is identical on every fixture: the per-seed footprints match in all 55 runs. None of these
-  fixtures places a foreign well or poly inside a matched cell's keep-out on the converged layouts. chain4's drc
+- **T2: within +5 %, but vacuously.** It is identical on every fixture: the per-seed footprints match in all 55
+  runs. The keep-outs are never active on any fixture: the matched cells' own margins (e.g. ota's `diff_out` inset
+  3000 nm, n-well inset 2500 nm) already exceed the wpe and foreign-poly tiers, so `place_rules` gives identical
+  gaps with and without the class for every cell pair (ota, quad, dac4, rc_filter, mirror_ratio, bgr_core), before
+  any placement runs. The T2 and T9 numbers here therefore do not exercise PLC-13; the library side is covered by
+  `spacing_tests::matched_cells_get_keep_outs` (shrunk insets), the rule itself by gp's unit tests. chain4's drc
   differs per seed with an equal T2, but the base has the same spread, so this is not a change from the item.
 - **T9: not 0 on bgr_core (T9 = 1 on every seed, before and after PLC-13).** The row is the Q1/Q2 PNP pair.
   PLC-29's table, measured at `fe97c78`, shows no `Environment` row for bgr_core, so a later m2 merge before

@@ -3173,12 +3173,69 @@ mod spacing_tests {
 
     /// The `CellSpace` the flow builds for fixture `name` (as `size_tests`).
     fn cells(name: &str, pdk: &verify::Pdk) -> crate::CellSpace {
+        built(name, pdk).2
+    }
+
+    /// [`cells`] with the device names and the annotated problem.
+    fn built(name: &str, pdk: &verify::Pdk) -> (Vec<String>, crate::Problem, crate::CellSpace) {
         let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("fixture");
         let mut netlist = crate::parse::spice(&spice).expect("parses");
         crate::deck_models(&mut netlist, pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, pdk, &[], &[]);
-        crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold)
+        let cs = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold);
+        (netlist.devices.iter().map(|d| d.name.clone()).collect(), problem, cs)
+    }
+
+    /// PLC-13, library side: [`crate::match_class`] marks ota's diff pair and
+    /// loads `Moderate` and dac4's cell 0 `Exceptional`; [`crate::place_rules`]
+    /// stamps that class and the orient set on every profile, and a matched
+    /// cell's halo and gap grow by the keep-out tier. The shipped cells' own
+    /// diffusion insets already cover the tiers (keep-outs are redundant on the
+    /// fixtures), so the halo/gap checks shrink every inset to 0.
+    #[test]
+    fn matched_cells_get_keep_outs() {
+        use gp::spacing::{Face, Profile};
+        use pnr_core::MatchClass::{Exceptional, Moderate};
+        let pdk = pdk("sky130");
+        let (names, problem, cs) = built("ota", &pdk);
+        let class = crate::match_class(&problem, &cs);
+        let of = |n: &str| cs.devices_of.iter().position(|d| d.iter().any(|&x| names[usize::from(x.0)].ends_with(n))).expect(n);
+        for n in ["M1", "M2", "M3", "M4"] {
+            assert_eq!(class[of(n)], Some(Moderate), "ota {n}");
+        }
+        assert_eq!(class[of("M5")], None, "ota M5 (tail) is unmatched");
+        let (_, p, dac) = built("dac4", &pdk);
+        assert_eq!(crate::match_class(&p, &dac)[0], Some(Exceptional), "dac4 cell 0");
+
+        let mut locks = dp::locks::Locks::default();
+        locks.orient_of = (0..cs.variants.len()).map(|c| (c == of("M1") || c == of("M2")).then_some(7)).collect();
+        let (with, without) = (crate::place_rules(&pdk, &cs, &locks, &class), crate::place_rules(&pdk, &cs, &locks, &[]));
+        let t = &with.spacing;
+        let shrink = |p: &Profile| {
+            let mut p = *p;
+            for e in &mut p.edge {
+                for r in (0..gp::spacing::N).filter(|&r| e.present & (1 << r) != 0) {
+                    e.inset[r] = 0;
+                }
+            }
+            p
+        };
+        let tail = shrink(&without.profiles.of[of("M5")][0][0]);
+        for c in 0..cs.variants.len() {
+            let (m, u) = (with.profiles.of[c][0][0], without.profiles.of[c][0][0]);
+            assert_eq!((m.matched, m.set), (class[c], locks.orient_of[c]), "cell {c} profile");
+            assert_eq!((u.matched, u.set), (None, locks.orient_of[c]), "cell {c} unmatched build");
+            let Some(k) = class[c] else { continue };
+            let (ms, us) = (shrink(&m), shrink(&u));
+            let tier = t.wpe[k as usize].max(t.foreign_poly[k as usize]);
+            assert!(tier > 0 && t.halo(&ms) >= tier && t.halo(&ms) > t.halo(&us), "cell {c}: halo {} vs unmatched {}, tier {tier}", t.halo(&ms), t.halo(&us));
+            let (gm, gu) = (t.gap(&ms, Face::R, &tail), t.gap(&us, Face::R, &tail));
+            assert!(gm.min > gu.min, "cell {c}: gap to the tail {gm:?} vs unmatched {gu:?}");
+        }
+        // Orient-set partners are exempt from each other's keep-outs.
+        let s = |r: &gp::PlaceRules, n: &str| shrink(&r.profiles.of[of(n)][0][0]);
+        assert_eq!(t.gap(&s(&with, "M1"), Face::R, &s(&with, "M2")), t.gap(&s(&without, "M1"), Face::R, &s(&without, "M2")), "M1/M2 share an orient set");
     }
 
     const FIXTURES: [&str; 10] = ["ota", "ota_constrained", "tt_ota", "pair", "quad", "chain4", "rc_filter", "dac4", "bjt_mirror", "bgr_core"];
