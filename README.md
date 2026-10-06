@@ -8,10 +8,6 @@
 
 <p align="center"><img src="docs/progress/layouts/ota.svg" alt="OTA placed, routed and signed off by Philis on sky130" width="560"></p>
 
-```sh
-philis run ota.spice sky130 -o out/    # → out/ota.gds, signed off: DRC, LVS, ERC, PEX
-```
-
 ## Why Philis
 
 - **Reads intent from the circuit.** 91 recognised topologies (differential pairs, current mirrors, cascodes, cross-coupled latches, OTAs, …) become placement and routing constraints automatically. An ALIGN-style JSON sidecar (`--constraints`) can add or override them.
