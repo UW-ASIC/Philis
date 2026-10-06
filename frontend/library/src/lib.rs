@@ -265,7 +265,8 @@ pub struct Solution {
     /// ambiguous symmetry, conflicts), in annotator order; the CLI writes one
     /// line each to `report.txt`.
     pub diagnostics: Vec<analog::intent::Diagnostic>,
-    /// Nets to field-solve (PERF-16, [`field_nets`]); [`signoff`] does not yet.
+    /// Nets to field-solve (PERF-16, [`field_nets`]); [`signoff`] does not yet
+    /// (deferred, owner decision: docs/plans/cards/m2-perf-5.md).
     pub field_nets: Vec<String>,
 }
 
@@ -2366,7 +2367,8 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 /// PEX is analytical over merged metal. ponytail: [`Solution::field_nets`]
 /// are not field-solved here — measured (`bench --pex-cal`, PERF-16) at
 /// 10³–10⁴× the analytical time and 3–10× below magic's ground C; pass
-/// them to [`signoff_with`] once the solve reads near magic.
+/// them to [`signoff_with`] once the solve reads near magic. Step 3
+/// deferred pending an owner decision (docs/plans/cards/m2-perf-5.md).
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
     signoff_with(sol, pdk, &verify::ExtractOptions::default())

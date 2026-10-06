@@ -168,3 +168,120 @@ task prompt to PATH.
   hold unchanged; a rise is reported, not absorbed), `qcargo run --release -p benchmark --bin bench -- --pex-cal`,
   then the nix-shell harness for C_magic. Acceptance ≤ 15 % per signal net ≥ 1 fF is reported with numbers; a miss is
   stated, never thresholded away. bench `C total` on ota drops (baseline moves once; record old/new).
+
+## Results (review fixes 5)
+
+### PERF-16 step 3 — deferred, needs an owner decision
+`library::signoff` stays analytical over merged metal; `Solution::field_nets` is computed (lib.rs `field_nets`) but
+not passed to `signoff_with`, and the promoted-epoch both-modes run / `stage_ms` print is not done. Reason, measured
+with `bench -- --pex-cal` (field solve on every labelled signal net, release, 2026-10-06; dac4 row from the all-fixture run, the rest from `--pex-cal bgr_core bjt_mirror chain4
+mirror_ratio pair quad rc_filter res_m2`):
+
+| fixture | t_pex analytical (ms) | t_field (ms) |
+|---|---|---|
+| bgr_core | 64.5 | 130464 |
+| bjt_mirror | – (no pex run) | 8 (refused: layer LayerId(72) has no thickness in the process stack) |
+| chain4 | 5.0 | 147019 |
+| mirror_ratio | 5.9 | 6 (refused: layer LayerId(72) has no thickness in the process stack) |
+| pair | 4.1 | 11358 |
+| quad | 13.4 | 17472 |
+| rc_filter | 8.6 | 39574 |
+| res_m2 | 6.0 | 6 (refused: layer LayerId(72) has no thickness in the process stack) |
+| dac4 | – | unfinished after 65 min (killed); dac4_mim, ota, ota_constrained, tq_chain, tt_ota not attempted |
+
+At ≥ 10⁴× the analytical time (dac4: field solve unfinished after 65 min, killed) the step-3 gate "keep field solve
+only if `pex_field ≤ 2 ×` analytical" fails on every fixture measured, and "final signoff: always" would add minutes
+to hours to every `library::signoff` caller (bench, signoff_fixtures, CLI). The field C also reads further from magic
+than the analytical C (table below). **Owner decision**: wire `signoff` to `field_nets` anyway, or keep it deferred
+until the GPurify quasistatic solve is faster and calibrated. Until then the card's step 3 is not done.
+
+### PERF-16 acceptance (`--pex-cal` + harness `c_magic`)
+Ground C per labelled signal net, fF; err = |C_field − C_magic|/C_magic; target ≤ 15 % per net with C_magic ≥ 1 fF.
+
+| net | C_unmerged | C_merged | C_field | C_magic | err field | err merged | verdict |
+|---|---|---|---|---|---|---|---|
+| bgr_core:e1 | 1.131 | 1.040 | 0.152 | 0.551 | 72 % | 89 % | < 1 fF, not scored |
+| bgr_core:e2 | 15.834 | 13.193 | 2.755 | 8.960 | 69 % | 47 % | MISS |
+| bjt_mirror:in | – | – | (=merged) | 7.427 | – | – | no GPurify C |
+| bjt_mirror:outn | 13.097 | 10.219 | (=merged) | – | – | – | no magic C |
+| bjt_mirror:outp | 7.935 | 7.052 | (=merged) | – | – | – | no magic C |
+| chain4:a | 0.432 | 0.370 | 0.132 | 0.317 | 58 % | 17 % | < 1 fF, not scored |
+| chain4:b | 0.448 | 0.386 | 0.040 | 0.085 | 53 % | 354 % | < 1 fF, not scored |
+| chain4:c | 0.496 | 0.427 | 0.028 | 0.072 | 61 % | 492 % | < 1 fF, not scored |
+| chain4:d | 0.563 | 0.466 | 0.053 | 0.187 | 71 % | 150 % | < 1 fF, not scored |
+| chain4:e | 0.427 | 0.366 | 0.081 | 0.312 | 74 % | 17 % | < 1 fF, not scored |
+| chain4:g | 4.969 | 3.852 | 0.723 | 2.593 | 72 % | 49 % | MISS |
+| mirror_ratio:VSS | 17.590 | 13.386 | (=merged) | – | – | – | no magic C |
+| mirror_ratio:d1 | 12.080 | 10.175 | (=merged) | 7.494 | – | 36 % | field refused |
+| mirror_ratio:d2 | 1.729 | 1.262 | (=merged) | 0.896 | – | 41 % | field refused |
+| mirror_ratio:d3 | 2.722 | 1.605 | (=merged) | 1.363 | – | 18 % | field refused |
+| pair:d | 1.676 | 1.283 | 0.452 | 1.425 | 68 % | 10 % | MISS |
+| pair:g | 2.402 | 1.839 | 0.384 | 1.306 | 71 % | 41 % | MISS |
+| quad:g | 4.376 | 3.643 | 0.615 | 3.211 | 81 % | 13 % | MISS |
+| quad:n | 4.599 | 3.250 | 0.960 | 4.004 | 76 % | 19 % | MISS |
+| rc_filter:vin | 1.992 | 1.573 | 0.422 | 0.738 | 43 % | 113 % | < 1 fF, not scored |
+| rc_filter:vmid | 2.701 | 1.849 | 0.642 | 0.926 | 31 % | 100 % | < 1 fF, not scored |
+| rc_filter:vout | 0.340 | 0.250 | 0.089 | 0.189 | 53 % | 32 % | < 1 fF, not scored |
+| res_m2:VDD | 12.523 | 9.398 | (=merged) | 6.839 | – | 37 % | field refused |
+| res_m2:VSS | 2.751 | 1.739 | (=merged) | – | – | – | no magic C |
+| res_m2:a | 5.623 | 4.350 | (=merged) | 2.415 | – | 80 % | field refused |
+| res_m2:b | 2.697 | 2.087 | (=merged) | – | – | – | no magic C |
+| res_m2:in | 1.811 | 1.488 | (=merged) | 0.429 | – | 247 % | field refused |
+
+Scored nets (C_magic ≥ 1 fF, field solved): 6, ok 0, **MISS 6**: the 15 % target is not met. C_field reads 3–5×
+below magic on every solved net; C_merged is within 15 % on 2 of 6 (pair:d 10 %, quad:g 13 %). Not measured: dac4,
+dac4_mim, ota, ota_constrained, tq_chain, tt_ota (the field leg does not finish; `--pex-cal` writes nothing for a
+fixture until all three legs ran). Field refused on 3 fixtures (bjt_mirror, mirror_ratio, res_m2, LayerId(72), below),
+so their C_field is the analytical fallback. `nets` includes VDD/VSS where the fixture declares no supplies
+(mirror_ratio, res_m2). bjt_mirror `in` has no GPurify ground row; outn/outp and several rails have no magic row
+(magic names them differently or merges them into the substrate).
+ota bench `C total`: 841.4 fF now (`bench local`, 2026-10-06); the pre-PERF-16 value was not re-measured in this pass
+(the unmerged→merged drop on the same layout is 7–24 % on the 8 fixtures above).
+C total (fF, bench cost = ground + coupling), same layout: bgr_core 235.0 → 215.1 merged (205.3 field); bjt_mirror 67.8 → 60.8 merged (60.8 field); chain4 29.9 → 26.7 merged (31.6 field); mirror_ratio 60.2 → 45.8 merged (45.8 field); pair 17.3 → 13.9 merged (14.8 field); quad 43.6 → 32.7 merged (33.2 field); rc_filter 31.4 → 23.2 merged (26.4 field); res_m2 41.6 → 32.0 merged (32.0 field).
+
+Tests this pass: `qcargo test -p verify` 62/62 ok; `qcargo test --release -p benchmark --no-fail-fast` in nix-shell with
+`PHILIS_REQUIRE_TOOLS=1`: xcheck_smoke ok (tools ran), signoff_fixtures 18 ok / 1 FAILED (pair LVS, below); `qcargo
+test -p library --no-fail-fast --tests`: failures listed below, none in PERF-16/19 code.
+
+### PERF-19 acceptance (`bench local`, then `nix-shell -p klayout magic-vlsi --run 'python3 benchmarks/signoff_xcheck.py'`)
+target/xcheck/summary.json, 2026-10-06 (exit 1: the T1 gate stays off; nothing loosened):
+
+| fixture | DRC foundry | DRC magic | DRC GPurify | LVS foundry | LVS GPurify | foundry DRC findings (rule=count, origin) |
+|---|---|---|---|---|---|---|
+| bgr_core | 0 | 0 | 0 | mismatch | match | – |
+| bjt_mirror | 0 | 6 | 2 | mismatch | mismatch | – |
+| chain4 | 4 | 8 | 3 | mismatch | match | m1.2=2, m2.2=2 (routing) |
+| dac4 | 7 | 14 | 5 | mismatch | match | m1.2=7 (routing) |
+| dac4_mim | 65 | 71 | 4 | mismatch | match | capm.2b=30, capm.2b_a=30 (cells), m1.2=5 (routing) |
+| mirror_ratio | 0 | 0 | 0 | mismatch | match | – |
+| ota | 4 | 8 | 4 | mismatch | mismatch | m1.2=4 (routing) |
+| ota_constrained | 4 | 8 | 4 | mismatch | mismatch | m1.2=4 (routing) |
+| pair | 0 | 0 | 0 | mismatch | match | – |
+| quad | 0 | 0 | 0 | mismatch | match | – |
+| rc_filter | 0 | 0 | 0 | mismatch | match | – |
+| res_m2 | 0 | 0 | 0 | mismatch | match | – |
+| tq_chain | 29 | 56 | 23 | mismatch | mismatch | m1.2=14, m2.2=11, via.4a_a=4 (routing) |
+| tt_ota | 4 | 8 | 4 | mismatch | mismatch | m1.2=4 (routing) |
+
+Foundry LVS mismatches on every fixture. Common cause in the extracted netlists (`<f>.ext.cir`): every fixture but
+bgr_core extracts a separate `sky130_gnd` substrate pin carrying the nfet bulks, i.e. KLayout sees no tap tying the
+p-substrate to `VSS` (pair: `M$1 d g VSS sky130_gnd`, reference bulk `VSS`). Two fixtures also extract shorted nets
+GPurify does not see: bgr_core `VSS|e1|e2`, ota/ota_constrained/tt_ota `vout1|vout2`. Owners: cells (substrate tap)
+and routing (shorts, m1.2/m2.2 spacing); dac4_mim capm.2b is the MIM cell generator.
+
+### Out of scope, reported
+- Field solve is refused on bjt_mirror, mirror_ratio and res_m2: `engine: layer LayerId(72) has no thickness in the
+  process stack` (`field_refused` in pex_cal.json), so their C_field is the analytical fallback. Owner: deck/process stack (give the
+  layer a thickness, or GPurify skips non-conducting layers in the quasistatic solve).
+- `signoff_fixtures::fixtures_sign_off_within_baseline` fails `pair: LVS must match` (lvs/lvs.unpaired_device),
+  identically on a7e39ef (before PERF-16). Owner: pair's LVS (verify/cells). Not absorbed into a baseline.
+- library: antenna_diode `an_antenna_the_jumper_cannot_fix_gets_a_diode_and_lvs_matches` and extra_devices
+  `an_adopted_antenna_diode_keeps_lvs_matched` fail with `lvs/lvs.unpaired_device` / `unpaired_net` rows (same class
+  as pair above). antenna_diode fails identically with the PERF-16 merge switched off (`merge` emptied in
+  `Checker::new`, experiment not committed), so merging did not cause it. Owner: LVS (verify) / antenna diode (routing).
+- library: unit tests environment_is_in_the_placement_arm_once, sidecar_loads_reach_the_annotator,
+  same_seed_same_gds_bytes and frontend/library/tests/perf_postlayout.rs (6 tests), emit_roundtrip `run_emit_elaborate_signs_off`, flow_smoke
+  `matched_sets_are_reported` and placement_metrics (3 tests) fail `gp::Prices: a batch kind is registered in both hard and
+  budget` (backend/gp/src/lib.rs:89), from EXT-25 (`performance_rows` → `annotator::budget::rows`). Owner: annotator.
+- Branch base: the annotator commits 6a01aba, 539d3a1, f2b2a7e, 30d1a45, 367abc0 are all in `m2` now (m2 00b77b2);
+  `git log m2..m2-perf` is only a7e39ef, 80d313d, 0d83aa4, 376e668 and this pass, so no rebase is needed.

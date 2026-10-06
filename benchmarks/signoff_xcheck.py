@@ -120,7 +120,8 @@ def magic(d: Path, top: str) -> dict:
     m = re.search(r"Total DRC errors found:\s*(\d+)", r.stdout)
     spice = d / f"{top}.spice"
     if m is None or not spice.is_file():
-        sys.exit(f"magic failed on {d}:\n{r.stdout[-2000:]}{r.stderr[-2000:]}")
+        # Recorded per fixture: one failed magic run must not drop the others' summary.
+        return {"error": f"exit {r.returncode}: {(r.stdout + r.stderr).strip()[-500:]}", "drc": None, "ground": {}, "coupling": {}}
     ground, coupling = {}, {}
     for line in spice.read_text().splitlines():
         c = CAP.match(line)
@@ -171,7 +172,11 @@ def main() -> int:
     # PERF-16: `bench --pex-cal` rows gain magic's ground C and |C_field − C_magic|/C_magic.
     cal_path = ROOT / "target/bench/pex_cal.json"
     cal = json.loads(cal_path.read_text()) if cal_path.is_file() else {}
-    for d in sorted((ROOT / "target/bench_debug").iterdir()):
+    debug = ROOT / "target/bench_debug"
+    if not debug.is_dir():
+        print(f"{debug} missing: run `cargo run --release -p benchmark --bin bench local` first", file=sys.stderr)
+        return 2
+    for d in sorted(debug.iterdir()):
         top = d.name
         if not (d / f"{top}.gds").is_file():
             continue
@@ -184,6 +189,9 @@ def main() -> int:
         summary[top] = {"drc": {"foundry": len(items), "magic": mg["drc"], "gpurify": gp["drc"]},
                         "lvs": {"foundry": lvs, "gpurify": gp["lvs"]},
                         "foundry_findings": findings, "caps": caps}
+        if "error" in mg:
+            summary[top]["magic_error"] = mg["error"]
+            bad.append(f"{top}: magic failed")
         for row in cal.get(top, {}).get("nets", []):
             cm = mg["ground"].get(row["net"])
             row["c_magic"] = cm
@@ -209,7 +217,7 @@ def main() -> int:
         for f in s["foundry_findings"]:
             k = f"{f['origin']}:{f['rule']}"
             by[k] = by.get(k, 0) + 1
-        print(f"{top:<18}{s['drc']['foundry']:>9}{s['drc']['magic']:>7}{s['drc']['gpurify']:>5}  "
+        print(f"{top:<18}{s['drc']['foundry']:>9}{str(s['drc']['magic']):>7}{s['drc']['gpurify']:>5}  "
               f"{s['lvs']['foundry']:<10}{s['lvs']['gpurify']:<9}{' '.join(f'{k}={v}' for k, v in sorted(by.items()))}")
     for b in bad:
         print("FAIL", b)
