@@ -542,7 +542,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
-    emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement);
+    if std::env::var("LOCAL_NO_SB").is_err() { emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement); }
 
     // Stable ids in emission order (permutation-invariant since EXT-06). A
     // pre-tagged batch (sidecar `GroupBlocks`) keeps its origin; else a

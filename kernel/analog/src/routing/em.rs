@@ -502,6 +502,24 @@ mod tests {
         assert!(all.known(&r) && all.satisfied(&r), "6 ≥ 3: {}", all.residual(&r));
     }
 
+    /// Three cuts in one column (same centre x) on a met1 trunk along x, each
+    /// under its own tall met2 pad (350 × 500) reaching only the next cut: one
+    /// group by chained pads, no upper metal touching all three. Only the trunk
+    /// is common, and across it all 3 face the current: 700 µA ≤ 3 × 290. A
+    /// pad touching cut 0 alone (long axis y, centres apart) would say 1.
+    #[test]
+    fn only_a_metal_touching_every_cut_sets_the_front_row() {
+        let mut wires = vec![shape(1, 0, -100, 10_000, 1_200)];
+        for y in [0, 400, 800] {
+            wires.push(shape(3, 4_125, y - 50, 350, 500));
+            wires.push(shape(2, 4_200, y, 200, 200));
+        }
+        let r = routes(wires, vec![term(9_800, 0, 200, 800, Some(700.0)), term(4_200, 1_150, 200, 100, Some(-700.0))]);
+        let e = em();
+        assert!(e.known(&r) && e.satisfied(&r), "{}", e.residual(&r));
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4, "{:?}", e.usage(&r));
+    }
+
     #[test]
     fn hbm_2kv_on_sky130_met1_needs_18_6um() {
         assert!((esd_area_um2(2000., 2.7, 2.42) - 6.68).abs() < 0.01, "{}", esd_area_um2(2000., 2.7, 2.42));
