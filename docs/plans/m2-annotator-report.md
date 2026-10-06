@@ -92,8 +92,7 @@ fixes). Each column was built from `git archive`.
 
 ## EXT-21/25 (segment 5)
 
-- EXT-21's real-data acceptance and EXT-25 step L are pending: both read sensitivities from PERF-12
-  (`perf::to_evidence`), which is not in m2. Only the unit/fixture tests cover them here.
+- EXT-21's real-data acceptance and EXT-25 step L were pending here on PERF-12; both landed in segment 7.
 - `perf_postlayout` (release, run in review 5): 17 pass, 1 fails, the already-documented `ota_probe_regions`.
 - Drain-only nets lose their parasitic budget until a sidecar `Load` states it (AA-25). No metric was
   measured against the base for this change, so any moved metric is unknown.
@@ -116,3 +115,28 @@ fixes). Each column was built from `git archive`.
 - `drawn_cards::a_mim_dac_signs_off_with_its_capacitors` (release) fails `lvs.floating_net` at this branch's base
   `18c07fe` with the annotator/analog/library sources reverted too: pre-existing, not from this segment (m2's later
   CELL-22 merge passes it on `integrate`).
+
+## EXT-21/25 (segment 7) and review fixes 7
+
+- EXT-21 real-data acceptance (`perf_postlayout::ota_allowance_follows_offset_sensitivity`, release, passes): ota tt,
+  margin set to 0.01 dB. S_dp 1.30e-3, S_load 4.73e-3 (|d_vt|, dB/mV); allowance DP 3.85 mV, load 1.06 mV. Each set's
+  S·δ = 5.0e-3 = M/K (K = 2): uncapped, equal shares.
+- EXT-25 step L: the library routes `annotator::budget::rows` (from `perf::to_evidence`) instead of the removed
+  `perf::budget_rows`. Behaviour change: both bounds of a spec read the table at the tight bound's scenario (was each
+  bound's own); helpful terms (`w ≤ 0`, zero included) are dropped (`credit_helpful = false`); headroom now subtracts
+  the process spread and the β·σ_f reserve. Sidecar `Load` now reaches the annotator (AA-25).
+- **Regression, known red, for the owner:** `perf_postlayout::a_flow_scores_its_layout_in_simulation` (release) fails
+  its `gain:min: row (` assertion: budget_rows = `["scenario tt: active", "gain:min: row with no adverse measured nets"]`.
+  Evidence for ota tt: gain f0 33.07 dB, lo 20, σ_f 1.42e-2, `d_c` = 0.0 exactly on all 7 measured nets (nets
+  0,1,2,4,5,6,8), `d_cc` 0.0 on all 28 pairs; only `d_r` is nonzero (net 7 +3.7e-5, nets 1,2,3,5 negative). The
+  gain metric does not move with ground C at the default step, so no C term is adverse. Not a sign or table-read bug:
+  the old row had the same 7 nets with weight 0 (`row (7 nets)`, vacuous). Assertion left as is; the owner decides
+  whether the test should accept an empty floor row or ota needs a C-sensitive spec. (The floor row does carry adverse
+  `r_nets` (net 7); the note counts only ground-C `nets`.)
+- `lib.rs::sidecar_loads_reach_the_annotator` is checked in release only: in debug (`cargo test -p library --lib`, the
+  card's gate) it panics on the gp `debug_assert` at `backend/gp/src/lib.rs:89` (hard/budget kind conflict, see
+  m2-placement-report.md), until the gp owner fixes it.
+- Release `cargo test -p library` here: lib 174/174; failing, all pre-existing: `antenna_diode`, `extra_devices`,
+  `drawn_cards::a_mim_dac…`, `emit_roundtrip::run_emit_elaborate_signs_off` (LVS, m2-routing-report.md),
+  `perf_postlayout::ota_probe_regions`, plus `a_flow_scores…` above. Debug `cargo test -p annotator` fails only the
+  release-only timing test `scale.rs` (11.7 s > 2 s); this segment touches no annotator code.
