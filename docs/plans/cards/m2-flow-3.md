@@ -93,7 +93,8 @@ Edits:
    `d` in `sol.diagnostics`: `format!("{}\t{}\n", d.kind, d.message)`.
 
 Test (`frontend/cli/tests/cli.rs`, new fn `constraint_diagnostics_reach_the_report`): write
-`[{"constraint":"Align","instances":["XNOPE","XM1"]}]` to a temp file; run `philis pair.spice --pdk sky130
+`[{"constraint":"GroundPorts","ports":["NOPE"]}]` to a temp file (not the planned
+`Align`/`XNOPE`: `Align` has no sidecar reader and yields `sidecar_unsupported`); run `philis pair.spice --pdk sky130
 --starts 1 --iters 2 --outer 1 --constraints F -o DIR`; assert exit ∈ {0, 1}; `report.txt` contains a line starting
 `sidecar_unknown_name\t` (backend/annotator/src/sidecar.rs:47). Fails today (no such line). Command:
 `cargo test --release -p philis --test cli`.
