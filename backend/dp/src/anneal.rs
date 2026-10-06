@@ -214,6 +214,10 @@ impl<'a> St<'a> {
     /// logging them ([`St::undo`]) and listing them in `moved`.
     fn realize(&mut self) -> Result<(), sp::Fail> {
         self.mark();
+        // Clear the log before decoding: a failed decode then leaves nothing
+        // for `undo` to replay (not even `init`'s own first decode).
+        self.moved.clear();
+        self.u_l.clear();
         let g = Geo {
             w: &self.w,
             h: &self.h,
@@ -224,8 +228,6 @@ impl<'a> St<'a> {
             axis_grid: self.inp.rules.axis_grid,
         };
         decode(&self.tree, &g, &mut self.scratch, &mut self.out)?;
-        self.moved.clear();
-        self.u_l.clear();
         let l = &mut self.l;
         for c in 0..self.out.x0.len() {
             let (w2, h2) = (self.w[c] / 2, self.h[c] / 2);
@@ -325,7 +327,7 @@ impl<'a> St<'a> {
                     false
                 }
             }
-            (r, _) if (0.75..0.83).contains(&r) => {
+            (r, _) if (0.75..0.83).contains(&r) && n > 0 => {
                 let c = rng.below(n);
                 let set = self.inp.locks.members(c, false);
                 if set.iter().any(|&m| self.inp.fixed.get(m).copied().unwrap_or(false)) {
@@ -339,7 +341,7 @@ impl<'a> St<'a> {
                 }
                 true
             }
-            (r, _) if (0.83..0.90).contains(&r) && self.inp.variants.len() == n => self.reshape(rng.below(n), rng),
+            (r, _) if (0.83..0.90).contains(&r) && n > 0 && self.inp.variants.len() == n => self.reshape(rng.below(n), rng),
             (r, _) if (0.90..0.92).contains(&r) && !self.branches.is_empty() => {
                 let b = self.branches[rng.below(self.branches.len())];
                 self.l.branch[b] = !self.l.branch[b];
@@ -1188,6 +1190,20 @@ mod tests {
         let short = Start::Warm { tree: &t, variant: &[0; 5], orient: &[Orient::R0; 6] };
         let (.., st) = place_sp(&inp, short, Schedule::warm(), &mut gp::Prices::new(), 1);
         assert!(st.warm_fallback);
+    }
+
+    #[test]
+    fn propose_with_no_cells_draws_nothing() {
+        let reqs = Requirements::<Layout>::default();
+        let lk = locks::locks(&reqs, 0, &[]);
+        let inp = input(&[], &reqs, &lk, 0);
+        let prices = gp::Prices::new();
+        let (mut st, _, ok) = init(&inp, &Start::Constructive, &prices);
+        assert!(ok);
+        let mut rng = SplitMix64::new(8);
+        for _ in 0..1_000 {
+            assert!(!st.propose(&mut rng));
+        }
     }
 
     #[test]

@@ -376,6 +376,10 @@ pub struct Scratch {
     kp: Vec<Option<Profile>>,
     khalo: Vec<[i32; 4]>,
     knode: Vec<bool>,
+    /// Current node: per kid slot, starts on a multiple of the track pitch
+    /// (PLC-28); its mirror pairs `(lower slot, upper slot)`.
+    on_grid: Vec<bool>,
+    pairs: Vec<(usize, usize)>,
 }
 
 impl Scratch {
@@ -564,17 +568,21 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     y.clear();
     y.resize(k, 0);
 
-    let Scratch { pa, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, .. } = s;
+    let Scratch { pa, lb, lby, kw, kh, kp, khalo, knode, gcn, has_sym, on_grid, pairs, .. } = s;
     // PLC-28 step 3: a kid that is or holds a symmetry node starts on a multiple of `P`.
-    let on_grid: Vec<bool> = nd.kids.iter().map(|k| matches!(*k, Kid::Node(m) if has_sym[usize::from(m)])).collect();
+    on_grid.clear();
+    on_grid.extend(nd.kids.iter().map(|k| matches!(*k, Kid::Node(m) if has_sym[usize::from(m)])));
+    let on_grid = &*on_grid;
     let period = g.axis_grid.map(|(_, p)| p);
     let gc = &mut gcn[ni][..];
     let (pa, beta) = (&*pa, &nd.beta);
     let (kw, kh, kp, khalo, knode): (&[i32], &[i32], &[Option<Profile>], &[[i32; 4]], &[bool]) = (kw, kh, kp, khalo, knode);
     let mate = nd.sym.as_ref().map(|s| &s.mate);
-    let pairs: Vec<(usize, usize)> = mate.map_or(Vec::new(), |m| {
-        (0..k).filter(|&a| usize::from(m[a]) > a).map(|a| (a, usize::from(m[a]))).collect()
-    });
+    pairs.clear();
+    if let Some(m) = mate {
+        pairs.extend((0..k).filter(|&a| usize::from(m[a]) > a).map(|a| (a, usize::from(m[a]))));
+    }
+    let pairs = &*pairs;
     // A self kid sits at `(ax2 - w)/2`, on the lattice only when `ax2 ≡ w (mod 2·lattice)`:
     // every self kid's width must agree on that residue.
     let l2 = 2 * g.lattice.max(1);
@@ -605,7 +613,7 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
                 y[j] = v;
             }
             let mut raised = false;
-            for &(a, b) in &pairs {
+            for &(a, b) in pairs {
                 let (ca, cb) = (2 * y[a] + kh[a], 2 * y[b] + kh[b]);
                 let (lo, want) = match ca.cmp(&cb) {
                     std::cmp::Ordering::Less => (a, cb),
@@ -735,7 +743,9 @@ fn axis_snap(v: i32, lattice: i32, self_w: Option<i32>, grid: Option<(i32, i32)>
         (Some((p0, _)), Some(r)) if (p0 - r).rem_euclid(l2) != 0 => None,
         (Some((p0, p)), _) => Some(v + (p0 - v).rem_euclid(2 * p)),
         (None, Some(r)) => Some(v + (r - v).rem_euclid(l2)),
-        (None, None) => Some(round_up(v, lattice)),
+        // `Out::axis` stores the axis in whole nm, so `2·axis` must also be
+        // even: on an odd lattice step to every other multiple.
+        (None, None) => Some(round_up(v, lattice.max(1) * (1 + (lattice.max(1) & 1)))),
     }
 }
 

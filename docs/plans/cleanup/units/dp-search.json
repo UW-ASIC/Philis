@@ -1,0 +1,26 @@
+{
+  "unit": "dp-search",
+  "commits": [
+    "71de517 cleanup(dp-search): step 1",
+    "c32ca60 cleanup(dp-search): step 2",
+    "cleanup(dp-search): step 3 (this commit)"
+  ],
+  "testsAdded": 42,
+  "flaggedFixed": [
+    "sp::axis_snap: on an odd lattice a pair-only symmetry node could get an odd 2*axis; Out::axis stores whole nm, so the axis was truncated and verify rejected the decode. Now snaps to an even lattice multiple (test odd_lattice_pair_axis_is_exact).",
+    "anneal::St::realize cleared its undo log only after a successful decode, so a failed decode on the first move after init made undo replay init's own decode log and reset every cell to x = y = 0. The log is now cleared before decoding (test undo_of_the_first_move_after_init_keeps_the_layout).",
+    "anneal::St::propose: with zero cells the turn (M4) and reshape (M5) moves indexed cell 0 out of bounds; both are now guarded with n > 0 (unreachable from place_sp, test propose_with_no_cells_draws_nothing).",
+    "sp::decode_node: dropped the dead inverse-beta computation, and the per-node on_grid/pairs Vecs now live in Scratch, so a decode allocates only when a buffer grows. Tree::make_sf and M2 rewrite in place, and M3 picks a pair without a temporary Vec."
+  ],
+  "flaggedOpen": [
+    "sp::Tree::build: when a cell is paired twice on one axis, the first partner wins, but the second cell (e.g. c in (a,b),(a,c)) silently becomes a self-symmetric kid centred on the axis. Nobody asked for that constraint, and no TreeError reports it.",
+    "sp::decode: self-symmetric kids an odd number of nm wide need a half-nm axis, which Out::axis (i32 nm) cannot represent, so verify fails. The odd-lattice pair fix does not cover this case.",
+    "anneal::place_sp: no validation of Schedule.p0. p0 >= 1 gives T0 <= 0 or -inf, which turns the anneal greedy, and the 1e-3*T0 stop never fires. Termination still comes from flatness or max_temps."
+  ],
+  "seamRequests": [],
+  "risks": [
+    "No build was run (per the rules). The tests are written against APIs read in this session (Layout fields as in the existing anneal tests, gp::VariantSpace { alternatives }, SpacingTable::uniform, SplitMix64::below(0) == 0). no_cells_places_nothing assumes report/Nets/Eval accept zero cells.",
+    "No SIMD or branchless rewrite: the hot loops are the O(k^2) longest-path passes over one node's kids (k is usually under 20, and the order is data-dependent), plus realize's per-cell diff over tens to hundreds of cells. Both are too short or too dependent for fearless_simd to pay, so it was not added to Cargo.toml.",
+    "The odd-lattice axis_snap change moves axes only when lattice is odd. All current tests and decks use a 10 nm lattice, so placements are unchanged there."
+  ]
+}
