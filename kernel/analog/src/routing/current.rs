@@ -136,3 +136,73 @@ pub fn net_flow(stack: &Stack, shapes: &[Shape], terms: &[Terminal]) -> Option<N
     let drop_uv = far(far(root).0).1;
     Some(NetFlow { shape_ua, drop_uv })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::stack::Layer;
+    use pnr_core::geom::{LayerId, Rect};
+
+    /// met1 only, 0.125 Ω/□.
+    fn stack() -> Stack {
+        Stack { layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }], ..Stack::default() }
+    }
+    fn m1(x: i32, y: i32, w: i32, h: i32) -> Shape {
+        Shape { layer: LayerId(1), rect: Rect { x, y, w, h } }
+    }
+    fn term(x: i32, y: i32, w: i32, h: i32, ua: Option<f32>) -> Terminal {
+        Terminal { at: Rect { x, y, w, h }, ua }
+    }
+
+    #[test]
+    fn no_terminals_an_unknown_current_or_an_unreached_terminal_is_none() {
+        let st = stack();
+        let wire = [m1(0, 0, 10_000, 500)];
+        assert!(net_flow(&st, &wire, &[]).is_none(), "no terminals");
+        assert!(net_flow(&st, &wire, &[term(0, 0, 200, 500, Some(1.0)), term(9_800, 0, 200, 500, None)]).is_none(), "unknown current");
+        assert!(net_flow(&st, &wire, &[term(50_000, 0, 10, 10, Some(1.0))]).is_none(), "touches nothing");
+        assert!(net_flow(&st, &wire, &[term(0, 0, 200, 500, Some(1.0)), term(50_000, 0, 10, 10, Some(-1.0))]).is_none(), "open");
+        assert!(net_flow(&st, &[], &[term(0, 0, 200, 500, Some(0.0))]).is_none(), "nothing routed");
+    }
+
+    #[test]
+    fn a_lone_terminal_carries_nothing() {
+        let f = net_flow(&stack(), &[m1(0, 0, 10_000, 500)], &[term(0, 0, 200, 500, Some(0.0))]).unwrap();
+        assert_eq!(f.shape_ua, vec![0.0]);
+        assert_eq!(f.drop_uv, 0.0);
+    }
+
+    /// ±300 µA end to end: the wire carries 300 µA and drops I·R between the
+    /// pin centres, 300 µA · 0.125 Ω/□ · 9.8 µm / 0.5 µm = 735 µV. A shape
+    /// off the stack carries nothing.
+    #[test]
+    fn a_straight_wire_carries_its_current_and_drops_i_r() {
+        let wire = [m1(0, 0, 10_000, 500), Shape { layer: LayerId(9), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } }];
+        let terms = [term(0, 0, 200, 500, Some(300.0)), term(9_800, 0, 200, 500, Some(-300.0))];
+        let f = net_flow(&stack(), &wire, &terms).unwrap();
+        assert!((f.shape_ua[0] - 300.0).abs() < 1e-3, "{:?}", f.shape_ua);
+        assert_eq!(f.shape_ua[1], 0.0, "off the stack");
+        assert!((f.drop_uv - 735.0).abs() < 0.1, "{}", f.drop_uv);
+    }
+
+    /// Metamorphic: reversing every current or translating the whole net
+    /// changes neither the per-shape currents nor the drop.
+    #[test]
+    fn reversing_or_translating_the_net_changes_nothing() {
+        let wires = [m1(0, 0, 10_000, 1_000), m1(4_000, 1_000, 500, 3_000), m1(8_000, 1_000, 500, 3_000)];
+        let terms = [term(0, 400, 200, 200, Some(-500.0)), term(4_000, 3_900, 500, 100, Some(300.0)), term(8_000, 3_900, 500, 100, Some(200.0))];
+        let base = net_flow(&stack(), &wires, &terms).unwrap();
+        let rev: Vec<Terminal> = terms.iter().map(|t| Terminal { ua: t.ua.map(|i| -i), ..*t }).collect();
+        let flipped = net_flow(&stack(), &wires, &rev).unwrap();
+        assert_eq!(base.shape_ua, flipped.shape_ua);
+        assert!((base.drop_uv - flipped.drop_uv).abs() < 1e-3);
+        let mv = |r: Rect| Rect { x: r.x + 12_345, y: r.y - 6_789, ..r };
+        let w2: Vec<Shape> = wires.iter().map(|s| Shape { rect: mv(s.rect), ..*s }).collect();
+        let t2: Vec<Terminal> = terms.iter().map(|t| Terminal { at: mv(t.at), ..*t }).collect();
+        let moved = net_flow(&stack(), &w2, &t2).unwrap();
+        for (a, b) in base.shape_ua.iter().zip(&moved.shape_ua) {
+            assert!((a - b).abs() < 1e-3, "{:?} vs {:?}", base.shape_ua, moved.shape_ua);
+        }
+        assert!((base.drop_uv - moved.drop_uv).abs() < 1e-2);
+    }
+}

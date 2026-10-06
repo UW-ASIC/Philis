@@ -669,4 +669,80 @@ mod tests {
         assert!((l.width_nm(500.0, 1_000_000.0) - 500.0).abs() < 1e-3);
         assert!((Limit { blech: 0.0, ..l }.width_nm(500.0, 20_000.0) - 500.0).abs() < 1e-3);
     }
+
+    /// `F ≤ 1` always: at or below the rating, with no exponent, with an
+    /// unknown (NaN) temperature, and with a nonsensical negative `Ea`.
+    #[test]
+    fn derate_never_credits() {
+        assert_eq!(derate(363.15, 363.15, 0.9, 1.1), 1.0);
+        assert_eq!(derate(400.0, 363.15, 0.9, 0.0), 1.0, "n ≤ 0");
+        assert_eq!(derate(f32::NAN, 363.15, 0.9, 1.1), 1.0, "unknown temperature");
+        assert!(derate(400.0, 363.15, -0.9, 1.1) <= 1.0, "a negative Ea never credits");
+        assert!(derate(400.0, 363.15, 0.9, 1.1) < 1.0);
+    }
+
+    #[test]
+    fn limit_width_and_cuts_corner_cases() {
+        let l = Limit { ua_per_um: 1_000.0, ua_per_cut: 290.0, blech: 0.0 };
+        assert_eq!(Limit::default().width_nm(500.0, 1e6), 0.0, "unknown limit");
+        assert_eq!(l.width_nm(-500.0, 0.0), 500.0, "sign is direction only");
+        assert_eq!(l.width_nm(0.0, 0.0), 0.0);
+        assert_eq!(Limit::default().cuts(1e6), 1, "unknown limit");
+        assert_eq!(l.cuts(0.0), 1, "a via is at least one cut");
+        assert_eq!(l.cuts(580.0), 2);
+        assert_eq!(l.cuts(581.0), 3);
+        assert_eq!(l.cuts(-581.0), 3);
+        assert_eq!(Limit { blech: 7.0, ..l }.derated(0.5), Limit { ua_per_um: 500.0, ua_per_cut: 145.0, blech: 7.0 });
+    }
+
+    #[test]
+    fn front_row_counts_the_cuts_across_the_current() {
+        let c = |x, y| Rect { x, y, w: 200, h: 200 };
+        let (a, b, d) = (c(0, 0), c(0, 500), c(500, 0));
+        let along_x = Rect { x: -100, y: -100, w: 5_000, h: 1_000 };
+        assert_eq!(front_row(&[&a, &b, &d], &along_x), 2, "column x = 0 holds two");
+        assert_eq!(front_row(&[&a, &b, &d], &Rect { w: 1_000, h: 5_000, ..along_x }), 2, "row y = 0 holds two");
+        assert_eq!(front_row(&[&a, &b, &d], &Rect { w: 1_000, h: 1_000, ..along_x }), 3, "square: all");
+        assert_eq!(front_row(&[], &along_x), 0);
+    }
+
+    /// 1 µm² over 1 µm of thickness needs a 1 µm short side; cuts have no
+    /// cross-section floor.
+    #[test]
+    fn esd_width_ignores_cuts_and_reads_need_over_have() {
+        let st: &'static Stack = Box::leak(Box::new(Stack {
+            layers: vec![Layer { id: 1, thickness_nm: 1_000.0, ..Layer::default() }, Layer { id: 2, cut: true, thickness_nm: 1_000.0, ..Layer::default() }],
+            ..Stack::default()
+        }));
+        let e = EsdWidth { net: NetId(0), area_um2: 1.0, stack: st };
+        let only_cut = routes(vec![shape(2, 0, 0, 100, 100)], vec![]);
+        assert!(!e.known(&only_cut) && e.satisfied(&only_cut));
+        assert!(!e.known(&Routes::default()));
+        let r = routes(vec![shape(1, 0, 0, 10_000, 500), shape(2, 0, 0, 100, 100)], vec![]);
+        assert!(e.known(&r) && !e.satisfied(&r));
+        assert!((e.residual(&r) - 0.5).abs() < 1e-6);
+        assert!((e.usage(&r).unwrap() - 2.0).abs() < 1e-6);
+        assert!(e.satisfied(&routes(vec![shape(1, 0, 0, 10_000, 1_000)], vec![])), "at the floor");
+        let mut v = Vec::new();
+        e.touches(&mut v);
+        assert_eq!(v, vec![0]);
+    }
+
+    #[test]
+    fn esd_area_and_metal_family_edges() {
+        assert_eq!(esd_area_um2(0.0, 2.7, 2.42), 0.0);
+        assert_eq!(metal_family(Some("Cu")), metal_family(None), "keys are case-sensitive");
+        assert_eq!(metal_family(Some("w")), metal_family(Some("al")));
+    }
+
+    #[test]
+    fn unknown_em_puts_no_pressure() {
+        let r = jog(Some(-500.0));
+        let e = Electromigration { stack: None, ..em() };
+        assert_eq!((e.headroom(&r), e.usage(&r), e.residual(&r)), (1.0, None, 0.0));
+        assert_eq!(e.failing(&r), None);
+        let mut v = Vec::new();
+        e.touches(&mut v);
+        assert_eq!(v, vec![0]);
+    }
 }

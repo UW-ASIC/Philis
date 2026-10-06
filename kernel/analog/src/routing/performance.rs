@@ -173,4 +173,57 @@ mod tests {
         b.touched(&mut ids);
         assert_eq!(ids, vec![0, 1]);
     }
+
+    #[test]
+    fn batch_identity() {
+        let b = PerformanceBudget::ground_c("x".into(), vec![NetId(0)], vec![1.0], 1.0);
+        assert_eq!((b.kind(), b.repair_kind(), b.count()), ("PerformanceBudget", crate::RepairKind::Budget, 1));
+    }
+
+    /// A helpful (negative-weight) net lowers `used`; criticality floors at 0
+    /// and the net spends nothing, so repair never targets it.
+    #[test]
+    fn a_helpful_net_spends_nothing() {
+        let b = PerformanceBudget::ground_c("x".into(), vec![NetId(0)], vec![-0.01], 1.0);
+        let r = Routes { wires: vec![wire(50)], ..Default::default() };
+        assert!((b.used(&r) + 0.5).abs() < 1e-6);
+        assert_eq!((b.criticality(&r), b.violations(&r), b.residual(&r)), (0.0, 0, 0.0));
+        let mut ids = Vec::new();
+        b.touched(&mut ids);
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    /// Exactly at the limit is met: `used ≤ limit`.
+    #[test]
+    fn at_the_limit_is_met() {
+        let b = PerformanceBudget::ground_c("x".into(), vec![NetId(0)], vec![0.0625], 1.0);
+        let r = Routes { wires: vec![wire(16)], ..Default::default() };
+        assert_eq!(b.used(&r), 1.0);
+        assert_eq!((b.violations(&r), b.residual(&r), b.criticality(&r), b.worst_usage(&r)), (0, 0.0, 1.0, Some(1.0)));
+        let mut ids = Vec::new();
+        b.violating_ids(&r, &mut ids);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn unrouted_nets_spend_nothing() {
+        let b = PerformanceBudget::ground_c("x".into(), vec![NetId(9)], vec![1.0], 1.0);
+        let r = Routes::default();
+        assert_eq!((b.used(&r), b.violations(&r), b.residual(&r), b.worst_usage(&r), b.criticality(&r)), (0.0, 0, 0.0, Some(0.0), 0.0));
+    }
+
+    /// A coupling term touches both its nets (positive weight only), and
+    /// every unmeasured term kind makes the row unknown.
+    #[test]
+    fn coupling_and_differential_terms_are_unknown() {
+        let mut b = PerformanceBudget::ground_c("x".into(), Vec::new(), Vec::new(), 1.0);
+        b.coupling = vec![(NetId(2), NetId(5), 0.1), (NetId(7), NetId(8), 0.0)];
+        let mut ids = Vec::new();
+        b.touched(&mut ids);
+        assert_eq!(ids, vec![2, 5]);
+        assert_eq!(b.unknown(&Routes::default()), 1);
+        b.coupling.clear();
+        (b.diff_pairs, b.diff_weights) = (vec![(NetId(0), NetId(1))], vec![0.1]);
+        assert_eq!(b.unknown(&Routes::default()), 1);
+    }
 }

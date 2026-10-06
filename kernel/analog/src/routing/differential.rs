@@ -365,4 +365,77 @@ mod tests {
         let r = Routes { wires: vec![vec![wire(0, 0, 10_000, 290)], vec![wire(0, 0, 10_000, 290)]], ..Default::default() };
         assert!(rc.known(&r));
     }
+
+    #[test]
+    fn rel_pct_is_the_gap_over_the_mean() {
+        assert_eq!(rel_pct(0.0, 0.0), 0.0);
+        assert_eq!(rel_pct(1.0, 3.0), 100.0);
+        assert_eq!(rel_pct(3.0, 1.0), 100.0);
+        assert_eq!(rel_pct(2.0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn per_layer_pct_counts_a_one_sided_layer_in_full() {
+        let a: BTreeMap<u16, f64> = [(1u16, 10.0)].into();
+        let b: BTreeMap<u16, f64> = [(2u16, 10.0)].into();
+        assert_eq!(per_layer_pct(&a, &b, |&x| x), 200.0);
+        assert_eq!(per_layer_pct(&b, &a, |&x| x), 200.0);
+        assert_eq!(per_layer_pct(&a, &a, |&x| x), 0.0);
+        let e: BTreeMap<u16, f64> = BTreeMap::new();
+        assert_eq!(per_layer_pct(&e, &e, |&x| x), 0.0);
+    }
+
+    /// Without layer matching only the total length counts: the 8+2 / 2+8
+    /// split passes, a 10 % longer side does not.
+    #[test]
+    fn without_layer_matching_only_total_length_counts() {
+        let p = Differential { same_layer_required: false, ..pair() };
+        let split = Routes { wires: vec![vec![seg(1, 0, 8_000, 140), seg(2, 0, 2_000, 140)], vec![seg(1, 0, 2_000, 140), seg(2, 0, 8_000, 140)]], ..Default::default() };
+        assert!(p.satisfied(&split));
+        let long = Routes { wires: vec![vec![seg(1, 0, 10_000, 140)], vec![seg(1, 0, 9_000, 140)]], ..Default::default() };
+        assert!(!p.satisfied(&long));
+        assert!((p.cost(&long) - (1_000.0 / 9_500.0 * 100.0 - 5.0)).abs() < 1e-3, "{}", p.cost(&long));
+    }
+
+    #[test]
+    fn swapping_the_sides_changes_nothing() {
+        let r = Routes { wires: vec![vec![seg(1, 0, 8_000, 140), seg(2, 0, 2_000, 140)], vec![seg(1, 0, 10_000, 140)]], ..Default::default() };
+        let swap = |d: Differential| Differential { pos: d.neg, neg: d.pos, ..d };
+        assert_eq!(pair().mismatch_pct(&r), swap(pair()).mismatch_pct(&r));
+        let rc = Differential { stack: Some(rc_stack()), ..pair() };
+        assert_eq!(rc.mismatch_pct(&r), swap(rc).mismatch_pct(&r));
+    }
+
+    #[test]
+    fn two_empty_sides_are_unknown_and_measure_nothing() {
+        let r = Routes { wires: vec![vec![], vec![]], ..Default::default() };
+        assert!(!pair().known(&r));
+        assert_eq!(pair().mismatch_pct(&r), 0.0);
+        assert_eq!(Differential { stack: Some(rc_stack()), ..pair() }.mismatch_pct(&r), 0.0);
+    }
+
+    /// A terminal no shape reaches has no R to match: a full 100 %.
+    #[test]
+    fn an_unreached_terminal_reads_a_full_mismatch() {
+        let rc = Differential { stack: Some(rc_stack()), ..pair() };
+        let r = Routes {
+            wires: vec![vec![wire(0, 0, 10_000, 290)], vec![wire(0, 1_000, 10_000, 290)]],
+            terms: vec![vec![term(0, 60), term(50_000, 60)], vec![term(0, 1_060), term(9_830, 1_060)]],
+            ..Default::default()
+        };
+        assert_eq!(rc.mismatch_pct(&r), 100.0);
+    }
+
+    #[test]
+    fn a_zero_budget_passes_only_an_exact_match() {
+        let exact = Differential { max_len_delta_pct10: 0, ..pair() };
+        let base = vec![seg(1, 0, 10_000, 140)];
+        let same = Routes { wires: vec![base.clone(), base.clone()], ..Default::default() };
+        assert!(exact.satisfied(&same) && exact.residual(&same) == 0.0);
+        let off = Routes { wires: vec![base, vec![seg(1, 0, 10_001, 140)]], ..Default::default() };
+        assert_eq!(exact.residual(&off), 1.0);
+        let mut v = Vec::new();
+        exact.touches(&mut v);
+        assert_eq!(v, vec![0, 1]);
+    }
 }

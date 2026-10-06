@@ -69,4 +69,34 @@ mod tests {
         let cut = Routes { wires: vec![vec![Shape { layer: LayerId(2), rect: Rect { x: 0, y: 0, w: 1_000, h: 500 } }]], ..Default::default() };
         assert_eq!(rule.residual(&cut), 0.0);
     }
+
+    fn gate() -> MetalOverGate {
+        let mut metals = [u16::MAX; MAX_METALS];
+        metals[0] = 1;
+        MetalOverGate { rect: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, cell: 0, metals }
+    }
+    fn m1(x: i32, y: i32, w: i32, h: i32) -> Shape {
+        Shape { layer: LayerId(1), rect: Rect { x, y, w, h } }
+    }
+
+    #[test]
+    fn edge_contact_and_cell_metal_are_not_leads() {
+        assert!(gate().satisfied(&Routes::default()));
+        let edge = Routes { wires: vec![vec![m1(1_000, 0, 500, 1_000)]], ..Default::default() };
+        assert!(gate().satisfied(&edge), "touching the edge is not over");
+        let cell = Routes { cell: vec![vec![m1(0, 0, 1_000, 1_000)]], ..Default::default() };
+        assert!(gate().satisfied(&cell), "a cell's own metal is not a routed lead");
+    }
+
+    #[test]
+    fn every_nets_overlap_adds() {
+        let two = Routes { wires: vec![vec![m1(0, 0, 1_000, 100)], vec![m1(0, 900, 1_000, 100)]], ..Default::default() };
+        assert!((gate().overlap_um2(&two) - 0.2).abs() < 1e-6);
+        assert_eq!(gate().cost(&two), gate().residual(&two));
+        // Translating gate and metal together changes nothing.
+        let mv = |s: Shape| Shape { rect: Rect { x: s.rect.x - 7_000, y: s.rect.y + 3_000, ..s.rect }, ..s };
+        let moved = Routes { wires: two.wires.iter().map(|w| w.iter().copied().map(mv).collect()).collect(), ..Default::default() };
+        let g = MetalOverGate { rect: Rect { x: -7_000, y: 3_000, w: 1_000, h: 1_000 }, ..gate() };
+        assert_eq!(g.overlap_um2(&moved), gate().overlap_um2(&two));
+    }
 }

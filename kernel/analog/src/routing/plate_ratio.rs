@@ -169,4 +169,78 @@ mod tests {
         PlateRatios(vec![rule]).separations(&mut seps);
         assert_eq!(seps, vec![(0, 1, 140, true), (0, 2, 140, true), (0, 3, 140, true), (0, 4, 140, true)]);
     }
+
+    fn set(bits: &[(u16, u32)], c_unit_af: f32) -> PlateSet {
+        PlateSet { top: NetId(0), bits: bits.iter().map(|&(n, k)| (NetId(n), k)).collect(), c_unit_af, array: Rect { x: 0, y: 0, w: 100_000, h: 1_000 } }
+    }
+    fn rule(set: PlateSet) -> PlateRatio {
+        PlateRatio { set, tol_pct10: 10, stack: area_stack(), space_nm: 140 }
+    }
+    /// A 10 µm met1 lead above the array at `x`: 2.6 µm², 78 aF.
+    fn lead(x: i32) -> Shape {
+        Shape { layer: LayerId(1), rect: Rect { x, y: 1_000, w: 260, h: 10_000 } }
+    }
+
+    #[test]
+    fn unknown_unit_c_an_unrouted_bit_or_no_bits_is_unknown() {
+        let r = Routes { wires: vec![vec![], vec![lead(0)], vec![]], ..Default::default() };
+        assert_eq!(rule(set(&[(1, 1)], f32::NAN)).spread_pct(&r), None);
+        assert_eq!(rule(set(&[(1, 1)], 0.0)).spread_pct(&r), None);
+        assert_eq!(rule(set(&[(1, 1), (2, 1)], 1_000.0)).spread_pct(&r), None, "bit 2 unrouted");
+        assert_eq!(rule(set(&[], 1_000.0)).spread_pct(&r), None);
+        let batch = PlateRatios(vec![rule(set(&[(1, 1), (2, 1)], 1_000.0))]);
+        assert_eq!((batch.unknown(&r), batch.violations(&r), batch.residual(&r)), (1, 0, 0.0));
+    }
+
+    #[test]
+    fn mirrored_equal_leads_have_no_spread() {
+        let r = Routes { wires: vec![vec![], vec![lead(0)], vec![lead(20_000)]], ..Default::default() };
+        let p = rule(set(&[(1, 1), (2, 1)], 1_000.0));
+        assert!(p.spread_pct(&r).unwrap() < 1e-3, "{:?}", p.spread_pct(&r));
+        assert_eq!(PlateRatios(vec![p.clone()]).violations(&r), 0);
+        assert_eq!(rule(set(&[(1, 1)], 1_000.0)).spread_pct(&r), Some(0.0), "one bit has nothing to differ from");
+    }
+
+    /// Equal 78 aF leads on a 1-unit and a 2-unit bit: 78 and 39 per unit,
+    /// mean 58.5, spread 19.5 / 1 000 = 1.95 %.
+    #[test]
+    fn spread_is_the_worst_per_unit_gap_over_one_unit() {
+        let r = Routes { wires: vec![vec![], vec![lead(0)], vec![lead(20_000)]], ..Default::default() };
+        let p = rule(set(&[(1, 1), (2, 2)], 1_000.0));
+        assert!((p.spread_pct(&r).unwrap() - 1.95).abs() < 0.01, "{:?}", p.spread_pct(&r));
+        let batch = |tol_pct10| PlateRatios(vec![PlateRatio { tol_pct10, ..p.clone() }]);
+        assert!((batch(10).residual(&r) - 0.95).abs() < 0.01, "{}", batch(10).residual(&r));
+        assert_eq!(batch(0).residual(&r), 1.0, "a zero tolerance fails any spread");
+        assert_eq!(batch(20).residual(&r), 0.0);
+        let mut ids = Vec::new();
+        batch(10).violating_ids(&r, &mut ids);
+        assert_eq!(ids, vec![1, 2], "the bits, not the top");
+    }
+
+    #[test]
+    fn a_zero_unit_count_reads_as_one() {
+        let r = Routes { wires: vec![vec![], vec![lead(0)]], ..Default::default() };
+        let p = rule(set(&[(1, 0)], 1_000.0));
+        assert_eq!(p.per_unit_af(&r), p.lead_af(&r));
+    }
+
+    #[test]
+    fn metal_wholly_inside_the_array_is_plate_not_lead() {
+        let inside = Shape { layer: LayerId(1), rect: Rect { x: 1_000, y: 100, w: 5_000, h: 500 } };
+        let p = rule(set(&[(1, 1)], 1_000.0));
+        assert_eq!(p.lead_af(&Routes { wires: vec![vec![], vec![inside]], ..Default::default() }), vec![0.0]);
+        let straddle = Shape { rect: Rect { y: 500, h: 1_000, ..inside.rect }, ..inside };
+        let c = p.lead_af(&Routes { wires: vec![vec![], vec![straddle]], ..Default::default() })[0];
+        assert!((c - 150.0).abs() < 0.1, "the whole straddling shape is lead: {c}");
+    }
+
+    #[test]
+    fn hooks_list_the_top_then_the_bits() {
+        let b = PlateRatios(vec![rule(set(&[(3, 1), (4, 2)], 1_000.0))]);
+        let mut t = Vec::new();
+        b.touched(&mut t);
+        assert_eq!(t, vec![0, 3, 4]);
+        assert_eq!((b.kind(), b.repair_kind(), b.count()), ("PlateRatio", crate::RepairKind::None, 1));
+        assert_eq!(PlateRatios::default().count(), 0);
+    }
 }

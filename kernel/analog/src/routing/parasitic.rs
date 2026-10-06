@@ -129,4 +129,55 @@ mod tests {
         let b = ParasiticBudget { net: NetId(0), max_len_nm: 1_000_000, max_c_af: 0, margin_pct: 20, stack: None };
         assert!((b.cost(&routes) - 0.25).abs() < 1e-6, "{}", b.cost(&routes));
     }
+
+    fn len_run(len: i32) -> Routes {
+        Routes { wires: vec![vec![Shape { layer: LayerId(0), rect: Rect { x: 0, y: 0, w: len, h: 10 } }]], ..Default::default() }
+    }
+    fn by_length(max_len_nm: i64) -> ParasiticBudget {
+        ParasiticBudget { net: NetId(0), max_len_nm, max_c_af: 0, margin_pct: 20, stack: None }
+    }
+
+    #[test]
+    fn an_unrouted_net_is_unknown_but_not_failing() {
+        let b = ParasiticBudget { net: NetId(3), ..by_length(1_000) };
+        let r = Routes::default();
+        assert!(!b.known(&r) && b.satisfied(&r));
+        assert_eq!((b.residual(&r), b.cost(&r), b.usage(&r), b.headroom(&r)), (0.0, 0.0, Some(0.0), 1.0));
+    }
+
+    #[test]
+    fn the_length_budget_is_inclusive() {
+        let b = by_length(1_000);
+        assert!(b.satisfied(&len_run(1_000)) && b.residual(&len_run(1_000)) == 0.0);
+        assert!(!b.satisfied(&len_run(1_001)));
+        assert!((b.residual(&len_run(2_000)) - 1.0).abs() < 1e-6);
+        assert_eq!(by_length(0).residual(&len_run(1)), 1.0, "a zero budget fails any metal");
+    }
+
+    /// A stack without a C budget still checks length.
+    #[test]
+    fn a_stack_without_a_c_budget_checks_length() {
+        let stack: &'static Stack = Box::leak(Box::new(Stack { layers: vec![Layer { id: 0, area_af_um2: 1e6, ..Layer::default() }], ..Stack::default() }));
+        let b = ParasiticBudget { stack: Some(stack), ..by_length(1_000) };
+        assert!(b.satisfied(&len_run(1_000)) && !b.satisfied(&len_run(1_001)));
+    }
+
+    #[test]
+    fn extract_budgets_nets_with_two_or_more_device_terminals() {
+        use pnr_core::ids::DeviceId;
+        let hg = BipartiteHypergraph {
+            device_nets: Vec::new(),
+            net_devices: vec![vec![DeviceId(0), DeviceId(1)], vec![DeviceId(0)], vec![], vec![DeviceId(2), DeviceId(2)]],
+            kinds: Vec::new(),
+            terminals: Vec::new(),
+            net_names: Vec::new(),
+        };
+        let got = ParasiticBudget::extract(&hg, &mut UnionFind::new(0));
+        assert_eq!(got.iter().map(|b| b.net.0).collect::<Vec<_>>(), vec![0, 3]);
+        assert!(got.iter().all(|b| b.stack.is_none() && b.max_c_af == 0 && b.max_len_nm > 0));
+        let mut v = Vec::new();
+        got[1].touches(&mut v);
+        assert_eq!(v, vec![3]);
+        assert!((got[0].margin() - 0.2).abs() < 1e-6);
+    }
 }

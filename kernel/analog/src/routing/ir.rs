@@ -129,4 +129,65 @@ mod tests {
         let d = ir.drop_uv(&Routes { wires: vec![wires], terms: vec![terms], ..Default::default() }).unwrap();
         assert!((d - 4_950.0).abs() <= 75.0, "terminal-resolved drop {d}");
     }
+
+    /// met1 only, 0.125 Ω/□.
+    fn st() -> &'static Stack {
+        Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, sheet_ohm: 0.125, ..Layer::default() }], ..Stack::default() }))
+    }
+    fn rule(current_ua: i32, max_drop_uv: i64) -> IrDrop {
+        IrDrop { net: NetId(0), current_ua, max_drop_uv, margin_pct: 10, stack: Some(st()) }
+    }
+    /// One 10 µm × 0.5 µm met1 wire: 20 □, 2.5 Ω.
+    fn wire() -> Routes {
+        Routes { wires: vec![vec![Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 10_000, h: 500 } }]], ..Default::default() }
+    }
+
+    #[test]
+    fn an_unknown_current_without_terminals_is_unknown_not_failing() {
+        let (r, x) = (wire(), rule(-1, 1));
+        assert!(!x.known(&r) && x.satisfied(&r));
+        assert_eq!((x.residual(&r), x.cost(&r), x.headroom(&r), x.usage(&r)), (0.0, 0.0, 1.0, None));
+    }
+
+    #[test]
+    fn an_unrouted_net_is_unknown() {
+        assert!(!rule(1_000, 1).known(&Routes::default()));
+    }
+
+    /// 1 mA · 2.5 Ω = 2 500 µV: at the budget passes, 1 µV under fails.
+    #[test]
+    fn the_bound_is_current_times_the_worst_path() {
+        let r = wire();
+        assert!(rule(1_000, 2_500).satisfied(&r) && !rule(1_000, 2_499).satisfied(&r));
+        assert!((rule(1_000, 5_000).usage(&r).unwrap() - 0.5).abs() < 1e-6);
+        assert!((rule(1_000, 5_000).headroom(&r) - 0.5).abs() < 1e-6);
+        assert_eq!(rule(1_000, 5_000).cost(&r), rule(1_000, 5_000).residual(&r));
+    }
+
+    #[test]
+    fn a_zero_budget_fails_any_drop_and_passes_none() {
+        let r = wire();
+        assert_eq!(rule(1_000, 0).residual(&r), 1.0);
+        assert!(rule(0, 0).known(&r) && rule(0, 0).satisfied(&r));
+    }
+
+    /// With an open terminal the flow is unknown, and the drop falls back to
+    /// the whole current on the worst path.
+    #[test]
+    fn an_open_terminal_falls_back_to_the_bound() {
+        let mut r = wire();
+        r.terms = vec![vec![
+            Terminal { at: Rect { x: 0, y: 0, w: 200, h: 500 }, ua: Some(1_000.0) },
+            Terminal { at: Rect { x: 50_000, y: 0, w: 10, h: 10 }, ua: Some(-1_000.0) },
+        ]];
+        assert!((rule(1_000, 5_000).usage(&r).unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hooks() {
+        let mut v = Vec::new();
+        rule(1, 1).touches(&mut v);
+        assert_eq!(v, vec![0]);
+        assert!((rule(1, 1).margin() - 0.1).abs() < 1e-6);
+    }
 }

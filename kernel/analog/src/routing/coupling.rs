@@ -380,4 +380,85 @@ mod tests {
         let classes = [c(0, NetClass::Supply), c(1, NetClass::Signal), c(2, NetClass::Ground)];
         assert_eq!(CouplingBudget::default_weights(&classes, 4), vec![0.0, 1.0, 0.0, 1.0]);
     }
+
+    /// An unrouted victim has no coupling to measure: unknown, never a
+    /// certified pass (Rule::known).
+    #[test]
+    fn an_unrouted_victim_is_unknown() {
+        let b = budget(100)[0];
+        let r = Routes { wires: vec![vec![], vec![wire(500, 0, 100, 10_000, 0)]], ..Default::default() };
+        assert!(!b.known(&r));
+        assert!(b.satisfied(&r) && b.residual(&r) == 0.0, "search cannot act on it");
+        assert!(b.known(&routes(1, 400)));
+    }
+
+    #[test]
+    fn runs_merge_collinear_pieces_and_keep_crossings_apart() {
+        assert!(runs(&[]).is_empty());
+        let (a, b) = (wire(0, 0, 5_000, 100, 0), wire(5_000, 0, 5_000, 100, 0));
+        assert_eq!(runs(&[a, b]), vec![(0, Rect { x: 0, y: 0, w: 10_000, h: 100 }, true)]);
+        let crossing = wire(2_000, -3_000, 100, 6_000, 0);
+        assert_eq!(runs(&[a, b, crossing]).len(), 2);
+        assert_eq!(runs(&[a, wire(5_000, 0, 5_000, 100, 1)]).len(), 2, "another layer never joins");
+    }
+
+    /// A collinear neighbour beyond the run's end couples over its facing
+    /// width: 12 aF · 100 nm / 400 nm = 3 aF.
+    #[test]
+    fn an_end_on_neighbour_couples_over_its_facing_width() {
+        let v = [wire(0, 0, 10_000, 100, 0)];
+        let agg = [wire(10_400, 0, 5_000, 100, 0)];
+        assert!((net_pair_af(None, &v, &agg, &[]) - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn empty_sides_couple_nothing_and_equal_wires_couple_symmetrically() {
+        let v = [wire(0, 0, 100, 10_000, 0)];
+        let a = [wire(500, 0, 100, 10_000, 0)];
+        assert_eq!(net_pair_af(None, &[], &a, &[]), 0.0);
+        assert_eq!(net_pair_af(None, &v, &[], &[]), 0.0);
+        assert_eq!(net_pair_af(None, &v, &a, &[]), net_pair_af(None, &a, &v, &[]));
+    }
+
+    /// The deck's `ε·t` replaces the 12 aF fallback where the layer has one:
+    /// 1 200 aF·nm/µm · 10 µm / 400 nm = 30 aF against 300 aF.
+    #[test]
+    fn the_decks_lateral_term_replaces_the_fallback() {
+        use crate::routing::stack::Layer;
+        let deck = Stack { layers: vec![Layer { id: 0, lateral: 1_200.0, ..Layer::default() }], ..Stack::default() };
+        let blank = Stack { layers: vec![Layer { id: 0, ..Layer::default() }], ..Stack::default() };
+        let v = [wire(0, 0, 100, 10_000, 0)];
+        let a = [wire(500, 0, 100, 10_000, 0)];
+        assert!((net_pair_af(Some(&deck), &v, &a, &[]) - 30.0).abs() < 1e-3);
+        assert!((net_pair_af(None, &v, &a, &[]) - 300.0).abs() < 1e-3);
+        assert!((net_pair_af(Some(&blank), &v, &a, &[]) - 300.0).abs() < 1e-3, "no ε·t on the layer");
+    }
+
+    #[test]
+    fn screens_are_every_other_nets_wires() {
+        let r = Routes { wires: vec![vec![wire(0, 0, 1, 1, 0)], vec![wire(1, 0, 1, 1, 0)], vec![wire(2, 0, 1, 1, 0)]], ..Default::default() };
+        assert_eq!(screens_but(&r, &[0, 2]), vec![r.wires[1][0]]);
+        assert!(screens_but(&r, &[0, 1, 2]).is_empty());
+        assert_eq!(screens_but(&r, &[]).len(), 3);
+    }
+
+    #[test]
+    fn default_weights_edge_cases() {
+        let c = |n: u16, class| NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None };
+        assert!(CouplingBudget::default_weights(&[c(0, NetClass::Supply)], 0).is_empty());
+        assert_eq!(CouplingBudget::default_weights(&[c(9, NetClass::Ground), c(1, NetClass::Substrate)], 2), vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_zero_budget_fails_any_coupling() {
+        let b = budget(0)[0];
+        let r = routes(1, 400);
+        assert_eq!(b.residual(&r), 1.0);
+        assert!(!b.satisfied(&r));
+        assert_eq!(b.usage(&r), Some(b.total_af(&r)), "a zero budget reads as 1 aF");
+        let mut v = Vec::new();
+        b.touches(&mut v);
+        assert_eq!(v, vec![0]);
+        assert!((b.margin() - 0.2).abs() < 1e-6);
+    }
 }

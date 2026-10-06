@@ -762,4 +762,143 @@ mod tests {
         let mine = [shape(1, 0, 0, 60_000, 1_000)];
         assert_eq!(latent().antenna(&mine, &[], &[shape(1, 0, 1_141, 60_000, 1_000)], &[], 1_000_000), Some((60.0, 100.0)));
     }
+
+    #[test]
+    fn union_area_perimeter_corner_cases() {
+        let r = |x, y, w, h| Rect { x, y, w, h };
+        assert_eq!(union_area_perimeter(&[]), (0.0, 0.0));
+        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 20)]), (200.0, 60.0));
+        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 10), r(20, 0, 10, 10)]), (200.0, 80.0), "disjoint");
+        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 10), r(10, 0, 10, 10)]), (200.0, 60.0), "abutting merge");
+        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 10), r(10, 10, 10, 10)]), (200.0, 80.0), "corner contact");
+        assert_eq!(union_area_perimeter(&[r(0, 0, 10, 0)]), (0.0, 0.0), "degenerate");
+        assert_eq!(union_area_perimeter(&[r(0, 0, 20, 10), r(0, 0, 10, 20)]), (300.0, 80.0), "L");
+        assert_eq!(union_area_perimeter(&[r(0, 0, 30, 30), r(10, 10, 10, 10)]), (900.0, 120.0), "contained");
+        assert_eq!(union_area_perimeter(&[r(0, 0, 30, 10), r(0, 20, 30, 10), r(0, 0, 10, 30), r(20, 0, 10, 30)]), (800.0, 160.0), "ring: the hole's edge counts");
+    }
+
+    #[test]
+    fn edge_gap_overlap_and_parallel() {
+        let a = Rect { x: 0, y: 0, w: 100, h: 100 };
+        assert_eq!(edge_gap_sq(&a, &Rect { x: 50, ..a }), 0);
+        assert_eq!(edge_gap_sq(&a, &Rect { x: 100, ..a }), 0, "touching");
+        assert_eq!(edge_gap_sq(&a, &Rect { x: 130, y: 140, ..a }), 30 * 30 + 40 * 40);
+        let d = i64::from(i32::MAX / 2) - (i64::from(i32::MIN / 2) + 100);
+        assert_eq!(edge_gap_sq(&Rect { x: i32::MIN / 2, ..a }, &Rect { x: i32::MAX / 2, ..a }), d * d, "no i32 overflow");
+        assert_eq!(overlap_area_nm2(&a, &Rect { x: 50, y: 50, ..a }), 2_500);
+        assert_eq!(overlap_area_nm2(&a, &Rect { x: 100, ..a }), 0, "touching");
+        assert_eq!(overlap_area_nm2(&a, &Rect { x: 10, y: 10, w: 10, h: 10 }), 100, "contained");
+        assert_eq!(parallel(&a, &Rect { x: 300, ..a }), Some((100, 200)));
+        assert_eq!(parallel(&a, &Rect { x: 50, y: 300, ..a }), Some((50, 200)));
+        assert_eq!(parallel(&a, &Rect { x: 100, ..a }), None, "touching");
+        assert_eq!(parallel(&a, &Rect { x: 300, y: 300, ..a }), None, "diagonal");
+        assert_eq!(parallel(&a, &Rect { x: 50, ..a }), None, "overlapping");
+    }
+
+    #[test]
+    fn shape_ohm_counts_squares_and_cuts() {
+        let metal = Layer { sheet_ohm: 0.125, ..Layer::default() };
+        assert_eq!(shape_ohm(&metal, &Rect { x: 0, y: 0, w: 10_000, h: 500 }), 2.5);
+        assert_eq!(shape_ohm(&metal, &Rect { x: 0, y: 0, w: 500, h: 10_000 }), 2.5, "orientation-free");
+        assert_eq!(shape_ohm(&metal, &Rect { x: 0, y: 0, w: 100, h: 0 }), 12.5, "a zero width counts as 1 nm");
+        assert_eq!(shape_ohm(&Layer { sheet_ohm: 4.5, cut: true, ..Layer::default() }, &Rect { x: 0, y: 0, w: 400, h: 170 }), 4.5);
+    }
+
+    #[test]
+    fn empty_and_off_stack_shapes_measure_nothing() {
+        let s = stack(0.0, 0.0, false);
+        assert_eq!(s.ground_af(&[]), 0.0);
+        assert_eq!(s.ground_af(&[shape(2, 0, 0, 170, 170)]), 0.0, "a cut has no C terms");
+        assert_eq!(s.resistance_ohm(&[]), 0.0);
+        assert_eq!(s.resistance_ohm(&[shape(9, 0, 0, 10_000, 500)]), 0.0);
+        assert_eq!(s.path_resistance_ohm(&[]), 0.0);
+        assert_eq!(s.path_resistance_ohm(&[shape(9, 0, 0, 10_000, 500)]), 0.0);
+        assert!(s.connected(&[]).is_empty());
+        assert_eq!(s.lateral_run_af(9, 1_000, 100), None);
+        assert_eq!(s.lateral_run_af(1, 1_000, 0), s.lateral_run_af(1, 1_000, 1), "a gap under 1 nm reads 1 nm");
+        assert_eq!(s.antenna(&[shape(1, 0, 0, 1_000, 1_000)], &[], &[], &[], 1), None, "no stage has a limit");
+    }
+
+    #[test]
+    fn path_resistance_bounds_each_piece() {
+        let s = stack(0.0, 0.0, false);
+        assert!((s.path_resistance_ohm(&[shape(1, 0, 0, 10_000, 500)]) - 2.5).abs() < 1e-6, "one shape: its own R");
+        let two = [shape(1, 0, 0, 10_000, 500), shape(1, 0, 5_000, 20_000, 500)];
+        assert!((s.path_resistance_ohm(&two) - 5.0).abs() < 1e-5, "two unjoined pieces: the worse");
+        let stacked = [shape(1, 0, 0, 10_000, 500), shape(3, 0, 0, 10_000, 500)];
+        assert!((s.path_resistance_ohm(&stacked) - 2.5).abs() < 1e-5, "m1 under m2 without a cut is not joined");
+    }
+
+    /// An open net: the centre lies in the piece reaching the most terminals,
+    /// so only the cut-off terminal reads `None`. The rail's ports sit at
+    /// its two pins (9.9 µm, 2.475 Ω apart), so the two branches sum to that.
+    #[test]
+    fn terminal_resistance_centres_on_the_piece_reaching_most_terminals() {
+        let s = stack(0.0, 0.0, false);
+        let rail = [shape(1, 0, 0, 10_000, 500), shape(1, 50_000, 0, 500, 500)];
+        let pin = |x| Rect { x, y: 0, w: 100, h: 500 };
+        let r = s.terminal_resistance_ohm(&rail, &[pin(0), pin(9_900), pin(50_000)]);
+        assert!(r[0].is_some() && r[1].is_some(), "{r:?}");
+        assert_eq!(r[2], None, "{r:?}");
+        assert!((r[0].unwrap() + r[1].unwrap() - 2.475).abs() < 1e-3, "{r:?}");
+        assert!(s.terminal_resistance_ohm(&rail, &[]).is_empty());
+    }
+
+    #[test]
+    fn fed_resistance_needs_a_reached_feed() {
+        let s = stack(0.0, 0.0, false);
+        let rail = [shape(1, 0, 0, 10_000, 500)];
+        let pin = |x| Rect { x, y: 0, w: 100, h: 500 };
+        assert_eq!(s.fed_resistance_ohm(&rail, &[pin(90_000)], &[pin(0), pin(9_900)]), vec![None, None]);
+        assert!(s.fed_resistance_ohm(&rail, &[pin(0)], &[]).is_empty());
+        let r = s.fed_resistance_ohm(&rail, &[pin(0)], &[pin(0), pin(9_900), pin(90_000)]);
+        assert_eq!(r[0], Some(0.0));
+        assert!((r[1].unwrap() - 2.475).abs() < 1e-4, "{r:?}");
+        assert_eq!(r[2], None);
+    }
+
+    #[test]
+    fn crossing_c_only_between_stack_adjacent_metals() {
+        let mut s = stack(0.0, 0.0, false);
+        s.layers[0].cross_af_um2 = 50.0;
+        assert_eq!(s.cross_af_um2(1, 3), Some(50.0));
+        assert_eq!(s.cross_af_um2(3, 1), Some(50.0), "either order");
+        assert_eq!(s.cross_af_um2(1, 1), None, "same layer");
+        assert_eq!(s.cross_af_um2(1, 2), None, "a cut");
+        assert_eq!(s.cross_af_um2(1, 9), None, "off the stack");
+        s.layers.push(Layer { id: 4, cut: true, ..Layer::default() });
+        s.layers.push(Layer { id: 5, ..Layer::default() });
+        assert_eq!(s.cross_af_um2(1, 5), None, "two metals apart");
+        s.layers[0].cross_af_um2 = 0.0;
+        assert_eq!(s.cross_af_um2(1, 3), None, "unknown");
+    }
+
+    #[test]
+    fn connected_joins_through_cuts_only() {
+        let s = stack(0.0, 0.0, false);
+        let shapes = [shape(1, 0, 0, 100, 100), shape(9, 0, 0, 100, 100), shape(1, 500, 0, 100, 100), shape(2, 50, 0, 50, 50), shape(3, 50, 0, 1_000, 100)];
+        let mut pieces: Vec<Vec<usize>> = s.connected(&shapes).into_iter().map(|mut p| {
+            p.sort_unstable();
+            p
+        }).collect();
+        pieces.sort();
+        assert_eq!(pieces, vec![vec![0, 3, 4], vec![2]], "m2 over the far m1 does not join it; layer 9 is off the stack");
+    }
+
+    /// A piece that touches none of the net's gate pins carries no charge.
+    #[test]
+    fn a_piece_reaching_no_gate_is_not_charged() {
+        let s = stack(100.0, 400.0, false);
+        let far = GatePin { at: Rect { x: 900_000, y: 0, w: 10, h: 10 }, dev: 0, nm2: 1_000_000 };
+        assert_eq!(s.antenna(&[shape(1, 0, 0, 200_000, 1_000)], &[], &[], &[far], 1), None);
+    }
+
+    /// Metamorphic: translating the whole net moves no antenna ratio.
+    #[test]
+    fn antenna_is_translation_invariant() {
+        let s = stack(100.0, 400.0, false);
+        let bridged = [shape(1, 0, 0, 20_000, 1_000), shape(2, 19_000, 0, 1_000, 1_000), shape(3, 19_000, 0, 142_000, 1_000), shape(2, 160_000, 0, 1_000, 1_000), shape(1, 160_000, 0, 20_000, 1_000)];
+        let moved: Vec<Shape> = bridged.iter().map(|q| Shape { rect: Rect { x: q.rect.x - 77_777, y: q.rect.y + 33_333, ..q.rect }, ..*q }).collect();
+        assert_eq!(s.antenna(&bridged, &[], &[], &[], 1_000_000), s.antenna(&moved, &[], &[], &[], 1_000_000));
+    }
 }

@@ -175,4 +175,91 @@ mod tests {
         let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![h(720, 0, 7_000), h(1_280, 3_000, 7_000)]], ..Default::default() };
         assert!((rule().coverage(&r).unwrap() - 0.4).abs() < 1e-6);
     }
+
+    /// Exactly the required share is a pass, whatever f32 rounding of the
+    /// percentage does (`0.53 · 100 < 53` and `0.59 · 100 < 59` in f32).
+    #[test]
+    fn coverage_exactly_at_the_floor_passes() {
+        for pct in [29u8, 53, 59, 80, 100] {
+            let covered = i32::from(pct) * 100;
+            let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![h(720, 0, covered), h(1_280, 0, covered)]], ..Default::default() };
+            let s = Shield { min_coverage_pct: pct, ..rule() };
+            assert!(s.satisfied(&r), "{pct} %");
+            assert_eq!(s.residual(&r), 0.0, "{pct} %");
+        }
+    }
+
+    #[test]
+    fn merge_spans_sorts_and_joins_overlapping_and_abutting() {
+        let mut v: Vec<(i32, i32)> = Vec::new();
+        merge_spans(&mut v);
+        assert!(v.is_empty());
+        let mut v = vec![(5, 9), (0, 2), (2, 3), (7, 8), (10, 12)];
+        merge_spans(&mut v);
+        assert_eq!(v, vec![(0, 3), (5, 9), (10, 12)]);
+        let mut v = vec![(4, 6)];
+        merge_spans(&mut v);
+        assert_eq!(v, vec![(4, 6)]);
+    }
+
+    #[test]
+    fn intersection_len_of_span_lists() {
+        assert_eq!(intersection_len(&[], &[(0, 10)]), 0);
+        assert_eq!(intersection_len(&[(0, 10)], &[(0, 10)]), 10);
+        assert_eq!(intersection_len(&[(0, 5), (10, 20)], &[(3, 12), (15, 30)]), 2 + 2 + 5);
+        assert_eq!(intersection_len(&[(0, 5)], &[(5, 9)]), 0, "abutting shares no length");
+        assert_eq!(intersection_len(&[(i32::MIN, i32::MAX)], &[(i32::MIN, i32::MAX)]), i64::from(i32::MAX) - i64::from(i32::MIN));
+    }
+
+    #[test]
+    fn gap_on_side_needs_the_shape_wholly_on_that_side() {
+        let v = Rect { x: 0, y: 1_000, w: 10_000, h: 140 };
+        let below = Rect { x: 0, y: 720, w: 10_000, h: 140 };
+        assert_eq!(gap_on_side(v, below, true, true), Some(140));
+        assert_eq!(gap_on_side(v, below, true, false), None);
+        assert_eq!(gap_on_side(v, Rect { y: 900, ..below }, true, true), None, "straddling");
+        assert_eq!(gap_on_side(v, Rect { y: 860, ..below }, true, true), Some(0), "abutting");
+        let vv = Rect { x: 1_000, y: 0, w: 140, h: 10_000 };
+        assert_eq!(gap_on_side(vv, Rect { x: 1_340, y: 0, w: 140, h: 10_000 }, false, false), Some(200));
+    }
+
+    #[test]
+    fn a_vertical_victim_is_shielded_left_and_right() {
+        let v = |x: i32| Shape { layer: LayerId(1), rect: Rect { x, y: 0, w: 140, h: 10_000 } };
+        let r = Routes { wires: vec![vec![v(1_000)], vec![v(720), v(1_280)]], ..Default::default() };
+        assert!((rule().coverage(&r).unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_reference_on_another_layer_shields_nothing() {
+        let m2 = |y: i32| Shape { layer: LayerId(2), rect: Rect { x: 0, y, w: 10_000, h: 140 } };
+        let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![m2(720), m2(1_280)]], ..Default::default() };
+        assert_eq!(rule().coverage(&r), Some(0.0));
+    }
+
+    /// Square shapes (pads, cuts) have no run: a victim of only those has no
+    /// length to shield, so the rule is unknown, not passed by measurement.
+    #[test]
+    fn a_victim_of_pads_only_is_unknown() {
+        let pad = Shape { layer: LayerId(1), rect: Rect { x: 0, y: 0, w: 500, h: 500 } };
+        let r = Routes { wires: vec![vec![pad], vec![h(720, 0, 10_000)]], ..Default::default() };
+        let s = rule();
+        assert!(!s.known(&r) && s.satisfied(&r));
+        assert_eq!((s.residual(&r), s.cost(&r), s.usage(&r)), (0.0, 0.0, None));
+    }
+
+    #[test]
+    fn a_zero_floor_passes_unshielded() {
+        let r = Routes { wires: vec![vec![h(1_000, 0, 10_000)], vec![]], ..Default::default() };
+        let s = Shield { min_coverage_pct: 0, ..rule() };
+        assert!(s.satisfied(&r) && s.residual(&r) == 0.0);
+    }
+
+    #[test]
+    fn hooks() {
+        assert_eq!(rule().shield(), Some((0, 1, 200)));
+        let mut v = Vec::new();
+        rule().touches(&mut v);
+        assert_eq!(v, vec![0, 1]);
+    }
 }

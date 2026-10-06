@@ -108,4 +108,78 @@ mod tests {
         assert!(!rule().satisfied(&near));
         assert_eq!(rule().residual(&near), crate::rule::over(10.0, 280.0));
     }
+
+    fn sh(layer: u16, x: i32, y: i32, w: i32, h: i32) -> Shape {
+        Shape { layer: LayerId(layer), rect: Rect { x, y, w, h } }
+    }
+    fn floor(min_spacing_nm: i32) -> CrosstalkExclusion {
+        CrosstalkExclusion { min_spacing_nm, margin_pct: 10, ..rule() }
+    }
+    fn pair(a: Shape, b: Shape) -> Routes {
+        Routes { wires: vec![vec![a], vec![b]], ..Default::default() }
+    }
+
+    #[test]
+    fn nets_on_different_layers_always_pass() {
+        let r = pair(sh(1, 0, 0, 1_000, 260), sh(2, 0, 0, 1_000, 260));
+        let x = floor(280);
+        assert!(x.known(&r) && x.satisfied(&r));
+        assert_eq!((x.cost(&r), x.residual(&r), x.headroom(&r), x.usage(&r)), (0.0, 0.0, 1.0, None));
+    }
+
+    #[test]
+    fn overlapping_nets_have_zero_clearance() {
+        let r = pair(sh(1, 0, 0, 1_000, 260), sh(1, 500, 0, 1_000, 260));
+        let x = floor(280);
+        assert!(!x.satisfied(&r));
+        assert_eq!(x.cost(&r), 280.0);
+        assert_eq!(x.residual(&r), 1.0);
+        assert_eq!(x.usage(&r), Some(280.0));
+        assert!((x.headroom(&r) + 1.0).abs() < 1e-6);
+    }
+
+    /// Corner to corner 30 × 40 nm apart: a 50 nm Euclidean gap, the same
+    /// whichever net is `a`.
+    #[test]
+    fn a_diagonal_neighbour_counts_by_its_corner_distance() {
+        let r = pair(sh(1, 0, 0, 1_000, 260), sh(1, 1_030, 300, 1_000, 260));
+        assert_eq!(floor(280).cost(&r), 230.0);
+        assert!(floor(50).satisfied(&r) && !floor(51).satisfied(&r));
+        let swapped = CrosstalkExclusion { a: NetId(1), b: NetId(0), ..floor(280) };
+        assert_eq!(swapped.cost(&r), 230.0);
+    }
+
+    #[test]
+    fn only_same_layer_pairs_set_the_clearance() {
+        // b: a met1 run 1 740 nm off and a met2 run right over a's edge.
+        let r = Routes { wires: vec![vec![sh(1, 0, 0, 1_000, 260)], vec![sh(1, 0, 2_000, 1_000, 260), sh(2, 0, 300, 1_000, 260)]], ..Default::default() };
+        assert_eq!(floor(1_740).residual(&r), 0.0);
+        assert!(!floor(1_741).satisfied(&r));
+    }
+
+    #[test]
+    fn a_zero_floor_passes_even_an_overlap() {
+        let r = pair(sh(1, 0, 0, 1_000, 260), sh(1, 0, 0, 1_000, 260));
+        assert!(floor(0).satisfied(&r));
+        assert_eq!(floor(0).residual(&r), 0.0);
+        assert_eq!(floor(0).cost(&r), 0.0);
+    }
+
+    #[test]
+    fn extreme_coordinates_do_not_overflow() {
+        let r = pair(sh(1, -2_000_000_000, 0, 10, 10), sh(1, 2_000_000_000, 0, 10, 10));
+        assert!(floor(280).satisfied(&r));
+        assert!(floor(280).usage(&r).unwrap() < 1e-6);
+    }
+
+    #[test]
+    fn the_router_hooks_name_the_pair() {
+        let x = floor(280);
+        assert_eq!(x.keepaway(), Some((0, 1)));
+        assert_eq!(x.separation(), Some((0, 1, 280, false)));
+        let mut v = Vec::new();
+        x.touches(&mut v);
+        assert_eq!(v, vec![0, 1]);
+        assert!((x.margin() - 0.1).abs() < 1e-6);
+    }
 }
