@@ -14,18 +14,26 @@ use crate::catalog::{roles_of, PATTERNS};
 use crate::netrole::{AnnotationConfig, NetRole};
 use crate::size::{self, Drawn};
 
+/// How the two pins of a [`PinLink`] relate.
 #[derive(Debug, Clone, Copy)]
 pub enum PinRel {
+    /// Same net (both pins present).
     Same,
+    /// Different nets; an absent pin differs from any present one.
     Diff,
     /// Same net, and that net's role is `Signal`.
     SameSignal,
 }
 
+/// Which device kinds may fill a [`Slot`]. A `u8` names an earlier slot of the
+/// same pattern.
 #[derive(Debug, Clone, Copy)]
 pub enum SlotKind {
+    /// Any NMOS or PMOS.
     AnyFet,
+    /// A FET of the same polarity as slot `r`.
     SameTypeAs(u8),
+    /// A FET of the opposite polarity to slot `r` (which must be a FET).
     ComplementOf(u8),
     /// Exactly this device kind (EXT-19: bipolar slots).
     Kind(DeviceKind),
@@ -37,56 +45,88 @@ pub enum SlotKind {
 /// W/L, model and bulk), `SameLAs` is [`size::same_l_as`] (known L and model).
 #[derive(Debug, Clone, Copy)]
 pub enum SizeMatch {
+    /// No size relation.
     Any,
     ExactAs(u8),
     SameLAs(u8),
 }
 
+/// Whether a slot's device must be diode-connected (FET `D == G`, BJT `C == B`).
 #[derive(Debug, Clone, Copy)]
 pub enum DiodeReq {
+    /// Must be diode-connected.
     Required,
+    /// Must not be diode-connected.
     Forbidden,
+    /// Either.
     Any,
 }
 
+/// One device position of a [`Pattern`]: the unary and slot-relative rules a
+/// candidate device must pass.
 #[derive(Debug, Clone, Copy)]
 pub struct Slot {
+    /// Device family rule.
     pub kind: SlotKind,
+    /// Size relation to an earlier slot.
     pub size_match: SizeMatch,
+    /// Diode-connection rule.
     pub diode: DiodeReq,
-    /// The gate net must be a signal (not a rail/clock).
+    /// The gate net (a BJT's base) must be a signal (not a rail/clock); an
+    /// absent gate pin passes.
     pub gate_is_signal: bool,
 }
 
-/// `a.pin_a` and `b.pin_b` are on the same (or different) nets.
+/// Slot `a`'s pin `pin_a` and slot `b`'s pin `pin_b` relate by `rel`. Pin
+/// names are terminal names (G, D, S, B, C, E, P, N); any other name reads as
+/// an absent pin.
 #[derive(Debug, Clone, Copy)]
 pub struct PinLink {
+    /// First slot index.
     pub a: u8,
+    /// Pin of slot `a`.
     pub pin_a: &'static str,
+    /// Second slot index.
     pub b: u8,
+    /// Pin of slot `b`.
     pub pin_b: &'static str,
+    /// Required relation between the two pins' nets.
     pub rel: PinRel,
 }
 
+/// A topology template: slots plus the pin links among them. Invariant (relied
+/// on by the matcher's slot order): every slot reference in `slots` points to an earlier
+/// slot, and every link's slot indices are `< slots.len()`.
 #[derive(Debug, Clone, Copy)]
 pub struct Pattern {
+    /// Template name, unique in [`PATTERNS`].
     pub name: &'static str,
     /// Higher wins when two matches overlap.
     pub priority: u32,
+    /// Device positions, in slot order.
     pub slots: &'static [Slot],
+    /// Pin relations among the slots.
     pub links: &'static [PinLink],
 }
 
+/// One assignment of devices to a pattern's slots.
 #[derive(Debug, Clone)]
 pub struct PatternMatch {
+    /// The pattern's name (`pattern.name`).
     pub template: &'static str,
     /// The matched pattern (its roles: [`crate::catalog::roles_of`]).
     pub pattern: &'static Pattern,
-    /// Device ids in slot order.
+    /// Device ids in slot order; distinct.
     pub instances: Vec<u32>,
+    /// The pattern's priority (`pattern.priority`).
     pub priority: u32,
 }
 
+/// The net on device `cell`'s terminal named `pin`, or `None` when it has no
+/// such terminal.
+///
+/// # Panics
+/// When `cell` is not a device of `hg`.
 pub(crate) fn pin_net(hg: &BipartiteHypergraph, cell: u32, pin: &str) -> Option<NetId> {
     let i = cell as usize;
     hg.terminals[i].iter().position(|p| p == pin).map(|t| hg.device_nets[i][t])
@@ -120,10 +160,12 @@ fn pol(k: DeviceKind) -> usize {
     usize::from(matches!(k, DeviceKind::Pmos | DeviceKind::Pnp))
 }
 
-fn fet(k: DeviceKind) -> bool {
+/// NMOS or PMOS.
+pub(crate) fn fet(k: DeviceKind) -> bool {
     matches!(k, DeviceKind::Nmos | DeviceKind::Pmos)
 }
 
+/// NPN or PNP.
 fn bjt(k: DeviceKind) -> bool {
     matches!(k, DeviceKind::Npn | DeviceKind::Pnp)
 }
@@ -148,6 +190,7 @@ pub(crate) fn on_pin(hg: &BipartiteHypergraph, pins: &[[Option<NetId>; 8]]) -> V
     on
 }
 
+/// [`pin_net`] over the precomputed [`pins`] table.
 fn pin_of(pins: &[[Option<NetId>; 8]], cell: u32, pin: &str) -> Option<NetId> {
     pin_index(pin).and_then(|i| pins[cell as usize][i])
 }
@@ -178,7 +221,9 @@ fn unary_ok(slot: &Slot, s: &Search, cell: u32) -> bool {
     family_ok && diode_ok && gate_ok
 }
 
-/// `assigned` is indexed by slot; every slot `slot` refers to is assigned ([`slot_order`]).
+/// Whether `cell` may fill `slot`: [`unary_ok`] plus the kind and size relations
+/// to earlier slots. `assigned` is indexed by slot; every slot `slot` refers to
+/// is assigned ([`slot_order`]).
 fn slot_ok(slot: &Slot, s: &Search, cell: u32, assigned: &[u32]) -> bool {
     if !unary_ok(slot, s, cell) {
         return false;
@@ -189,7 +234,7 @@ fn slot_ok(slot: &Slot, s: &Search, cell: u32, assigned: &[u32]) -> bool {
     let kind_ok = match slot.kind {
         SlotKind::AnyFet => true,
         SlotKind::SameTypeAs(r) => kind(other(r)) == dt,
-        SlotKind::ComplementOf(r) => kind(other(r)) != dt && matches!(kind(other(r)), DeviceKind::Nmos | DeviceKind::Pmos),
+        SlotKind::ComplementOf(r) => kind(other(r)) != dt && fet(kind(other(r))),
         SlotKind::Kind(_) => true,
         SlotKind::SameKindAs(r) => kind(other(r)) == dt,
     };
@@ -265,15 +310,20 @@ fn slot_order(p: &Pattern) -> Vec<usize> {
     order
 }
 
+/// One pattern's backtracking search over the per-netlist tables.
 struct Search<'a> {
     pat: &'static Pattern,
+    /// Slot fill order ([`slot_order`]).
     order: Vec<usize>,
     hg: &'a BipartiteHypergraph,
     pins: &'a [[Option<NetId>; 8]],
     on: &'a [[Vec<u32>; 16]],
     drawn: &'a [Drawn],
     roles: &'a [NetRole],
+    /// Per device: may join a match (not `do_not_identify`).
     allowed: &'a [bool],
+    /// Per device: position in `(canon, name)` order; picks the representative
+    /// slot assignment of a device set.
     rank: &'a [u32],
     /// Per slot, the devices [`Candidates::All`] tries; filled on first use.
     free: Vec<std::cell::OnceCell<Vec<u32>>>,
@@ -387,6 +437,10 @@ pub(crate) fn matches(
 /// slots assigned by least `(canon, name)` per slot ([`canonical_labels`],
 /// device names), so the result does not depend on netlist order.
 /// `cfg.do_not_identify` devices and `cfg.do_not_use` templates are skipped.
+/// `drawn`, `canon` and `names` are per device.
+///
+/// Cost: a backtracking search per pattern, bounded in practice by the
+/// candidate lists of [`on_pin`]; worst case exponential in slot count.
 #[must_use]
 pub fn recognize_all(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[NetRole], cfg: &AnnotationConfig, canon: &[u64], names: &[&str]) -> Vec<PatternMatch> {
     let allowed: Vec<bool> = (0..hg.device_count() as u32).map(|d| !cfg.do_not_identify.contains(&d)).collect();
@@ -403,6 +457,7 @@ pub fn recognize_all(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[NetRole
         .collect()
 }
 
+/// Deterministic 64-bit hash (fixed-key SipHash).
 fn hash<T: Hash>(t: &T) -> u64 {
     let mut h = DefaultHasher::new();
     t.hash(&mut h);
@@ -414,6 +469,10 @@ fn hash<T: Hash>(t: &T) -> u64 {
 /// model name and each pin's (name, net role, net degree); never an id or a
 /// model index (both depend on netlist order). `DefaultHasher::new()` has fixed
 /// keys, so labels are deterministic.
+///
+/// # Panics
+/// When `drawn` is shorter than the device count or a `drawn` model index is
+/// out of range of `models`.
 #[must_use]
 pub fn canonical_labels(hg: &BipartiteHypergraph, drawn: &[Drawn], models: &[String], roles: &[NetRole]) -> Vec<u64> {
     let role = |n: NetId| roles[n.0 as usize] as u8;
@@ -451,6 +510,10 @@ pub fn canonical_labels(hg: &BipartiteHypergraph, drawn: &[Drawn], models: &[Str
 /// Disjoint subset for `Problem::blocks` (interim, until EXT-13), in selection
 /// order: priority first, then patterns declaring pairs, then the sorted
 /// [`canonical_labels`] of the members, then their sorted names; kept greedily.
+/// The result is pairwise device-disjoint and independent of the order of `all`.
+///
+/// # Panics
+/// When a match names a device outside `canon`/`names`.
 #[must_use]
 pub fn select_disjoint(all: &[PatternMatch], canon: &[u64], names: &[&str]) -> Vec<PatternMatch> {
     let key = |m: &PatternMatch| {

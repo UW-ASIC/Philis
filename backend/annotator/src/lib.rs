@@ -53,7 +53,11 @@ pub struct Problem {
     pub blocks: Vec<Block>,
     /// Cell-tier directives (unitization, dummies, guard rings), read by `cells`.
     pub constraints: analog::Constraints,
+    /// Placement rule batches, each wrapped in [`analog::rule::Tagged`] with a
+    /// unique id (dense from 0 across placement then routing, in emission order).
     pub placement: analog::Requirements<pnr_core::Layout>,
+    /// Routing rule batches, tagged like `placement` (ids continue after it),
+    /// origin always net-class.
     pub routing: analog::Requirements<pnr_core::Routes>,
     /// Per-net class + budgets, indexed by [`pnr_core::NetId`].
     pub net_classes: Vec<analog::metadata::NetClassification>,
@@ -87,6 +91,7 @@ pub enum Coverage {
 }
 
 /// What the netlist needs, so `missing` lists only families that would apply.
+#[derive(Clone, Copy, Debug, Default)]
 struct Needs {
     /// A matched leaf (DiffPair, CurrentMirror, Load, CascodePair) exists.
     matched: bool,
@@ -139,6 +144,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     for n in [netlist.devices.len(), netlist.nets.len()] {
         assert!(n <= usize::from(u16::MAX), "annotator: {n} devices/nets exceed the u16 id space (65535)");
     }
+    let n = netlist.devices.len();
     let hg = pnr_core::BipartiteHypergraph::from_netlist(netlist);
     let mut models = Vec::new();
     let drawn: Vec<size::Drawn> = netlist.devices.iter().map(|d| size::drawn(d, &mut models)).collect();
@@ -172,28 +178,11 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     blocks.push(Block { kind: BlockKind::Glue, template: "glue", devices: glue.collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() });
 
     let groups: Vec<Vec<DeviceId>> = blocks.iter().map(|b| b.devices.clone()).collect();
-    let abutment = groups
-        .iter()
-        .map(|g| {
-            let k0 = g.first().map(|d| netlist.devices[d.0 as usize].kind);
-            if g.iter().all(|d| Some(netlist.devices[d.0 as usize].kind) == k0) {
-                g.clone()
-            } else {
-                g[..1].to_vec()
-            }
-        })
-        .collect();
+    let abutment = abutment(netlist, &groups);
 
     // A net feeding a matched device's gate is the small-signal path whose coupling
     // shows up as offset: classified Sensitive, tight budgets.
-    let mut sensitive = vec![false; netlist.devices.len()];
-    for b in block::leaves(&blocks) {
-        if b.kind.is_sensitive() {
-            for d in &b.devices {
-                sensitive[d.0 as usize] = true;
-            }
-        }
-    }
+    let sensitive = device_mask(n, block::leaves(&blocks).into_iter().filter(|b| b.kind.is_sensitive()).flat_map(|b| &b.devices));
     let gates: Vec<f32> = netlist.devices.iter().map(gate_um2).collect();
     let mut net_classes = classify::classify(&hg, &roles, &sensitive, &gates, cfg.process.gate_af_per_um2, &cfg.loads);
 
@@ -240,7 +229,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         if hier::ports_pair(netlist, a, b) {
             for (x, y) in hier::corresponding(netlist, &drawn, a, b).unwrap_or_default() {
                 if !seeded.contains(&x) && !seeded.contains(&y) {
-                    seeds.push(symmetry::Seed::Devices(x, y, analog::intent::ConstraintId(u32::MAX / 2 + k)));
+                    seeds.push(symmetry::Seed::Devices(x, y, analog::intent::ConstraintId(HIER_SEED_ID_BASE + k)));
                     k += 1;
                 }
             }
@@ -293,7 +282,6 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     intent.sets = sets::matched_sets(&reqs, &intent.compounds, &shared, &passive_sets, &block::leaves(&blocks), &canon, &drawn, &hg, &cfg.process.unit, &mut intent.diagnostics);
     // EXT-16: kind, class and style per set; the unit floors depend on the class.
     let leaves = block::leaves(&blocks);
-    let n = netlist.devices.len();
     let leaf_idx = sets::device_index(n, leaves.iter().map(|b| b.devices.as_slice()));
     let passive_idx = sets::device_index(n, passive_sets.iter().map(|p| p.devices.as_slice()));
     let mut roles = Vec::new();
@@ -389,11 +377,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         c.kind = if perfect { analog::intent::SymKind::Perfect } else { analog::intent::SymKind::Mirror };
     }
     sets::set_pairs(&mut intent.compounds, &intent.sets);
-    let load_leaf = {
-        let mut v = vec![false; n];
-        leaves.iter().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices).for_each(|d| v[d.0 as usize] = true);
-        v
-    };
+    let load_leaf = device_mask(n, leaves.iter().copied().filter(|b| b.kind == BlockKind::Load).flat_map(|b| &b.devices));
     // EXT-18: classes that need sets, then device roles, then current-source gates.
     let load_af = classify::net_load_af(&hg, &gates, cfg.process.gate_af_per_um2, &cfg.loads);
     // AA-25: a budgeted-class net on a channel and no plate whose load is off-netlist.
@@ -477,8 +461,10 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     (intent.aggressors, intent.victims) = substrate::tag(netlist, &net_classes, &intent.sets);
     intent.aggressors.extend(substrate::injectors(netlist, &net_classes, ev.op.as_ref(), cfg.policy.inj_series_ohm, &mut missing));
     let victim = substrate::victim_mask(n, &intent.victims);
-    let mut aggressor = vec![false; n];
-    intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).for_each(|a| aggressor[a.device.0 as usize] = true);
+    let aggressor = device_mask(
+        n,
+        intent.aggressors.iter().filter(|a| matches!(a.inject, analog::intent::Inject::Switching | analog::intent::Inject::Capacitive)).map(|a| &a.device),
+    );
     let mut routing = extract::routing(
         &hg,
         &net_classes,
@@ -542,7 +528,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     if let Some(why) = emit::isolation(&aggressor, &victim, &related, p.substrate, p.epi_nm, &mut placement) {
         missing.push(("Isolation", why));
     }
-    if std::env::var("LOCAL_NO_SB").is_err() { emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement); }
+    emit::substrate_balance(&aggressor, &blocks, &block_of, &mut placement);
 
     // Stable ids in emission order (permutation-invariant since EXT-06). A
     // pre-tagged batch (sidecar `GroupBlocks`) keeps its origin; else a
@@ -596,22 +582,7 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
         intent.diagnostics.push(conflict::diag(&ids, vec![DeviceId(x as u16), DeviceId(y as u16)], what));
     }
 
-    let coverage = (0..netlist.devices.len())
-        .map(|d| {
-            let c = if touched[d] {
-                Coverage::Constrained
-            } else if block_of[d] != usize::MAX {
-                Coverage::Grouped(blocks[block_of[d]].template)
-            } else if cfg.do_not_identify.contains(&(d as u32)) {
-                Coverage::Unconstrained("do_not_identify")
-            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
-                Coverage::Unconstrained("unknown size")
-            } else {
-                Coverage::Unconstrained("no pattern")
-            };
-            (DeviceId(d as u16), c)
-        })
-        .collect();
+    let coverage = coverage(netlist, &drawn, &touched, &block_of, &blocks, &cfg.do_not_identify);
 
     // REL-07: guard rings by role, from the EXT-23 tags.
     let mut constraints = constraints::assemble(netlist, &drawn, &blocks, &intent.sets);
@@ -678,6 +649,59 @@ pub fn annotate_with(netlist: &Netlist, cfg: &AnnotationConfig, ev: &Evidence) -
     let d = conflict::check(&out, netlist);
     out.intent.diagnostics.extend(d);
     out
+}
+
+/// Base of the symmetry-seed ids given to EXT-27 instance couples: far above
+/// any leaf-seed id (a leaf index), so the two ranges never collide.
+const HIER_SEED_ID_BASE: u32 = u32::MAX / 2;
+
+/// A per-device mask, `true` at every listed device.
+///
+/// # Panics
+/// When a listed device id is `≥ n`.
+fn device_mask<'a>(n: usize, devices: impl IntoIterator<Item = &'a DeviceId>) -> Vec<bool> {
+    let mut mask = vec![false; n];
+    for d in devices {
+        mask[d.0 as usize] = true;
+    }
+    mask
+}
+
+/// Diffusion-sharing permission per group ([`Problem::abutment`]): the group
+/// itself when every member has one device kind, else its first member only.
+/// An empty group stays empty.
+fn abutment(netlist: &Netlist, groups: &[Vec<DeviceId>]) -> Vec<Vec<DeviceId>> {
+    let kind = |d: &DeviceId| netlist.devices[d.0 as usize].kind;
+    groups
+        .iter()
+        .map(|g| match g.first() {
+            Some(first) if g.iter().any(|d| kind(d) != kind(first)) => vec![*first],
+            _ => g.clone(),
+        })
+        .collect()
+}
+
+/// [`Coverage`] of every device, by id: constrained when a placement batch
+/// touched it, else grouped when it sits in a recognised (non-glue) block
+/// (`block_of[d] != usize::MAX`), else the reason it is unconstrained, checked
+/// in the order `do_not_identify`, unknown size, no pattern.
+fn coverage(netlist: &Netlist, drawn: &[size::Drawn], touched: &[bool], block_of: &[usize], blocks: &[Block], do_not_identify: &std::collections::HashSet<u32>) -> Vec<(DeviceId, Coverage)> {
+    (0..netlist.devices.len())
+        .map(|d| {
+            let c = if touched[d] {
+                Coverage::Constrained
+            } else if block_of[d] != usize::MAX {
+                Coverage::Grouped(blocks[block_of[d]].template)
+            } else if do_not_identify.contains(&(d as u32)) {
+                Coverage::Unconstrained("do_not_identify")
+            } else if size::unknown_size(netlist.devices[d].kind, &drawn[d]) {
+                Coverage::Unconstrained("unknown size")
+            } else {
+                Coverage::Unconstrained("no pattern")
+            };
+            (DeviceId(d as u16), c)
+        })
+        .collect()
 }
 
 /// `cfg` plus the testbench's rails and clocks (EXT-17): with ≥ 2 distinct DC

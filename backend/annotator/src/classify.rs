@@ -45,6 +45,12 @@ pub(crate) fn budgets(class: NetClass, c_load_af: f32) -> (Option<i64>, Option<i
 /// stated load (a drain-only output) is unbudgeted, as is a net on a capacitor
 /// plate: its limit is an array spec (settling, code-dependent error) the
 /// netlist does not carry.
+///
+/// Returns one entry per net of `hg`, `net` = its index.
+///
+/// # Panics
+/// When `roles` is shorter than the net count, or `sensitive_devices` or
+/// `gate_um2` shorter than the device count.
 #[must_use]
 pub fn classify(
     hg: &BipartiteHypergraph,
@@ -98,7 +104,8 @@ pub fn classify(
 /// drain-only output: its load is off-netlist and is never invented), for a
 /// net driving gates without a gate-cap number, and on a capacitor plate: a
 /// plate net's parasitics trace to array specs (ARR-03 code-dependent error,
-/// ARR-05 settling), not a gate load.
+/// ARR-05 settling), not a gate load. A `loads` entry naming a net outside
+/// `hg` is ignored; several entries on one net add.
 pub(crate) fn net_load_af(hg: &BipartiteHypergraph, gate_um2: &[f32], gate_af_per_um2: Option<f32>, loads: &[(NetId, f32)]) -> Vec<Option<f32>> {
     let n_nets = hg.net_names.len();
     let mut load_um2 = vec![0.0f32; n_nets];
@@ -132,25 +139,34 @@ pub(crate) fn net_load_af(hg: &BipartiteHypergraph, gate_um2: &[f32], gate_af_pe
 
 /// What [`refine`] reads: everything that exists only once sets are built.
 pub struct RefineCtx<'a> {
+    /// The device–net graph the classes index.
     pub hg: &'a BipartiteHypergraph,
     /// Every pattern match, overlapping (`recognize_all`).
     pub matches: &'a [crate::pattern::PatternMatch],
+    /// Final matched sets (EXT-15/16).
     pub sets: &'a [MatchSpec],
     /// Role per `sets` entry (`MatchSpec` does not carry it).
     pub set_roles: &'a [SetRole],
+    /// Passive, bipolar-core and diode sets (EXT-19).
     pub passive: &'a [crate::passive::PassiveSet],
-    /// Net named in the caller's config (testbench-derived names excluded).
+    /// Per net: named in the caller's config (testbench-derived names excluded).
     pub user: &'a [bool],
+    /// Simulation evidence: op point (impedance, DC level) and testbench nets.
     pub ev: &'a Evidence,
     /// Sidecar `NetClass` overrides (EXT-26): first, over every rule, `User` evidence.
     pub user_classes: &'a [(NetId, NetClass)],
+    /// Top-level port nets.
     pub ports: &'a [NetId],
-    /// [`net_load_af`].
+    /// Per net capacitive load, aF ([`net_load_af`]).
     pub load_af: &'a [Option<f32>],
 }
 
-/// Gate-level logic templates: their nets are digital (EXT-18).
+/// Gate-level logic templates whose `D` follows a switching `G` (EXT-18 step 1).
 const LOGIC: [&str; 3] = ["cmos_inverter", "nand_gate", "nor_gate"];
+
+/// [`LOGIC`] plus the transmission gate: templates whose G/D (and a tgate's S)
+/// nets carry logic levels (EXT-18 step 3).
+const LOGIC_LEVEL: [&str; 4] = ["cmos_inverter", "nand_gate", "nor_gate", "transmission_gate"];
 
 /// A Signal net at or above this impedance is Sensitive (EXT-18; Philis policy).
 const HIGH_Z_OHM: f32 = 100_000.0;
@@ -162,7 +178,7 @@ pub fn bias_lines(hg: &BipartiteHypergraph) -> Vec<bool> {
     let pin = |d: u32, t: &str| crate::pattern::pin_net(hg, d, t);
     let mut only_gates: Vec<Option<bool>> = vec![None; hg.net_names.len()];
     for (d, nets) in hg.device_nets.iter().enumerate() {
-        let fet = matches!(hg.kinds[d], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
+        let fet = crate::pattern::fet(hg.kinds[d]);
         let diode = fet && pin(d as u32, "D") == pin(d as u32, "G");
         for (t, n) in hg.terminals[d].iter().zip(nets) {
             let ok = fet && (t == "G" || (t == "D" && diode));
@@ -185,6 +201,12 @@ pub fn bias_lines(hg: &BipartiteHypergraph) -> Vec<bool> {
 /// (a DAC bank's shared plate, `_s`, or a Signal net of `z ≥ 100 kΩ`); Bias
 /// (gates and diode D=G only); else the pre-pass class, so nothing Sensitive
 /// is silently demoted. Sidecar overrides (`user_classes`) precede every rule.
+///
+/// Rewrites `classes` in place (class and budgets) and returns one [`NetFacts`]
+/// per net, both indexed by net id.
+///
+/// # Panics
+/// When `classes`, `cx.user` or `cx.load_af` is shorter than the net count.
 pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts> {
     use EvidenceLevel as E;
     use NetClass as C;
@@ -226,7 +248,7 @@ pub fn refine(classes: &mut [NetClassification], cx: &RefineCtx) -> Vec<NetFacts
         s.members.iter().for_each(|m| put(&mut got, pin(u32::from(m.device.0), "G"), C::Sensitive, E::Structure));
     }
     // 3. Logic levels.
-    for m in logic(&["cmos_inverter", "nand_gate", "nor_gate", "transmission_gate"]) {
+    for m in logic(&LOGIC_LEVEL) {
         let mut ns = [nets_of(m, "G"), nets_of(m, "D")].concat();
         if m.template == "transmission_gate" {
             ns.extend(nets_of(m, "S"));
@@ -324,12 +346,13 @@ pub(crate) fn set_class(c: &mut NetClassification, class: NetClass, load_af: Opt
 
 /// Small-signal impedance to AC ground per net, Ω: `1/(Σ gds of FETs with D on
 /// the net + Σ gm of diode FETs on it)`, known only when every such gds is.
+/// All `None` without an op point; `None` for a net no FET drain touches.
 fn impedance(hg: &BipartiteHypergraph, op: Option<&crate::evidence::OpFacts>) -> Vec<Option<f32>> {
+    let Some(op) = op else { return vec![None; hg.net_names.len()] };
     let mut g: Vec<Option<f64>> = vec![None; hg.net_names.len()];
     let mut unknown = vec![false; hg.net_names.len()];
-    let Some(op) = op else { return vec![None; hg.net_names.len()] };
     for d in 0..hg.device_nets.len() {
-        if !matches!(hg.kinds[d], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
+        if !crate::pattern::fet(hg.kinds[d]) {
             continue;
         }
         let Some(dn) = crate::pattern::pin_net(hg, d as u32, "D") else { continue };
@@ -372,7 +395,8 @@ fn classify_one(
     }
 }
 
-/// Count of each class, for reporting.
+/// Count of each class present, for reporting, in order of first appearance;
+/// absent classes are left out.
 #[must_use]
 pub fn census(classes: &[NetClassification]) -> Vec<(NetClass, usize)> {
     let mut out: Vec<(NetClass, usize)> = Vec::new();

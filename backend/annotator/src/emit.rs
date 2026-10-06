@@ -36,7 +36,7 @@ use analog::matching::class::{self, phi_arm, Family, MatchClass};
 use analog::matching::mismatch::{self, Budget, Coeffs};
 use analog::placement::symmetry::SymmetryGroup;
 use analog::placement::{DtiBand, Isolation, MatchedSet, OrientCheck, OrientationSet, Proximity, SubstrateBalance, SymMode, Symmetry};
-use analog::Requirements;
+use analog::{Requirements, RuleBatch};
 use pnr_core::ids::{BranchId, DeviceId, Target};
 use pnr_core::layout::Layout;
 use pnr_core::{DeviceKind, Netlist};
@@ -44,6 +44,20 @@ use pnr_core::{DeviceKind, Netlist};
 use crate::block::{leaves, Block, BlockKind};
 use crate::size::Drawn;
 use crate::ProcessNumbers;
+
+/// Pushes `batch` into the budget arm and a copy into the cost arm: priced by
+/// overshoot, and pulled by its gradient while still inside the allowance.
+fn budget_and_cost<B: RuleBatch<Layout> + Clone + 'static>(r: &mut Requirements<Layout>, batch: B) {
+    r.budget.push(Box::new(batch.clone()));
+    r.cost.push(Box::new(batch));
+}
+
+/// Pushes `batch` into the hard arm and a copy into the cost arm: the cost copy
+/// is the gradient toward the hard feasible set.
+fn hard_and_cost<B: RuleBatch<Layout> + Clone + 'static>(r: &mut Requirements<Layout>, batch: B) {
+    r.hard.push(Box::new(batch.clone()));
+    r.cost.push(Box::new(batch));
+}
 
 /// A set's budget: an allocated MOS allowance as itself (C13), else MAT-08's rule, with the
 /// class limit only for a User/Spec class.
@@ -61,6 +75,9 @@ fn set_budget(s: &MatchSpec, offset_sigma_mv: Option<f32>) -> Budget {
 
 /// `d`'s entry of a deck `[nmos, pmos]` pair; `None` for a non-FET or a
 /// missing entry.
+///
+/// # Panics
+/// When `d` is not a device of `nl`.
 pub(crate) fn by_polarity(nl: &Netlist, d: DeviceId, v: [Option<f32>; 2]) -> Option<f32> {
     match nl.devices[d.0 as usize].kind {
         DeviceKind::Nmos => v[0],
@@ -115,7 +132,14 @@ fn area_um2(nl: &Netlist, drawn: &[Drawn], d: DeviceId) -> f32 {
 }
 
 /// Build the placement [`Requirements`] from the intent's compounds and sets
-/// plus the blocks' Stack leaves and declared selfs.
+/// plus the blocks' Stack leaves and declared selfs, then one tagged pull per
+/// sidecar `GroupBlocks` entry of ≥ 2 devices (`user_groups`: `(entry index,
+/// devices)`). Batch order within each arm is deterministic (ids are assigned
+/// from it later).
+///
+/// # Panics
+/// When a device id in `intent` or `blocks` is out of range of `nl`/`drawn`,
+/// or a set has no members.
 ///
 /// A `MatchedSet` is priced against its allowance when the deck carries its
 /// family's mismatch constant; the terms whose coefficient is missing spend
@@ -168,8 +192,7 @@ pub fn placement(
             c.pairs.iter().filter(|&&(a, b)| equal(a, b)).map(|&(a, b)| Symmetry { a: td(a), b: td(b), axis: c.axis, mode }).collect();
         syms.extend(c.selfs.iter().map(|&d| Symmetry { a: td(d), b: td(d), axis: c.axis, mode: SymMode::Perfect }));
         if !syms.is_empty() {
-            r.cost.push(Box::new(SymmetryGroup(syms.clone())));
-            r.hard.push(Box::new(SymmetryGroup(syms)));
+            hard_and_cost(&mut r, SymmetryGroup(syms));
         }
         // Mirrored devices share one trench. Ids are dense in emission order,
         // which is deterministic, so a branch never transfers between couples.
@@ -188,8 +211,7 @@ pub fn placement(
         let areas = members.iter().map(|&d| area_um2(nl, drawn, d)).collect();
         let tol_nm = p.lattice_nm.max(1) as f32 / 2.0;
         let set = MatchedSet::for_family(members.clone(), s.family, s.kind, s.class, coeffs(nl, p, members[0], s.family), set_budget(s, offset_sigma_mv), areas, tol_nm);
-        r.budget.push(Box::new(set.clone()));
-        r.cost.push(Box::new(set));
+        budget_and_cost(&mut r, set);
         if matches!(s.family, Family::Mos | Family::Bipolar) && members.len() >= 2 {
             let orient = |check| OrientationSet { members: members.clone(), check, cell_of: Vec::new() };
             r.hard.push(Box::new(orient(OrientCheck::Axis)));
@@ -201,24 +223,18 @@ pub fn placement(
             }
         }
         if s.class == MatchClass::Minimal && members.len() >= 2 {
-            let pull: Vec<Proximity> = members[1..].iter().map(|&m| prox(members[0], m)).collect();
-            r.budget.push(Box::new(pull.clone()));
-            r.cost.push(Box::new(pull));
+            budget_and_cost(&mut r, members[1..].iter().map(|&m| prox(members[0], m)).collect::<Vec<Proximity>>());
         }
     }
 
     for l in leaves(blocks).iter().filter(|l| l.kind == BlockKind::Stack && l.devices.len() == 2) {
-        let pull = vec![prox(l.devices[0], l.devices[1])];
-        r.budget.push(Box::new(pull.clone()));
-        r.cost.push(Box::new(pull));
+        budget_and_cost(&mut r, vec![prox(l.devices[0], l.devices[1])]);
     }
     // A differential stage pulls each declared self (tail, shared bias) to its input pair.
     for stage in blocks {
         let Some(dp) = leaves(std::slice::from_ref(stage)).into_iter().find(|l| l.kind == BlockKind::DiffPair && l.devices.len() == 2) else { continue };
         for &d in &stage.selfs {
-            let tail = vec![prox(d, dp.devices[0]), prox(d, dp.devices[1])];
-            r.budget.push(Box::new(tail.clone()));
-            r.cost.push(Box::new(tail));
+            budget_and_cost(&mut r, vec![prox(d, dp.devices[0]), prox(d, dp.devices[1])]);
         }
     }
 
@@ -231,8 +247,7 @@ pub fn placement(
         r.cost.push(Box::new(analog::rule::Tagged { meta, inner: Box::new(pull) }));
     }
     if !dti.is_empty() {
-        r.cost.push(Box::new(dti.clone()));
-        r.hard.push(Box::new(dti));
+        hard_and_cost(&mut r, dti);
     }
     r
 }
@@ -275,6 +290,9 @@ pub fn isolation_min_nm(kind: pnr_core::SubstrateKind, epi_nm: Option<i32>) -> i
 /// distance). Otherwise a cost-only pull at [`NOMINAL_EPI_NM`], and the
 /// returned `Some(why)` is the `missing` input that leaves it unknown: bulk has
 /// no plateau distance. `None` when calibrated or nothing was emitted.
+///
+/// `aggressor` and `victim` are per-device masks of equal length; the scan is
+/// O(aggressors · devices).
 pub fn isolation(
     aggressor: &[bool],
     victim: &[bool],
@@ -306,6 +324,9 @@ pub fn isolation(
 /// Substrate balance (REL-15, Charbon §8.3.1): every EXT-23 `aggressor` outside
 /// a two-device DiffPair's stage (`block_of`, entries of `blocks`) pulled onto
 /// the pair's bisector. Cost only: the source states no threshold.
+///
+/// `block_of[d]` is `d`'s top-level block index (`usize::MAX` outside every
+/// block), parallel to `aggressor`.
 pub fn substrate_balance(aggressor: &[bool], blocks: &[Block], block_of: &[usize], r: &mut Requirements<Layout>) {
     let dev = |d: usize| Target::Device(DeviceId(d as u16));
     let rules: Vec<SubstrateBalance> = leaves(blocks)
