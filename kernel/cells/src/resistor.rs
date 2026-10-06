@@ -81,8 +81,12 @@ impl ResModel {
     /// positive.
     #[must_use]
     pub fn seg_len(&self, w_nm: i32, target_ohm: f64, n: u32, min_nm: i32, lat: i32, tol_ppm: i32) -> Option<i32> {
+        if target_ohm.is_nan() || target_ohm <= 0.0 {
+            return None;
+        }
+        let n = n.max(1);
         let weff = self.weff(w_nm);
-        let l_um = (target_ohm / f64::from(n.max(1)) - self.head_ohm(weff)) * weff / (self.sheet_mohm as f64 / 1e3) - f64::from(self.dl_nm) / 1e3;
+        let l_um = (target_ohm / f64::from(n) - self.head_ohm(weff)) * weff / (self.sheet_mohm as f64 / 1e3) - f64::from(self.dl_nm) / 1e3;
         let lat = lat.max(1);
         let l = ((l_um * 1e3 / f64::from(lat)).round() as i32).saturating_mul(lat);
         let err = (f64::from(n) * self.ohm(w_nm, l) - target_ohm).abs() / target_ohm * 1e6;
@@ -165,7 +169,14 @@ fn unit_len(s: &Sizing, series: &[u16], process: &dyn Process) -> Option<i32> {
 
 /// Whether some string's consecutive segments sit more than one column apart (a met1 jumper).
 fn far_join(seq: &[usize]) -> bool {
-    seq.iter().enumerate().any(|(i, &g)| seq[i + 1..].iter().position(|&h| h == g).is_some_and(|k| k > 0))
+    // One pass: a string's segment is far when its previous one is not the
+    // column just before it.
+    let mut last = vec![usize::MAX; seq.iter().max().map_or(0, |&g| g + 1)];
+    seq.iter().enumerate().any(|(i, &g)| {
+        let far = last[g] != usize::MAX && last[g] + 1 != i;
+        last[g] = i;
+        far
+    })
 }
 
 /// One resistor variant: each string split into `segments` series segments
@@ -288,8 +299,9 @@ impl Cell for Resistor {
 
         // Contact column of a head, outer end first (the top head mirrors it).
         let cut_x = snap_cut(body_w / 2 - cw / 2, lat);
+        // Step at least 1 nm: a deck stating no cut size still terminates.
         let cut_ys: Vec<i32> = (0..)
-            .map(|k| border + k * (ch + cut_space))
+            .map(|k| border + k * (ch + cut_space).max(1))
             .take_while(|&y| y + ch + inner <= head_li_h)
             .collect();
         // The outermost cut of a head: where the pins land.
@@ -386,14 +398,14 @@ impl Cell for Resistor {
         let dummies = n_dev > 1 || u.is_some_and(|u| u.dummy_required);
         let class = u.and_then(|u| u.class).unwrap_or(MatchClass::Moderate);
         let env = resistor_env(class, process);
-        let k_dum = i32::from(env.min_dummies).max((env.dummy_span_nm + seg_pitch - 1) / seg_pitch);
+        let k_dum = i32::from(env.min_dummies).max((env.dummy_span_nm + seg_pitch - 1) / seg_pitch.max(1));
         // Minimal takes a minimum-width dummy; its inner edge stays a gap from
         // the end body.
         let dw = if class == MatchClass::Minimal { r("res_min_width", 0).max(process.width("poly").unwrap_or(0)) } else { body_w };
         // Plain poly takes plain (square) contacts: the precision slot is
         // the resistor body's.
         let sq_x = snap_cut(dw / 2 - ct / 2, lat);
-        let sq_ys: Vec<i32> = (0..).map(|k| border + k * (ct + cut_space)).take_while(|&y| y + ct + inner <= head_li_h).collect();
+        let sq_ys: Vec<i32> = (0..).map(|k| border + k * (ct + cut_space).max(1)).take_while(|&y| y + ct + inner <= head_li_h).collect();
         // Every poly column left to right as (x, w, seg_l), dummies included.
         let end_l = |slot: usize| sequence.get(slot).map_or(0, |&g| cols[owner[g].0].1);
         let mut columns: Vec<(i32, i32, i32)> = (0..n_cols).map(|i| (i * seg_pitch, body_w, end_l(i as usize))).collect();
@@ -486,7 +498,10 @@ fn jumper_tracks(process: &dyn Process, head: i32) -> Vec<i32> {
     let head_li_h = head - LAP;
     let pitch = m_ct + 2 * m_enc + dim(process, "met1_space");
     let first = snap_cut(border + ct + (m_ct + 2 * m_enc) + dim(process, "met1_space") + lat - 1, lat);
-    (0..).map(|k| first + k * snap_cut(pitch + lat - 1, lat)).take_while(|&y| y + m_ct + m_enc + border <= head_li_h).collect()
+    // Step at least a lattice step: a deck stating no metal rules still
+    // terminates.
+    let step = snap_cut(pitch + lat - 1, lat).max(lat);
+    (0..).map(|k| first + k * step).take_while(|&y| y + m_ct + m_enc + border <= head_li_h).collect()
 }
 
 /// [`head_len`], grown a cut lattice step at a time until `n` jumper tracks fit.

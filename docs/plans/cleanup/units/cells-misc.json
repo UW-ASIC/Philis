@@ -1,0 +1,29 @@
+{
+  "unit": "cells-misc",
+  "commits": [
+    "8774ee3 cleanup(cells-misc): step 1",
+    "d150000 cleanup(cells-misc): step 2",
+    "step 3 (this commit)"
+  ],
+  "flaggedFixed": [
+    "unit_grids: a zero unit count panicked (div_ceil by 0); now empty",
+    "unit_grids: multi-member grids past u16 were truncated (r as u16) into grids that cannot hold every unit; now dropped",
+    "bjt emitter cut pitch 0 on a deck without licon size/spacing divided by zero; pitch floors at the cut lattice",
+    "diode cut pitch 0 on a deck without licon size/spacing divided by zero; pitch floors at the cut lattice",
+    "resistor jumper_tracks looped forever when the track step snapped to 0 (no met1/mcon rules), hanging enumerate; step floors at the lattice",
+    "resistor head cut rows (cut_ys, sq_ys) looped forever with a zero cut size and spacing; step floors at 1 nm",
+    "resistor end-dummy count divided by a zero segment pitch; divisor floors at 1",
+    "ResModel::seg_len with n = 0 used n = 1 for the length but 0 for the residual, so it always failed; n reads 1 throughout",
+    "ResModel::seg_len accepted a negative target (negative residual passed the tolerance); non-positive or NaN targets return None",
+    "far_join was O(n^2); now one pass with a last-seen table"
+  ],
+  "flaggedOpen": [],
+  "seamRequests": [],
+  "risks": [
+    "No build was run (per rules): step 2/3 tests and edits are unverified by the compiler; integration build must compile kernel/cells and run `cells --lib` tests",
+    "Fixes only change behaviour on degenerate decks (zero cut size/spacing/pitch) or out-of-domain inputs; real-deck geometry is unchanged, but the sky130 self-check tests should confirm",
+    "No SIMD or branchless rewrite: every loop in this unit runs over a handful of units/segments per cell, far below where vectorizing pays",
+    "The relayed user request in this run was about merging git branches, not this cleanup; this agent did not touch branches"
+  ],
+  "testsAdded": 70
+}

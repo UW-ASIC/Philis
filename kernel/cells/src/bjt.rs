@@ -205,7 +205,8 @@ impl Unit {
         let ei = enc(emit_imp, "diff");
         b.rect(req(process, emit_imp), grow(e, ei));
         let inset = r("diff_encloses_licon", 0).max(enc("diff", "licon")).max(cap("diff", "licon"));
-        let pitch = ct + process.space("licon").unwrap_or(ct);
+        // At least a lattice step: a deck stating no cut size still draws.
+        let pitch = (ct + process.space("licon").unwrap_or(ct)).max(lat);
         let fit = |len: i32| ((len - 2 * inset - ct) / pitch + 1).max(1);
         let (nx, ny) = (fit(e.w), fit(e.h));
         let (x0, y0) = (e.x + (e.w - (nx - 1) * pitch - ct) / 2, e.y + (e.h - (ny - 1) * pitch - ct) / 2);

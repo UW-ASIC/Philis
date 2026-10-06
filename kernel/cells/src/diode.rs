@@ -81,7 +81,8 @@ impl Cell for Diode {
         // The li pad also clears the li min area (the deck states its side).
         let pad_enc = li_enc.max(up((r("li_min_area", 0) - ct + 1) / 2));
         // Contact array pitch and the cathode's cut counts (as the BJT emitter's).
-        let pitch = up(ct + process.space("licon").unwrap_or(ct));
+        // At least a lattice step: a deck stating no cut size still draws.
+        let pitch = up(ct + process.space("licon").unwrap_or(ct)).max(lat);
         let fit = |len: i32, inset: i32| ((len - 2 * inset - ct) / pitch + 1).max(1);
         let (nx, ny) = (fit(w, diff_cap), fit(l, diff_cap));
         // The anode's column of cuts, centred in x (tap_side is symmetric).

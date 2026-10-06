@@ -66,12 +66,17 @@ pub trait Cell: Clone {
 /// deduplicated. Empty when `counts` is empty.
 pub(crate) fn unit_grids(counts: &[u16]) -> Vec<(u16, u16)> {
     if let [n] = *counts {
+        if n == 0 {
+            return vec![];
+        }
         let mut cols = vec![1, n, (f64::from(n).sqrt().ceil() as u16).max(1)];
         cols.sort_unstable();
         cols.dedup();
         return cols.into_iter().map(|c| (n.div_ceil(c), c)).collect();
     }
-    analog::matching::pattern::grids(counts, 3.0).into_iter().map(|(r, c)| (r as u16, c as u16)).collect()
+    // A grid wider or taller than `u16` cannot be named by a variant: drop
+    // it rather than truncate it into one that cannot hold every unit.
+    analog::matching::pattern::grids(counts, 3.0).into_iter().filter_map(|(r, c)| Some((u16::try_from(r).ok()?, u16::try_from(c).ok()?))).collect()
 }
 
 /// Shared helpers for each generator's in-file DRC/ERC self-check: one device
