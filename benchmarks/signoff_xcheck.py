@@ -57,16 +57,44 @@ def klayout_drc(gds: Path, top: str) -> list:
     return lyrdb_items(report)
 
 
+# sky130.lvs reads devices by SPICE element letter (its reader turns only C/L
+# VPP/inductor cards into devices, everything else is standard): the
+# ngspice-style `X` subckt calls of `reference_spice` would read as calls to
+# undefined subcircuits, so LVS would compare nothing. Schematic fingers are
+# combined like the layout's (`schematic_simplify=true`).
+LETTER = (("fet", "M"), ("pnp", "Q"), ("npn", "Q"), ("res", "R"), ("cap", "C"), ("diode", "D"))
+
+
+def klayout_ref(src: Path, dst: Path) -> None:
+    out = []
+    for line in src.read_text().splitlines():
+        toks = line.split()
+        if toks and toks[0][:1].upper() == "X":
+            model = next((t for t in reversed(toks) if "=" not in t), "")
+            letter = next((l for k, l in LETTER if k in model.lower()), None)
+            if letter:
+                line = letter + line[1:]
+            if letter == "M":
+                # KLayout reads an M card's W/L in metres; reference_spice writes µm.
+                line = re.sub(r"\b([wl])=([0-9.eE+-]+)(?=\s|$)", r"\1=\2u", line, flags=re.I)
+        out.append(line)
+    dst.write_text("\n".join(out) + "\n")
+
+
 def klayout_lvs(d: Path, top: str) -> str:
     """`match` / `mismatch` from sky130.lvs called directly (run_lvs.py imports
     docopt and overrides target_netlist; every other deck variable is optional)."""
+    d = d.resolve()  # sky130.lvs resolves a relative schematic against the layout's dir
     gds, ref = d / f"{top}.lvs.gds", d / f"{top}.ref.spice"
     if not gds.is_file() or not ref.is_file():
         return "missing"
+    klayout_ref(ref, d / f"{top}.ref.klayout.spice")
+    ref = d / f"{top}.ref.klayout.spice"
     r = subprocess.run(["klayout", "-b", "-r", str(vol() / "klayout/lvs/sky130.lvs"),
                         "-rd", f"input={gds}", "-rd", f"report={d / (top + '.lvsdb')}",
                         "-rd", f"schematic={ref}", "-rd", f"target_netlist={d / (top + '.ext.cir')}",
-                        "-rd", "run_mode=deep", "-rd", f"thr={os.cpu_count() or 4}"],
+                        "-rd", "run_mode=deep", "-rd", "schematic_simplify=true",
+                        "-rd", f"thr={os.cpu_count() or 4}"],
                        capture_output=True, text=True)
     log = r.stdout + r.stderr
     if "Netlists match" in log:
@@ -99,7 +127,9 @@ def magic(d: Path, top: str) -> dict:
         if not c:
             continue
         a, b, v = c[1], c[2], float(c[3]) * SI[c[4].lower() or "f"]
-        if b.lower() in GROUND:
+        # A substrate cap is written `C net <substrate>`; magic marks it
+        # `**FLOATING` when the substrate node took a net's name.
+        if b.lower() in GROUND or line.rstrip().endswith("**FLOATING"):
             ground[a] = ground.get(a, 0.0) + v
         elif a.lower() in GROUND:
             ground[b] = ground.get(b, 0.0) + v
