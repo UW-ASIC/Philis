@@ -715,7 +715,7 @@ fn a_row_shortens_its_sensitive_net() {
     let alts: Vec<&[Macro]> = variants.iter().map(|v| &v.alternatives[..]).collect();
     let row = PerformanceBudget::ground_c("t".into(), vec![pnr_core::NetId(0)], vec![1.0], 1e-3);
     let perf = PlacePerf::new(&row, &alts, analog::placement::perf::RESERVE);
-    assert_eq!(perf.items.len(), 1, "net 0 joins two cells");
+    assert_eq!(perf.nets.len(), 1, "net 0 joins two cells");
     let coarse = layout(&[(0, 0, 5_000, 5_000), (40_000, 30_000, 5_000, 5_000), (40_000, 0, 5_000, 5_000), (0, 30_000, 5_000, 5_000)]);
     let with = Requirements { budget: vec![Box::new(perf.clone())], ..Default::default() };
     let mean = |reqs: &Requirements<Layout>| {

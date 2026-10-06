@@ -1,0 +1,20 @@
+{
+  "seam": "analog-annotator",
+  "commits": ["cleanup(seam analog-annotator): PlacePerf one Vec<PerfNet> row per net instead of parallel nets/weights/items; duplicate derive(Clone) removed"],
+  "changes": [
+    "kernel/analog/src/placement/perf.rs: PlacePerf { nets, weights, items } parallel Vecs replaced by nets: Vec<PerfNet> with pub PerfNet { net, weight, cells }; mismatched lengths are now unrepresentable, so the 'nets past weights are ignored' rule is gone",
+    "kernel/analog/src/placement/perf.rs: removed the stray duplicate #[derive(Clone)] (conflicting impls) above PlacePerf",
+    "kernel/analog/src/placement/mod.rs: re-export PerfNet",
+    "backend/dp/src/tests.rs: perf.items.len() -> perf.nets.len()",
+    "perf.rs tests rebuilt on PerfNet; 'nets_without_a_weight_are_ignored' becomes 'zero_weight_nets_cost_nothing'"
+  ],
+  "deferred": [
+    "annotator-catalog: carry Roles inside Pattern — annotator-internal (catalog.rs/pattern.rs), not on the kernel/analog boundary; touches every Pattern constant; left for an annotator pass",
+    "analog-matching: Origin::Sensitivity/Derived already removed by the unit agent; no annotator producer exists, nothing to do",
+    "aggressor_weight &'static [f32] Box::leak (tagged analog-consumers) left to that seam agent"
+  ],
+  "risks": [
+    "Not compiled (no-build rule); PlacePerf field change verified by grep: only frontend/library (uses new()) and backend/dp tests (fixed) touch it",
+    "Relayed user message asks to merge remaining branches; only main exists locally, no action taken by this seam agent"
+  ]
+}

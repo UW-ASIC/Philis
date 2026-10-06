@@ -27,7 +27,7 @@ pub use island::SymmetryIsland;
 pub use isolation::{Isolation, SubstrateBalance};
 pub use matched_set::MatchedSet;
 pub use orientation::{OrientCheck, OrientationSet};
-pub use perf::PlacePerf;
+pub use perf::{PerfNet, PlacePerf};
 pub use proximity::Proximity;
 pub use symmetry::{SymMode, Symmetry};
 
