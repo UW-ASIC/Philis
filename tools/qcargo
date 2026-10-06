@@ -2,48 +2,57 @@
 # qcargo — the machine-wide cargo build queue for Philis agents.
 #
 #   tools/qcargo <cargo args...>      (run from inside any Philis worktree)
-#   tools/qcargo --gc                 (collect now, under the lock; for idle intervals)
+#   tools/qcargo --gc                 (collect now; for idle intervals)
 #
-# Many agents edit; one machine compiles. Every heavy cargo command (build,
-# check, test, run, bench, clippy, doc) waits on one lock, so at most one build
-# runs at a time with QCARGO_JOBS compile jobs (default 6) and 2 test threads.
-# Measured 2026-10-05 on this 31 GB / 32-core machine, full release workspace
-# build: -j 2 took 2m52s, system memory peaked at 7.1 GB; -j 6 took 1m05s,
-# peaked at 8.0 GB; largest rustc ~0.64 GB. Lower it under memory pressure.
+# Many agents edit; one machine compiles. Two queues, both machine-wide:
+#   - BUILD lock: snapshot install + compile. One at a time, QCARGO_JOBS jobs
+#     (default 6). Measured 2026-10-05 on this 31 GB / 32-core machine, full
+#     release workspace build: -j 2 2m52s, 7.1 GB system peak; -j 6 1m05s,
+#     8.0 GB; largest rustc ~0.64 GB. Lower it under memory pressure.
+#   - TEST lock: running test binaries (`test`) or the built program (`run`).
+#     One at a time, 2 test threads. A long flow test no longer blocks every
+#     other agent's compile.
+# `test` compiles with `cargo test --no-run` under the build lock, then runs
+# the same `cargo test` (nothing left to compile) under the test lock; `run`
+# compiles with `cargo build` and the same cargo options. Other commands
+# (build, check, clippy, doc, bench) run entirely under the build lock.
 #
-# Builds run in one of QCARGO_WORKERS_N persistent workers (default 4: one per
-# active agent plus the integrator), not in the caller's worktree. A worker
-# sticks to the source that last used it, so its target stays warm:
-# the caller's tree (tracked + untracked, deletions included; no .git, no
-# target) is copied into the worker by checksum without preserving times, so
-# every changed file gets a fresh mtime and unchanged files keep theirs — the
-# worker's warm target stays valid. Artifacts live in the worker target the
-# first line prints; files a test writes into the source tree land in the
-# worker copy, not the caller's tree.
+# Workers: builds run in one of QCARGO_WORKERS_N persistent workers (default
+# 4), not in the caller's worktree. A worker sticks to the source that last
+# used it, so its target stays warm, and is reserved (its own lock) from
+# snapshot until the command finishes, so no other build rewrites the source a
+# running test reads; a caller whose worker is busy gets a free one. The
+# caller's tree (tracked + untracked, deletions included; no .git, no target)
+# is copied in by checksum without preserving times: changed files get a
+# fresh mtime, unchanged ones keep theirs. Artifacts live in the worker target
+# printed on the `worker=` line; files a test writes into the source tree land
+# in the worker copy, not the caller's tree.
 #
 # Incremental compilation is on for release builds too (Cargo's default is off
 # there), so an edit recompiles only what changed inside the touched crates.
 #
-# After each build, still holding the lock, the collector keeps each worker's
-# target under QCARGO_BUDGET_GB (default 15): incremental dirs first, then the
-# debug profile. Every run is recorded in $WORKERS/runs.log with its snapshot
-# identity (HEAD + hash of uncommitted and untracked changes).
+# Collector (under the build lock, skipping reserved workers): keeps each
+# worker target under QCARGO_BUDGET_GB (default 15): incremental dirs first,
+# then the debug profile. Every run is logged in $WORKERS/runs.log with its
+# snapshot identity (HEAD + hash of uncommitted and untracked changes) and its
+# queue wait, compile time and test/run time.
 set -euo pipefail
 
 WORKERS=${QCARGO_WORKERS:-/home/omare/Documents/Projects/Rust/philis-workers}
 LOCK=${QCARGO_LOCK:-/tmp/philis-build-queue.lock}
+TLOCK=${QCARGO_TEST_LOCK:-/tmp/philis-test-queue.lock}
 JOBS=${QCARGO_JOBS:-6}
 BUDGET_GB=${QCARGO_BUDGET_GB:-15}
 NW=${QCARGO_WORKERS_N:-4}
-
 mkdir -p "$WORKERS"
-touch "$LOCK" 2>/dev/null || { echo "qcargo: build queue lock $LOCK unreachable — stopping" >&2; exit 3; }
+touch "$LOCK" "$TLOCK" 2>/dev/null || { echo "qcargo: queue locks unreachable — stopping" >&2; exit 3; }
 
-# Collector (stop-the-world: callers hold the lock, so no build is running).
 gb() { du -s --block-size=1G "$1" 2>/dev/null | cut -f1; }
-collect() {
+busy() { ! flock -n "$WORKERS/w$1.lock" true 2>/dev/null; }
+collect() {  # caller holds the build lock
   for w in $(seq 1 "$NW"); do
     T="$WORKERS/w$w/target"; [ -d "$T" ] || continue
+    [ "${pick:-}" != "$w" ] && busy "$w" && continue
     for victim in "$T/debug/incremental" "$T/release/incremental" "$T/debug"; do
       [ "$(gb "$T")" -le "$BUDGET_GB" ] && break
       rm -rf "$victim" && echo "qcargo: collected $victim (budget ${BUDGET_GB}G)" >&2
@@ -58,7 +67,6 @@ fi
 
 SRC=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "qcargo: run inside a Philis worktree" >&2; exit 2; }
 
-# Snapshot identity, taken before queueing: what the caller asked to build.
 snap_id() {
   { git -C "$SRC" rev-parse HEAD
     git -C "$SRC" diff HEAD --binary
@@ -67,40 +75,7 @@ snap_id() {
 }
 SNAP=$(snap_id)
 
-T_Q=$(date +%s)
-exec 9>"$LOCK"
-echo "qcargo: queued $(date +%T) src=$SRC snapshot=$SNAP" >&2
-flock 9
-T_S=$(date +%s)
-echo "qcargo: running $(date +%T) after $((T_S - T_Q))s in queue" >&2
-
-# Worker: the one that last built this source (warm), else the least recently used.
-pick=""
-for w in $(seq 1 "$NW"); do
-  [ "$(cat "$WORKERS/w$w.owner" 2>/dev/null)" = "$SRC" ] && pick=$w
-done
-if [ -z "$pick" ]; then
-  # least recently used (a never-used worker has time 0)
-  best=""; bt=""
-  for w in $(seq 1 "$NW"); do
-    t=$(stat -c %Y "$WORKERS/w$w.owner" 2>/dev/null || echo 0)
-    if [ -z "$bt" ] || [ "$t" -lt "$bt" ]; then best=$w; bt=$t; fi
-  done
-  pick=$best
-fi
-W="$WORKERS/w$pick"
-if [ ! -d "$W/target" ] && [ -d "$WORKERS/w1/target" ]; then cp -a --reflink=auto "$WORKERS/w1/target" "$W/target"; fi
-mkdir -p "$W/src" "$W/target"
-echo "$SRC" > "$WORKERS/w$pick.owner"
-
-# Install the snapshot: checksum compare, no time preservation (fresh mtimes on change).
-# rsync from nix (GC-rooted at $WORKERS/rsync-gcroot); falls back to nix-shell if the path is gone.
-RSYNC=${QCARGO_RSYNC:-/nix/store/qy5fwvfkys6bs30y9xczrms0xvk3a04w-rsync-3.4.1/bin/rsync}
-sync_args=(-rlc --delete --exclude='/target' --exclude='.git' --exclude='/philis-workers' "$SRC"/ "$W/src"/)
-if [ -x "$RSYNC" ]; then "$RSYNC" "${sync_args[@]}"
-else nix-shell -p rsync --run "rsync $(printf '%q ' "${sync_args[@]}")"; fi
-
-# Arguments: -j after the subcommand for building commands; 2 test threads for `test`.
+# ---- arguments ---------------------------------------------------------------
 args=("$@")
 sub=""; si=-1
 for i in "${!args[@]}"; do
@@ -123,18 +98,91 @@ if [[ $sub == test || $sub == t ]] && ! has "--test-threads"; then
     args+=(-- --test-threads=2)
   fi
 fi
+# Compile-only form of a test/run command: cargo's own options, up to `--`
+# (and, for run, up to the first program argument).
+compile=()
+case "$sub" in
+  test|t)
+    compile=(); for x in "${args[@]}"; do [[ $x == -- ]] && break; compile+=("$x"); done
+    compile+=(--no-run) ;;
+  run|r)
+    VALUED=" -p --package --bin --example --features -F --target --profile --manifest-path -j --jobs --config --target-dir --message-format --color -Z "
+    compile=(); after=0; skip=0
+    for x in "${args[@]}"; do
+      if [[ $after == 1 ]]; then
+        if [[ $skip == 1 ]]; then compile+=("$x"); skip=0; continue; fi
+        [[ $x == -- ]] && break
+        if [[ $x == -* ]]; then compile+=("$x"); [[ $VALUED == *" $x "* ]] && skip=1; continue; fi
+        break   # first positional after the subcommand = program argument
+      fi
+      if [[ $x == "$sub" ]]; then compile+=(build); after=1; else compile+=("$x"); fi
+    done ;;
+esac
 
-echo "qcargo: worker=w$pick target=$W/target cmd=cargo ${args[*]}" >&2
+# ---- build lock: worker, snapshot, compile -----------------------------------
+T_Q=$(date +%s)
+exec 9>"$LOCK"
+echo "qcargo: queued $(date +%T) src=$SRC snapshot=$SNAP" >&2
+flock 9
+order() {  # affinity first, then least recently used
+  local w; for w in $(seq 1 "$NW"); do
+    [ "$(cat "$WORKERS/w$w.owner" 2>/dev/null)" = "$SRC" ] && echo "0 $w" && continue
+    echo "$(stat -c %Y "$WORKERS/w$w.owner" 2>/dev/null || echo 0) $w"
+  done | sort -n | cut -d' ' -f2
+}
+pick=""
+while :; do
+  for w in $(order); do
+    exec 8>"$WORKERS/w$w.lock"
+    if flock -n 8; then pick=$w; break; fi
+    exec 8>&-
+  done
+  [ -n "$pick" ] && break
+  flock -u 9; sleep 15; flock 9   # every worker reserved: let others finish
+done
+T_S=$(date +%s)
+W="$WORKERS/w$pick"
+mkdir -p "$W"
+if [ ! -d "$W/target" ] && [ -d "$WORKERS/w1/target" ] && [ "$W" != "$WORKERS/w1" ]; then cp -a --reflink=auto "$WORKERS/w1/target" "$W/target"; fi
+mkdir -p "$W/src" "$W/target"
+echo "$SRC" > "$WORKERS/w$pick.owner"
+echo "qcargo: running $(date +%T) after $((T_S - T_Q))s in queue; worker=w$pick target=$W/target" >&2
+
+# rsync from nix (GC-rooted at $WORKERS/rsync-gcroot); falls back to nix-shell if the path is gone.
+RSYNC=${QCARGO_RSYNC:-/nix/store/qy5fwvfkys6bs30y9xczrms0xvk3a04w-rsync-3.4.1/bin/rsync}
+sync_args=(-rlc --delete --exclude='/target' --exclude='.git' --exclude='/philis-workers' "$SRC"/ "$W/src"/)
+if [ -x "$RSYNC" ]; then "$RSYNC" "${sync_args[@]}"
+else nix-shell -p rsync --run "rsync $(printf '%q ' "${sync_args[@]}")"; fi
+
+cg() {
+  ( cd "$W/src" && \
+    CARGO_TARGET_DIR="$W/target" CARGO_BUILD_JOBS="$JOBS" \
+    CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_INCREMENTAL=true \
+    cargo --config 'profile.dev.package."*".debug=false' "$@" )
+}
 set +e
-( cd "$W/src" && \
-  CARGO_TARGET_DIR="$W/target" CARGO_BUILD_JOBS="$JOBS" \
-  CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_INCREMENTAL=true \
-  cargo --config 'profile.dev.package."*".debug=false' "${args[@]}" )
-rc=$?
+if [ ${#compile[@]} -gt 0 ]; then
+  echo "qcargo: compile: cargo ${compile[*]}" >&2
+  cg "${compile[@]}"; rc=$?
+else
+  echo "qcargo: cargo ${args[*]}" >&2
+  cg "${args[@]}"; rc=$?
+fi
 set -e
-
-T_E=$(date +%s)
-printf '%s\t%s\t%s\tw%s\trc=%s\tcargo %s\twait=%ss\trun=%ss\n' "$(date -Is)" "$SRC" "$SNAP" "$pick" "$rc" "${args[*]}" "$((T_S - T_Q))" "$((T_E - T_S))" >> "$WORKERS/runs.log"
-
+T_C=$(date +%s)
 collect
+flock -u 9; exec 9>&-
+
+# ---- test lock: run the tests / program --------------------------------------
+T_R=$T_C; T_E=$T_C
+if [ ${#compile[@]} -gt 0 ] && [ "$rc" = 0 ]; then
+  exec 7>"$TLOCK"; flock 7
+  T_R=$(date +%s)
+  echo "qcargo: test/run slot $(date +%T) after $((T_R - T_C))s; cargo ${args[*]}" >&2
+  set +e; cg "${args[@]}"; rc=$?; set -e
+  T_E=$(date +%s)
+fi
+
+printf '%s\t%s\t%s\tw%s\trc=%s\tcargo %s\twait=%ss\tcompile=%ss\ttestwait=%ss\trun=%ss\n' \
+  "$(date -Is)" "$SRC" "$SNAP" "$pick" "$rc" "${args[*]}" "$((T_S - T_Q))" "$((T_C - T_S))" "$((T_R - T_C))" "$((T_E - T_R))" >> "$WORKERS/runs.log"
 exit $rc
