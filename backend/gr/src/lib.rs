@@ -52,6 +52,7 @@ impl Negotiation {
     /// the node's **absolute** `(x, y, layer)` in nm.
     pub fn seed(&self, hist: &mut [f32], pos: impl Fn(u32) -> (i32, i32, u32)) {
         if self.hist.is_empty() {
+            hist.fill(0.0);
             return;
         }
         for (n, h) in hist.iter_mut().enumerate() {
@@ -77,13 +78,14 @@ impl Negotiation {
 /// cell's variant in isolation.
 #[must_use]
 pub fn group_hpwl(macros: &[Macro]) -> i64 {
-    let mut span: BTreeMap<u16, (i32, i32, i32, i32)> = BTreeMap::new();
+    // i64 throughout: a centre or span past i32 range must not wrap.
+    let mut span: BTreeMap<u16, (i64, i64, i64, i64)> = BTreeMap::new();
     for p in macros.iter().flat_map(|m| &m.pins) {
-        let (x, y) = (p.at.x + p.at.w / 2, p.at.y + p.at.h / 2);
+        let (x, y) = (i64::from(p.at.x) + i64::from(p.at.w) / 2, i64::from(p.at.y) + i64::from(p.at.h) / 2);
         let e = span.entry(p.net.0).or_insert((x, x, y, y));
         *e = (e.0.min(x), e.1.max(x), e.2.min(y), e.3.max(y));
     }
-    span.values().map(|&(x0, x1, y0, y1)| i64::from(x1 - x0) + i64::from(y1 - y0)).sum()
+    span.values().map(|&(x0, x1, y0, y1)| (x1 - x0) + (y1 - y0)).sum()
 }
 
 /// Route order, compact net ids (ROAD's policy, TOPO ch. 4; Lampaert 1999
@@ -122,10 +124,17 @@ pub fn order_by_priority(pins: &[usize], net_ids: &[u32], reqs: &Requirements<Ro
         };
         (shields.iter().any(|&(_, r, _)| r == net), t)
     };
-    let impact = |ci: u32| Reverse(weight.get(ci as usize).copied().unwrap_or(0.0).to_bits());
+    let impact = |ci: u32| Reverse(total_order_key(weight.get(ci as usize).copied().unwrap_or(0.0) + 0.0));
     let mut order: Vec<u32> = (0..pins.len() as u32).collect();
-    order.sort_by_key(|&a| (tier(a), impact(a), pins[a as usize], a));
+    // Cached: `tier` scans the rule lists, once per net rather than per comparison.
+    order.sort_by_cached_key(|&a| (tier(a), impact(a), pins[a as usize], a));
     order
+}
+
+/// An `i32` whose order is `f32::total_cmp`'s (`+ 0.0` first folds `-0.0` into `0.0`).
+fn total_order_key(w: f32) -> i32 {
+    let b = w.to_bits() as i32;
+    b ^ (((b >> 31) as u32) >> 1) as i32
 }
 
 /// Nets under a mirror rule (`Differential`, [`RepairKind::Mirror`]), hard or budget.
@@ -424,21 +433,33 @@ impl TrackGrid {
         let (cx, cy) = (self.bin_x(x) as i32, self.bin_y(y) as i32);
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         let mut out = Vec::new();
+        if k == 0 {
+            return out;
+        }
+        // Rings past the far side of the grid hold nothing.
+        let rmax = rmax.min(nx.max(ny));
+        let stacked = |ix: i32, iy: i32| {
+            (-2..=2).any(|d: i32| {
+                let jy = iy + d;
+                d != 0 && (0..ny).contains(&jy) && claimed[self.node(ix as u32, jy as u32, 1) as usize]
+            })
+        };
         for layer in 0..self.n_layers.min(2) {
             for r in 0..=rmax {
                 for dy in -r..=r {
-                    for dx in -r..=r {
-                        let (ix, iy) = (cx + dx, cy + dy);
-                        if dx.abs().max(dy.abs()) != r || ix < 0 || iy < 0 || ix >= nx || iy >= ny {
+                    let iy = cy + dy;
+                    if !(0..ny).contains(&iy) {
+                        continue;
+                    }
+                    // Only the ring's perimeter: full top and bottom rows, both ends between.
+                    let step = if dy.abs() == r { 1 } else { 2 * r };
+                    for dx in (-r..=r).step_by(step as usize) {
+                        let ix = cx + dx;
+                        if !(0..nx).contains(&ix) {
                             continue;
                         }
                         let n = self.node(ix as u32, iy as u32, layer);
-                        let stacked = layer == 1
-                            && (-2..=2).any(|d: i32| {
-                                let jy = iy + d;
-                                d != 0 && (0..ny).contains(&jy) && claimed[self.node(ix as u32, jy as u32, 1) as usize]
-                            });
-                        if !claimed[n as usize] && !stacked && self.on_track(n) && ok(n) {
+                        if !claimed[n as usize] && self.on_track(n) && !(layer == 1 && stacked(ix, iy)) && ok(n) {
                             out.push(n);
                             if out.len() >= k {
                                 return out;
@@ -534,11 +555,12 @@ impl RGraph for TrackGrid {
     fn within(&self, n: u32, t: u32, out: &mut Vec<u32>) {
         let (ix, iy, l) = self.ixy(n);
         let r = i64::from(t) * i64::from(self.stride(l));
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let (x, y) = (i64::from(ix) + dx, i64::from(iy) + dy);
-                if (dx, dy) != (0, 0) && x >= 0 && y >= 0 && x < i64::from(self.nx) && y < i64::from(self.ny) {
-                    out.push(self.node(x as u32, y as u32, l));
+        // The box clipped to the grid up front: no per-node bounds test.
+        let span = |c: u32, lim: u32| (i64::from(c) - r).max(0) as u32..=(i64::from(c) + r).min(i64::from(lim) - 1) as u32;
+        for y in span(iy, self.ny) {
+            for x in span(ix, self.nx) {
+                if (x, y) != (ix, iy) {
+                    out.push(self.node(x, y, l));
                 }
             }
         }
@@ -699,7 +721,7 @@ impl RouteHot {
     /// 0; a node with halos and no metal is not over.
     #[must_use]
     pub fn over(&self, n: usize, cap: u16) -> u16 {
-        if self.usage[n] > 0 { (self.usage[n] + self.halo[n]).saturating_sub(cap) } else { 0 }
+        over_cap(self.usage[n], self.halo[n], cap).min(u32::from(u16::MAX)) as u16
     }
 
     /// Price parasitics with per-net sensitivity `weight` and aggressor
@@ -943,8 +965,16 @@ impl<G: RGraph> RouteCtx<G> {
                     }
                 }
             }
-            let mut own: Vec<u32> = if foot.is_empty() { branches.iter().flatten().copied().collect() } else { foot.clone() };
-            own.sort_unstable();
+            // `foot` is already sorted; only the one-track case builds a set.
+            let one_track: Vec<u32>;
+            let own: &[u32] = if foot.is_empty() {
+                let mut v: Vec<u32> = branches.iter().flatten().copied().collect();
+                v.sort_unstable();
+                one_track = v;
+                &one_track
+            } else {
+                &foot
+            };
             halo.sort_unstable();
             halo.dedup();
             halo.retain(|n| own.binary_search(n).is_err());
@@ -1188,8 +1218,17 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     let Some(&root) = terms.first() else { return Some(Vec::new()) };
     let Dij { pops, dist, prev, seen, stamp, heap, in_tree, is_old, is_old_halo } = dij;
     // `call` marks old/tree membership for this call; each target search bumps
-    // `stamp` again for `seen`. Stamps only grow, so stale marks never match.
-    *stamp = stamp.wrapping_add(1);
+    // `stamp` again for `seen`. Stamps only grow, so stale marks never match;
+    // a call that could run past `u32::MAX` (one stamp, plus at most
+    // `SHIFT_FORBIDS + 1` per target) first resets every mark to 0.
+    let need = 1 + terms.len() as u64 * (SHIFT_FORBIDS as u64 + 1);
+    if u64::from(*stamp) + need > u64::from(u32::MAX) {
+        for marks in [&mut *seen, &mut *in_tree, &mut *is_old, &mut *is_old_halo] {
+            marks.fill(0);
+        }
+        *stamp = 0;
+    }
+    *stamp += 1;
     let call = *stamp;
     for &n in old_nodes {
         is_old[n as usize] = call;
@@ -1259,7 +1298,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         // ponytail: a via's own halo is priced (`via`), a run end's is not;
         // the dirty test reroutes whichever net it lands on.
         let foreign_halo = halo.0.get(i).map_or(0, |&h| h.saturating_sub(u16::from(is_old_halo[i] == call)));
-        let eff = usage[i].saturating_sub(u16::from(is_old[i] == call)) + foreign_halo;
+        let eff = usage[i].saturating_sub(u16::from(is_old[i] == call)).saturating_add(foreign_halo);
         Some(present_cost(hist[i], p_fac, eff, cap))
     };
     let wide_at = |k: &[u8; MAX_LAYERS]| k.iter().any(|&t| t > 1) || q.guard.iter().any(|&t| t > 0);
@@ -1286,7 +1325,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
                 return None;
             }
             let foreign_halo = halo.0.get(x).map_or(0, |&h| h.saturating_sub(u16::from(m.partner_halo.binary_search(&(x as u32)).is_ok())));
-            let eff = usage[x].saturating_sub(u16::from(p_mine(x))) + foreign_halo;
+            let eff = usage[x].saturating_sub(u16::from(p_mine(x))).saturating_add(foreign_halo);
             Some(present_cost(hist[x], p_fac, eff, cap))
         };
         let j = j as usize;
@@ -1359,7 +1398,7 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
         let wide = wide_at(tk);
         forbid.clear();
         let path = 'retry: loop {
-            *stamp = stamp.wrapping_add(1);
+            *stamp += 1;
             let s = *stamp;
             heap.clear();
             // A*: keyed by `g + h`; a stale entry's key no longer equals the
@@ -1456,10 +1495,18 @@ pub fn route_net<G: RGraph>(g: &G, hot: &RouteHot, reserved: &[u32], q: &NetSear
     Some(branches)
 }
 
+/// `usage + halo − cap` where metal sits (`usage > 0`), floored at 0; widened
+/// so a full `u16` count plus halos cannot wrap. Branchless: it runs once per
+/// node per PathFinder iteration.
+fn over_cap(usage: u16, halo: u16, cap: u16) -> u32 {
+    let on = u32::from(halo) * u32::from(usage > 0);
+    (u32::from(usage) + on).saturating_sub(u32::from(cap))
+}
+
 /// PathFinder node price: history plus `p_fac` per net past `cap` once this
 /// net joins the `eff` foreign occupants (metal and halos).
 fn present_cost(hist: f32, p_fac: f32, eff: u16, cap: u16) -> f32 {
-    hist + p_fac * f32::from((eff + 1).saturating_sub(cap))
+    hist + p_fac * (u32::from(eff) + 1).saturating_sub(u32::from(cap)) as f32
 }
 
 /// Nodes a shift pair's leader may forbid itself over self-images
@@ -1512,7 +1559,8 @@ const STALL_ITERS: u32 = 10;
 /// `max_iters`. Returns `(Σ max(0, usage − cap), iterations run)`.
 pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: f32, hist_inc: f32, max_iters: u32, dij: &mut Dij) -> (f32, u32) {
     let cap = cold.graph.cap();
-    let (mut overflow, mut best, mut stall, mut iters, mut p) = (0.0, f32::INFINITY, 0, 0, p_fac.min(P_FAC_MAX));
+    // `inc = 0` measures the state as it stands without pricing it.
+    let (mut overflow, mut best, mut stall, mut iters, mut p) = (bump_history(&hot.usage, &hot.halo, &mut hot.hist, cap, 0.0), f32::INFINITY, 0, 0, p_fac.min(P_FAC_MAX));
     for _ in 0..max_iters {
         iters += 1;
         let mut moved = false;
@@ -1524,7 +1572,9 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
                 continue;
             }
             let over = |&n: &u32| hot.over(n as usize, cap) > 0;
-            let dirty_one = |x: usize| hot.trees[x].is_empty() || hot.trees[x].iter().flatten().any(over) || hot.halos[x].iter().any(over);
+            // The footprint, not the branch nodes: it also holds a wide net's
+            // extra tracks, via corners and guard tracks.
+            let dirty_one = |x: usize| hot.trees[x].is_empty() || hot.foot[x].iter().any(over) || hot.halos[x].iter().any(over);
             let dirty = dirty_one(net) || pair.is_some_and(|p| dirty_one(p.0 as usize));
             if !dirty || cold.terms[net].is_empty() {
                 continue;
@@ -1551,14 +1601,25 @@ pub fn run_pathfinder<G: RGraph>(hot: &mut RouteHot, cold: &RouteCtx<G>, p_fac: 
 /// `hist += inc · over` per node ([`RouteHot::over`]; `halo` empty = none);
 /// returns `Σ over`.
 fn bump_history(usage: &[u16], halo: &[u16], hist: &mut [f32], cap: u16, inc: f32) -> f32 {
-    let mut total = 0.0;
-    for (i, (h, &u)) in hist.iter_mut().zip(usage).enumerate() {
-        let on = if u > 0 { halo.get(i).copied().unwrap_or(0) } else { 0 };
-        let over = f32::from((u + on).saturating_sub(cap));
-        *h += inc * over;
-        total += over;
+    debug_assert!(hist.len() == usage.len() && (halo.is_empty() || halo.len() == usage.len()));
+    // Two straight branch-free loops over parallel columns, an integer total:
+    // both autovectorize (an f32 running sum would not reassociate).
+    // ponytail: autovectorized, not fearless_simd; hand-write lanes if a profile asks.
+    let mut total: u64 = 0;
+    if halo.is_empty() {
+        for (h, &u) in hist.iter_mut().zip(usage) {
+            let over = over_cap(u, 0, cap);
+            *h += inc * over as f32;
+            total += u64::from(over);
+        }
+    } else {
+        for ((h, &u), &hl) in hist.iter_mut().zip(usage).zip(halo) {
+            let over = over_cap(u, hl, cap);
+            *h += inc * over as f32;
+            total += u64::from(over);
+        }
     }
-    total
+    total as f32
 }
 
 // ---------------------------------------------------------------------------
@@ -1854,7 +1915,7 @@ mod tests {
     fn present_cost_charges_only_past_capacity() {
         assert_eq!(present_cost(0.5, 2.0, 0, 1), 0.5);
         assert_eq!(present_cost(0.5, 2.0, 2, 1), 4.5);
-        assert_eq!(present_cost(0.0, 1.0, u16::MAX, 0), 65_535.0, "no overflow at the top");
+        assert_eq!(present_cost(0.0, 1.0, u16::MAX, 0), 65_536.0, "no overflow at the top");
     }
 
     /// A scratch whose stamp is about to wrap still finds the same tree: stale
