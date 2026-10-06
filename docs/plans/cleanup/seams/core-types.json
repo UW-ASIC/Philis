@@ -11,7 +11,7 @@
   "risks": [
     "No build run (per rules); edits reasoned against definitions",
     "finfet test now compares sa + sb against a.w as u32 (a.w is i32, positive for a drawn active)",
-    "frontend/library/src/lib.rs also carried another agent's staged hunk at commit time; the `-- path` commit may include it",
+    "Box4 field names (x, y) differ from the old tuple names (cx, cy): pattern bindings must name fields",
     "Relayed user note about 9 branches / merging: only `main` exists locally (plus origin/main); nothing to merge from this checkout, and branch work is outside this seam"
   ],
   "deferred": [
