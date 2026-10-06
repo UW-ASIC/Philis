@@ -1433,6 +1433,10 @@ struct Epoch {
     /// dr's report and stats for `routes`.
     route: Report,
     route_stats: dr::RouteStats,
+    /// The code `dp::place_sp` returned under [`dp::DpMode::Sp`] (PLC-10):
+    /// FLOW-08's warm start resumes from it (`dp::Start::Warm`).
+    #[allow(dead_code)] // read once FLOW-08 lands
+    tree: Option<dp::sp::Tree>,
 }
 
 impl Flow<'_> {
@@ -1479,6 +1483,7 @@ impl Flow<'_> {
         // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
         let dp_seed = seed ^ 0xD1B5_4A32_D192_ED03;
         let dp_variants = if reshape { &cells.variants[..] } else { &[] };
+        let mut tree = None;
         let (mut layout, place_report, dp_stats) = if self.dp_mode == dp::DpMode::Sp {
             let coarse = (self.gp_mode != GpMode::Constructive).then(|| gp::place(&inp, prices, seed).0);
             lap(0);
@@ -1498,7 +1503,8 @@ impl Flow<'_> {
                 units: cells.units.clone(),
             };
             let start = coarse.as_ref().map_or(dp::Start::Constructive, dp::Start::Cold);
-            let (l, _tree, rep, st) = dp::place_sp(&sp_in, start, dp::Schedule::cold(), prices, dp_seed);
+            let (l, t, rep, st) = dp::place_sp(&sp_in, start, dp::Schedule::cold(), prices, dp_seed);
+            tree = Some(t);
             (l, rep, st)
         } else {
             let (coarse, _) = gp::place(&inp, prices, seed);
@@ -1662,6 +1668,7 @@ impl Flow<'_> {
             stats,
             route: route_report,
             route_stats,
+            tree,
         }
     }
 }

@@ -9,6 +9,7 @@
 //! any residue.
 
 pub mod anneal;
+mod eval;
 pub mod legalize;
 pub mod locks;
 pub mod sp;
@@ -70,6 +71,9 @@ pub struct PlaceStats {
     /// Distinct matched pairs whose variant spaces differ, so they cannot be
     /// shape-locked ([`locks::Locks::incompatible`]).
     pub matched_incompatible: Option<u32>,
+    /// [`anneal::place_sp`]: a [`anneal::Start::Warm`] tree no longer fit the
+    /// inputs (cells or symmetry groups changed), so the anneal started constructive.
+    pub warm_fallback: bool,
 }
 
 /// The mutable columns a move can touch, for rollback.

@@ -71,6 +71,17 @@ pub fn separations(sets: &[(MatchClass, Vec<u16>)], power_uw: &[i32], source_uw:
 mod tests {
     use super::*;
 
+    /// PLC-10: dp re-scores a batch only when a touched cell moves.
+    #[test]
+    fn touched_names_both_targets() {
+        use crate::rule::RuleBatch;
+        let sep = |victim, source| HeatSeparation { victim, source, min_gap_nm: 1_000 };
+        let (d, g) = (|i| Target::Device(DeviceId(i)), Target::Group(pnr_core::GroupId(0)));
+        let mut ids = Vec::new();
+        vec![sep(d(4), d(1)), sep(g, g)].touched(&mut ids);
+        assert_eq!(ids, [4, 1]);
+    }
+
     #[test]
     fn heat_separation_scales_with_power() {
         let set = |c| [(c, vec![0u16, 1])];

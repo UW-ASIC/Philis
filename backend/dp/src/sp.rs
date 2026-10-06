@@ -295,9 +295,13 @@ pub enum Fail {
     Band(u16),
 }
 
-/// Reused buffers so a decode allocates only on growth.
+/// Reused buffers so a decode allocates only on growth, and each node's last
+/// result: [`decode`] re-decodes only nodes [`Scratch::touch`] marked (PLC-10).
 #[derive(Default)]
 pub struct Scratch {
+    /// Per node: needs a re-decode; parent node (empty = nothing cached yet).
+    dirty: Vec<bool>,
+    parent: Vec<u16>,
     pa: Vec<u32>,
     pb: Vec<u32>,
     /// Per node, per kid slot: position relative to the node's origin.
@@ -318,6 +322,29 @@ pub struct Scratch {
     khalo: Vec<[i32; 4]>,
     knode: Vec<bool>,
     gc: Vec<[Option<Gap>; 2]>,
+}
+
+impl Scratch {
+    /// Mark `node` and its ancestors for re-decode: its code, or a kid's
+    /// extents or profile, changed (or changed back).
+    pub fn touch(&mut self, t: &Tree, node: u16) {
+        if self.parent.len() != t.nodes.len() {
+            return;
+        }
+        let mut n = usize::from(node);
+        loop {
+            self.dirty[n] = true;
+            if n == usize::from(t.root) {
+                break;
+            }
+            n = usize::from(self.parent[n]);
+        }
+    }
+
+    /// Drop every cached node result (a new tree or a wholesale code change).
+    pub fn invalidate(&mut self) {
+        self.parent.clear();
+    }
 }
 
 /// `table.gap` when both profiles exist, else `fallback` (as `PlaceRules::gaps`).
@@ -604,7 +631,8 @@ fn axis_snap(v: i32, lattice: i32, has_self: bool, _grid: Option<(i32, i32)>) ->
     round_up(v, if has_self { 2 * lattice } else { lattice })
 }
 
-/// Decode `t` (post-order), then assemble absolute corners (pre-order) into
+/// Decode `t` (post-order; only nodes marked by [`Scratch::touch`] once
+/// `s` holds a decode of `t`), then assemble absolute corners (pre-order) into
 /// `out`. `Err` names the first node with no realisation; `out` is then stale.
 pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), Fail> {
     let nn = t.nodes.len();
@@ -615,9 +643,25 @@ pub fn decode(t: &Tree, g: &Geo, s: &mut Scratch, out: &mut Out) -> Result<(), F
     s.dim.resize(nn, (0, 0));
     s.ax2.resize(nn, 0);
     s.org.resize(nn, (0, 0));
+    if s.parent.len() != nn {
+        s.parent.clear();
+        s.parent.resize(nn, t.root);
+        for (ni, nd) in t.nodes.iter().enumerate() {
+            for k in &nd.kids {
+                if let Kid::Node(m) = *k {
+                    s.parent[usize::from(m)] = ni as u16;
+                }
+            }
+        }
+        s.dirty.clear();
+        s.dirty.resize(nn, true);
+    }
     let mut fixes = 0;
     for ni in 0..nn {
-        decode_node(t, g, s, ni, &mut fixes)?;
+        if s.dirty[ni] {
+            decode_node(t, g, s, ni, &mut fixes)?;
+            s.dirty[ni] = false;
+        }
     }
     out.fixes = fixes;
     out.x0.clear();
