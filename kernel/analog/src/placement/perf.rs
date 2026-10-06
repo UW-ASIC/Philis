@@ -94,6 +94,9 @@ impl PlacePerf {
     #[must_use]
     pub fn mst_len(&self, n: usize, l: &Layout) -> i64 {
         let pts: Vec<_> = self.items[n].iter().map(|(c, b)| Self::item(l, *c, b)).collect();
+        if pts.len() < 2 {
+            return 0;
+        }
         let d = |a: (i64, i64, i64, i64), b: (i64, i64, i64, i64)| {
             ((a.0 - b.0).abs() - (a.2 + b.2)).max(0) + ((a.1 - b.1).abs() - (a.3 + b.3)).max(0)
         };
@@ -115,7 +118,7 @@ impl PlacePerf {
     /// Σ w_i · mst_i · af_per_nm: fraction of the headroom the estimate spends.
     /// Nets past `weights` are ignored.
     fn used(&self, l: &Layout) -> f32 {
-        (0..self.items.len()).map(|n| self.weights[n] * self.mst_len(n, l) as f32 * self.af_per_nm).sum()
+        self.weights.iter().take(self.items.len()).enumerate().map(|(n, &w)| w * self.mst_len(n, l) as f32 * self.af_per_nm).sum()
     }
 
     /// Overshoot of the placement share `1 − reserve` past `limit`.

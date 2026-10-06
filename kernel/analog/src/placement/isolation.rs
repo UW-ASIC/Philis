@@ -22,8 +22,10 @@ impl Rule for Isolation {
     type On = Layout;
     /// `(shortfall / min_distance)²` (PLC-18: dimensionless).
     fn cost(self, l: &Layout) -> f32 {
-        let m = self.min_distance_nm.max(1) as f32;
-        let s = (m - l.edge_gap(self.a, self.b)).max(0.0) / m;
+        // Shortfall against the real floor over a ≥ 1 nm divisor: a
+        // non-positive requirement pulls nothing (see `HeatSeparation`).
+        let short = (self.min_distance_nm as f32 - l.edge_gap(self.a, self.b)).max(0.0);
+        let s = short / self.min_distance_nm.max(1) as f32;
         s * s
     }
     fn satisfied(self, l: &Layout) -> bool {

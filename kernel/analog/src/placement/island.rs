@@ -48,10 +48,8 @@ pub fn components(l: &Layout, members: &[Target], touch_nm: i32) -> u32 {
             }
         }
     }
-    let mut roots: Vec<u32> = (0..n as u32).map(|i| uf.find(i)).collect();
-    roots.sort_unstable();
-    roots.dedup();
-    roots.len() as u32
+    // One root per component: count the elements that are their own root.
+    (0..n as u32).filter(|&i| uf.find(i) == i).count() as u32
 }
 
 impl SymmetryIsland {

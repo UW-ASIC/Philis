@@ -45,23 +45,33 @@ impl OrientationSet {
     /// `0.0` = satisfied, `> 0` = violated, `None` = unknown (a member
     /// without placed units). Fewer than two members is vacuously `0.0`.
     fn residual_of(&self, l: &Layout) -> Option<f32> {
-        let s: Vec<_> = self.members.iter().map(|&d| sums(l.units.of_device(l, d).map(Pt::from))).collect();
-        if s.iter().any(|m| m.n == 0) {
-            return None;
+        let Some((&d0, rest)) = self.members.split_first() else { return Some(0.0) };
+        if rest.is_empty() {
+            return Some(0.0);
         }
-        Some(match self.check {
-            OrientCheck::Axis => {
-                let has = |a| s.iter().any(|m| m.axis == a);
-                f32::from(u8::from(has(Axis::Mixed) || (has(Axis::H) && has(Axis::V))))
+        let of = |d: DeviceId| Some(sums(l.units.of_device(l, d).map(Pt::from))).filter(|m| m.n > 0);
+        // Every member is reduced even after a violation: one without units
+        // makes the whole set unknown.
+        let s0 = of(d0);
+        let mut known = s0.is_some();
+        let s0 = s0.unwrap_or_default();
+        let (mut mixed, mut h, mut v) = (s0.axis == Axis::Mixed, s0.axis == Axis::H, s0.axis == Axis::V);
+        let p0 = s0.phi();
+        let mut worst_phi = 0.0f64;
+        for &d in rest {
+            let Some(m) = of(d) else {
+                known = false;
+                continue;
+            };
+            (mixed, h, v) = (mixed | (m.axis == Axis::Mixed), h | (m.axis == Axis::H), v | (m.axis == Axis::V));
+            if !phi_equal(&s0, &m) {
+                let p = m.phi();
+                worst_phi = worst_phi.max((p0.0 - p.0).abs() + (p0.1 - p.1).abs());
             }
-            OrientCheck::Phi => {
-                if s[1..].iter().all(|m| phi_equal(&s[0], m)) {
-                    0.0
-                } else {
-                    let p0 = s[0].phi();
-                    s[1..].iter().map(|m| m.phi()).map(|p| (p0.0 - p.0).abs() + (p0.1 - p.1).abs()).fold(0.0, f64::max) as f32
-                }
-            }
+        }
+        known.then(|| match self.check {
+            OrientCheck::Axis => f32::from(u8::from(mixed | (h & v))),
+            OrientCheck::Phi => worst_phi as f32,
         })
     }
 }

@@ -22,8 +22,10 @@ impl Rule for HeatSeparation {
     type On = Layout;
     /// `((min − gap)⁺ / min)²` (PLC-18: dimensionless).
     fn cost(self, l: &Layout) -> f32 {
-        let m = self.min_gap_nm.max(1) as f32;
-        let s = (m - l.edge_gap(self.victim, self.source)).max(0.0) / m;
+        // Shortfall against the real floor, divided by a floor kept ≥ 1 nm:
+        // a non-positive requirement is met at any gap and pulls nothing.
+        let short = (self.min_gap_nm as f32 - l.edge_gap(self.victim, self.source)).max(0.0);
+        let s = short / self.min_gap_nm.max(1) as f32;
         s * s
     }
     fn satisfied(self, l: &Layout) -> bool {
@@ -52,22 +54,29 @@ impl Rule for HeatSeparation {
 /// Cost: O(Σ |set| · cells).
 #[must_use]
 pub fn separations(sets: &[(MatchClass, Vec<u16>)], power_uw: &[i32], source_uw: i32) -> Vec<HeatSeparation> {
-    let mut out = Vec::new();
+    // (victim, source, power): sorted and deduplicated globally, since two
+    // sets sharing a cell emit the same pair non-adjacently.
+    let mut pairs: Vec<(u16, u16, i32)> = Vec::new();
+    let mut victims: Vec<u16> = Vec::new();
     for (_, cells) in sets.iter().filter(|(c, _)| *c != MatchClass::Minimal) {
-        let mut victims = cells.clone();
+        victims.clear();
+        victims.extend_from_slice(cells);
         victims.sort_unstable();
         victims.dedup();
         for (s, &p) in power_uw.iter().enumerate() {
-            if p < source_uw || victims.binary_search(&(s as u16)).is_ok() {
+            let s = s as u16;
+            if p < source_uw || victims.binary_search(&s).is_ok() {
                 continue;
             }
-            for &v in &victims {
-                out.push(HeatSeparation { victim: Target::Device(DeviceId(v)), source: Target::Device(DeviceId(s as u16)), min_gap_nm: p });
-            }
+            pairs.extend(victims.iter().map(|&v| (v, s, p)));
         }
     }
-    out.dedup();
-    out
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+        .into_iter()
+        .map(|(v, s, p)| HeatSeparation { victim: Target::Device(DeviceId(v)), source: Target::Device(DeviceId(s)), min_gap_nm: p })
+        .collect()
 }
 
 #[cfg(test)]

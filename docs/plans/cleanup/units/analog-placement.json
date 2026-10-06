@@ -1,0 +1,49 @@
+{
+  "unit": "analog-placement",
+  "commits": [
+    "62704ea cleanup(analog-placement): step 1 — document every pub item, fold device-touch loops into push_devices, name matched-set member reduction, split environment measurement into free functions",
+    "ded8291 cleanup(analog-placement): step 2 — cover every rule's boundaries, empty/single inputs, degenerate geometry and batch hooks; flag duplicate heat rules, zero-spec pulls, SymmetryGroup NaN residuals, empty-set and weightless-net panics",
+    "cleanup(analog-placement): step 3 — dedup heat rules globally, zero pull for non-positive specs, SymmetryGroup per-rule residuals, allocation-free orientation and island counts, guard empty MST / weightless nets"
+  ],
+  "testsAdded": 75,
+  "flaggedFixed": [
+    "heat::separations emitted the same (victim, source) rule twice when two matched sets shared a cell (Vec::dedup only drops adjacent duplicates); now sorted and deduplicated globally",
+    "HeatSeparation / Isolation cost pulled touching cells apart (cost 1) when min gap <= 0, although satisfied() held; shortfall now uses the real floor over a >= 1 nm divisor",
+    "SymmetryGroup::violating_residuals fell back to the trait default (NaN residuals) instead of the per-rule mirror error; now delegates to Vec<Symmetry>",
+    "OrientationSet with no members panicked in the Phi check (s[1..] on an empty Vec); fewer than two members is now vacuously met, and residual_of no longer allocates",
+    "PlacePerf::mst_len panicked on a net with no cells (pts[0]); now 0 below two cells",
+    "PlacePerf::used indexed weights[n] for every item (panic when weights is shorter); now zips weights with items",
+    "MatchedSet::ledger_rows panicked on an empty member list (members[0]); now returns nothing",
+    "Proximity duplicated Layout::edge_gap in i32/f32; now calls edge_gap",
+    "island::components sorted a roots Vec per call; now counts self-roots without allocating"
+  ],
+  "flaggedOpen": [
+    "LiveEnvironment re-measures every pair on each RuleBatch call (cost, violations, residual, unknown, worst_usage each rebuild all placed rects): O(P * rects) per call, several calls per dp trial; the existing ponytail note names the upgrade (cache unmoved cells via PLC-10's moved set)",
+    "environment::well_edge_distance is O(units * wells^2) with an early-exit any() per candidate point; AoS Rect and short early-exit scans make SIMD a poor fit without a layout change (SoA well edges)",
+    "MatchedSet ledgers rescan l.power_uw (hot flag) and every powered cell's field per unit per pair; acceptable at current set sizes",
+    "PlacePerf::mst_len allocates pts/best/done per call (k <= ~10); left as is",
+    "MatchedSet with tol_nm <= 0 yields an inf/NaN coincidence; documented as a precondition, not guarded",
+    "A single-member OrientationSet with mixed-axis units now reads as met (doc: fewer than two members is vacuous); previously its Axis check reported 1"
+  ],
+  "seamRequests": [
+    {
+      "seam": "analog-consumers",
+      "item": "analog::placement::environment::LiveEnvironment (RuleBatch<Layout>)",
+      "change": "Let the batch receive the evaluator's moved-cell set (or a per-trial cache handle) so unmoved cells' placed wells/diffusions are reused across cost/violations/residual calls",
+      "why": "Each RuleBatch method rebuilds every pair's surroundings from scratch; dp calls several per trial"
+    },
+    {
+      "seam": "analog-annotator",
+      "item": "analog::placement::perf::PlacePerf parallel Vecs (nets, weights, items)",
+      "change": "Make the fields private behind PlacePerf::new, or store one Vec of per-net rows",
+      "why": "Public parallel arrays let callers build mismatched lengths; the term now tolerates it but silently ignores nets"
+    }
+  ],
+  "risks": [
+    "No build was run (per rules): step 2 tests and step 3 edits are reasoned against read definitions, not compiled",
+    "heat::separations output order changed from source-major to sorted (victim, source); callers only push the Vec as a batch",
+    "No SIMD added: every loop in the unit runs over a handful of members, pairs or MST nodes (k <= ~10); the one larger loop (WPE well scan) has early exits on AoS rects, so fearless_simd was not added to the crate",
+    "Tests construct Layout literally; a new Layout field from the core-types seam breaks them at compile time (as it does every existing test in the crate)",
+    "The relayed user request was about merging branches; locally only main exists, so this unit's work does not touch branches"
+  ]
+}

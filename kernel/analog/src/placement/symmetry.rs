@@ -188,6 +188,9 @@ impl RuleBatch<Layout> for SymmetryGroup {
     fn violating_ids(&self, l: &Layout, out: &mut Vec<u32>) {
         self.0.violating_ids(l, out);
     }
+    fn violating_residuals(&self, l: &Layout, out: &mut Vec<(u32, f32)>) {
+        self.0.violating_residuals(l, out);
+    }
     fn touched(&self, out: &mut Vec<u32>) {
         self.0.touched(out);
     }
