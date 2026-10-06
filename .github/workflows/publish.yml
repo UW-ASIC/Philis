@@ -1,12 +1,11 @@
-# CI (plan-08 FLOW-14, T13). Every push: debug workspace tests, a release
-# run of cell_selfcheck (its cross-deck loops are
-# `#[cfg(not(debug_assertions))]`) and of ota_cross_pdk (which also runs in
-# debug; plan-08 FLOW-14 lists it), and an advisory rustfmt check. Nightly:
-# the tool-dependent tests with ngspice and the sky130 models installed and
-# `PHILIS_REQUIRE_TOOLS=1`, so a missing tool panics instead of skipping.
-# A red test stays red here; nothing is waived (dac4's ERC baseline in
-# benchmarks/tests/signoff_fixtures.rs is expected red until REL's fix).
-name: ci
+# Publish gate (plan-08 FLOW-14, T13). Every push and PR: build, debug
+# workspace tests, a release run of cell_selfcheck (its cross-deck loops are
+# `#[cfg(not(debug_assertions))]`) and ota_cross_pdk, and the signoff gate:
+# every `bench local` circuit must place, route and sign off with DRC 0,
+# ERC 0 and LVS MATCH. Nightly: the tool-dependent tests with ngspice and the
+# sky130 models installed and `PHILIS_REQUIRE_TOOLS=1`, so a missing tool
+# panics instead of skipping. Nothing is waived: a red circuit keeps it red.
+name: publish
 
 on:
   push:
@@ -26,8 +25,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --locked
-      # --no-fail-fast: a red target (dac4, see above) must not stop the
+      - run: cargo build --workspace --locked --all-targets
+      # --no-fail-fast: a red target must not stop the
       # targets after it; every test runs and every failure is reported.
       - run: cargo test --workspace --locked --no-fail-fast
 
@@ -40,19 +39,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release --locked --no-fail-fast -p cells --test cell_selfcheck -p library --test ota_cross_pdk
 
-  fmt:
+  signoff:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # Advisory: `cargo fmt --all --check` finds diffs in 15 of the 16 workspace crates
-    # (not only gr/dr, docs/CRATES.md item 10), so this gates nothing until one
-    # dedicated formatting commit lands after the M0 branches merge.
-    continue-on-error: true
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
+      - uses: Swatinem/rust-cache@v2
+      - name: Bench every local circuit
+        run: cargo run --release --locked -p benchmark --bin bench local 2>&1 | tee bench.log
+      - name: DRC 0, ERC 0, LVS MATCH on every circuit
+        run: python3 benchmarks/progress.py --gate bench.log
 
   nightly:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

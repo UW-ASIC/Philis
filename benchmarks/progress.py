@@ -2,6 +2,7 @@
 """Progress snapshot: bench log -> README sample layouts + speed history graph.
 
     python3 benchmarks/progress.py <bench.log> <assets_dir> <sha> [label]
+    python3 benchmarks/progress.py --gate <bench.log>   (publish gate)
 
 Parses `bench local` rows ("[Suite/deck] name  N ms ... proposals P"),
 appends ns per iteration (wall ns / epochs; one epoch = place, route, sign off) and wall ms per circuit
@@ -25,6 +26,18 @@ def parse(log):
             name, ms, drc, lvs, erc, ep = m.groups()
             rows[name] = dict(ms=int(ms), drc=int(drc), lvs=lvs.split(" |")[0], erc=int(erc), epochs=int(ep))
     return rows
+
+
+def gate(log):
+    """Exit 1 unless every circuit ran and signed off DRC 0, ERC 0, LVS MATCH."""
+    rows = parse(log)
+    ran = re.search(r"(\d+)/(\d+) circuits placed\+routed", open(log, errors="replace").read())
+    bad = [f"{c}: DRC {r['drc']}, ERC {r['erc']}, LVS {r['lvs']}" for c, r in sorted(rows.items())
+           if r["drc"] or r["erc"] or r["lvs"] != "MATCH"]
+    if not ran or ran.group(1) != ran.group(2) or len(rows) != int(ran.group(2)):
+        bad.append(f"not every circuit signed off: {ran.group(0) if ran else 'no summary line'}, {len(rows)} rows")
+    print("\n".join(bad) or f"{len(rows)} circuits: DRC 0, ERC 0, LVS MATCH")
+    sys.exit(1 if bad else 0)
 
 
 def chart(hist, path):
@@ -108,12 +121,16 @@ def feedback_chart(assets, path):
 
 
 def main():
+    if sys.argv[1] == "--gate":
+        gate(sys.argv[2])
     log, assets, sha = sys.argv[1:4]
     label = sys.argv[4] if len(sys.argv) > 4 else sha[:7]
     rows = parse(log)
     if not rows:
         sys.exit("no bench rows parsed")
-    os.makedirs(os.path.join(PROG, "layouts"), exist_ok=True)
+    lay = os.path.join(PROG, "layouts")
+    shutil.rmtree(lay, ignore_errors=True)  # regenerate: a circuit that failed this run shows no stale image
+    os.makedirs(lay)
     csvp = os.path.join(PROG, "speed.csv")
     new = not os.path.exists(csvp)
     stamp = time.strftime("%Y-%m-%d %H:%M")
