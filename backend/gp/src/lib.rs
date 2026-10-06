@@ -4,8 +4,10 @@
 //! shared placement primitives in [`mechanics`] that `dp` reuses.
 
 pub mod mechanics;
+pub mod spacing;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use analog::Requirements;
 use pnr_core::{Layout, Macro, Report};
@@ -29,6 +31,8 @@ pub struct Prices {
     priced: BTreeMap<PriceKey, Price>,
     /// `−λ` per positional batch index for this epoch (hot-path read).
     weight: Vec<f32>,
+    /// `ρ` per positional batch index for this epoch; `0` for an unpriced batch.
+    rho: Vec<f32>,
     /// `‖λ_{k+1} − λ_k‖` of the last [`Prices::settle`]; `INFINITY` before one.
     drift: f64,
     /// Dual steps taken: one per epoch (the flow's), none inside `place`.
@@ -66,7 +70,7 @@ const LAMBDA_MAX: f32 = 64.0;
 
 impl Default for Prices {
     fn default() -> Self {
-        Self { priced: BTreeMap::new(), weight: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
+        Self { priced: BTreeMap::new(), weight: Vec::new(), rho: Vec::new(), drift: f64::INFINITY, steps: 0, saturated: Vec::new() }
     }
 }
 
@@ -88,10 +92,9 @@ impl Prices {
             reqs.budget.iter().all(|b| reqs.hard.iter().all(|h| h.kind() != b.kind())),
             "gp::Prices: a batch kind is registered in both `hard` and `budget`"
         );
-        self.weight = keys(reqs)
-            .iter()
-            .map(|k| self.priced.get(k).map_or(0.0, |p| -p.lambda))
-            .collect();
+        let keys = keys(reqs);
+        self.weight = keys.iter().map(|k| self.priced.get(k).map_or(0.0, |p| -p.lambda)).collect();
+        self.rho = keys.iter().map(|k| self.priced.get(k).map_or(0.0, |p| p.rho)).collect();
     }
 
     /// Projected dual step `λ ← clamp(λ − ρ·g, −LAMBDA_MAX, 0)`, once per
@@ -154,8 +157,15 @@ impl Prices {
     /// `−λ` for budget batch `bi`; `0.0` when unbound.
     #[inline]
     #[must_use]
-    pub(crate) fn weight_of(&self, bi: usize) -> f32 {
+    pub fn weight_of(&self, bi: usize) -> f32 {
         self.weight.get(bi).copied().unwrap_or(0.0)
+    }
+
+    /// `ρ` for budget batch `bi`; `0.0` when unbound or unpriced.
+    #[inline]
+    #[must_use]
+    pub fn rho_of(&self, bi: usize) -> f32 {
+        self.rho.get(bi).copied().unwrap_or(0.0)
     }
 }
 
@@ -175,12 +185,24 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
         .collect()
 }
 
+/// Weight of a rail with no op current. Policy: a rail's HPWL matters for
+/// IR/EM, not for C (EM-11; lienig_em L3457-3462), so it pulls below a signal.
+pub const RAIL_UNKNOWN: f32 = 0.25;
+/// Floor of a rail's current weight. Policy: a near-idle rail still stays short.
+pub const RAIL_MIN: f32 = 0.1;
+
 /// Per-net HPWL weight, indexed by `NetId`, mean `1` over the weighted nets
 /// (unweighted = `1`). A net's weight is the fraction of a budget one aF of it
 /// spends (Lampaert 1999 eq.2.12–2.13, `ΔP = Σ S·Δx`; CRATES #3): the positive
 /// performance sensitivities `sens` (`(net, 1/aF)`, summed over specs) where a
 /// spec sees the net, else `1/c_budget` of its class. A tighter budget pulls
-/// harder; rails (unbudgeted) keep `1`.
+/// harder; an unbudgeted signal net keeps `1`.
+///
+/// Rails (`Supply` / `Ground`) are left out of that mean and weighted by their
+/// op current instead (PLC-17, AP-18: each source normalised separately):
+/// `current_ua[net]` (µA, indexed by `NetId`) over the largest rail current,
+/// clamped to [`RAIL_MIN`]`..=1`; [`RAIL_UNKNOWN`] without one (no op point,
+/// unresolved, or `net` past `current_ua`).
 ///
 /// Placement's HPWL weights, and the routers' (library masks those to budgeted
 /// nets).
@@ -191,7 +213,7 @@ fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
 /// chain4 +6%, rc_filter +7% at seed 1). Kept on that later data; re-measure
 /// over seeds whenever routing changes.
 #[must_use]
-pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)]) -> Vec<f32> {
+pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)], current_ua: &[Option<i32>]) -> Vec<f32> {
     let mut raw: Vec<Option<f32>> = classes.iter().map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f32)).collect();
     let mut from_perf = vec![0.0f32; raw.len()];
     for &(n, w) in sens {
@@ -204,19 +226,113 @@ pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr
             *r = Some(s);
         }
     }
-    let known: Vec<f32> = raw.iter().flatten().copied().collect();
+    let rail = |i: usize| matches!(classes[i].class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground);
+    let known: Vec<f32> = raw.iter().enumerate().filter(|&(i, _)| !rail(i)).filter_map(|(_, r)| *r).collect();
     let mean = known.iter().sum::<f32>() / known.len().max(1) as f32;
-    raw.iter().map(|r| r.map_or(1.0, |w| w / mean)).collect()
+    let ua = |i: usize| current_ua.get(i).copied().flatten();
+    let i_ref = (0..classes.len()).filter(|&i| rail(i)).filter_map(ua).max().unwrap_or(0).max(1) as f32;
+    raw.iter()
+        .enumerate()
+        .map(|(i, r)| match (rail(i), ua(i)) {
+            (true, Some(c)) => (c as f32 / i_ref).clamp(RAIL_MIN, 1.0),
+            (true, None) => RAIL_UNKNOWN,
+            (false, _) => r.map_or(1.0, |w| w / mean),
+        })
+        .collect()
 }
 
-/// Process numbers placement needs, from the deck (shared with `dp`).
-#[derive(Clone, Copy, Debug)]
-pub struct Rules {
+/// Process numbers placement needs, from the deck (shared with `dp`), built
+/// once per run.
+#[derive(Clone, Debug)]
+pub struct PlaceRules {
     /// Every cell origin snaps to it, nm.
     pub grid: i32,
-    /// Edge-to-edge gap between cells, nm: below it wells/implants of
-    /// different cells merge.
-    pub clearance: i32,
+    /// Role × role spacing; its `fallback` is the old scalar clearance.
+    pub spacing: Arc<spacing::SpacingTable>,
+    /// Per (cell, variant, orient) edge profile; empty = every pair at `fallback`.
+    pub profiles: Arc<spacing::Profiles>,
+    /// `spacing.max_gap()`, cached: past it on either axis a pair owes nothing.
+    far: i32,
+    /// `(p0, P)`: the SP decoder puts every symmetry axis at `p0/2 (mod P)`,
+    /// a routing track centreline (PLC-28; the library derives it from dr's
+    /// lattice). `None`: axes only on the lattice.
+    pub axis_grid: Option<(i32, i32)>,
+}
+
+impl PlaceRules {
+    /// One scalar `clearance` between every pair (no profiles).
+    #[must_use]
+    pub fn uniform(grid: i32, clearance: i32) -> Self {
+        Self::new(grid, spacing::SpacingTable::uniform(clearance, grid), spacing::Profiles::default())
+    }
+
+    /// `profiles.of[cell]` indexes like the layout's cells.
+    #[must_use]
+    pub fn new(grid: i32, spacing: spacing::SpacingTable, profiles: spacing::Profiles) -> Self {
+        PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles), axis_grid: None }
+    }
+
+    fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {
+        self.profile_of(c, *l.variant.get(c)?, l.orient.get(c).copied().unwrap_or_default())
+    }
+
+    /// Cell `c`'s profile drawn as variant `v` under `o`; `None` when `c` has none
+    /// (every pair with it is then spaced at `fallback`).
+    #[must_use]
+    pub fn profile_of(&self, c: usize, v: u16, o: pnr_core::Orient) -> Option<&spacing::Profile> {
+        self.profiles.of.get(c)?.get(usize::from(v)).map(|p| &p[o as usize])
+    }
+
+    /// Edge gaps `(gx, gy)` cells `a` and `b` owe each other, nm: `gap(lo, R, hi).min`
+    /// for the pair ordered by centre x (a tie takes both orders' max), `T` by
+    /// centre y. Never exploits `abut`. A cell without a profile: `fallback`.
+    #[must_use]
+    pub fn gaps(&self, l: &Layout, a: usize, b: usize) -> (i32, i32) {
+        let (Some(pa), Some(pb)) = (self.profile(l, a), self.profile(l, b)) else {
+            return (self.spacing.fallback, self.spacing.fallback);
+        };
+        let t = &self.spacing;
+        let along = |da: i32, db: i32, f: spacing::Face| match da.cmp(&db) {
+            std::cmp::Ordering::Less => t.gap(pa, f, pb).min,
+            std::cmp::Ordering::Greater => t.gap(pb, f, pa).min,
+            std::cmp::Ordering::Equal => t.gap(pa, f, pb).min.max(t.gap(pb, f, pa).min),
+        };
+        (along(l.x[a], l.x[b], spacing::Face::R), along(l.y[a], l.y[b], spacing::Face::T))
+    }
+
+    /// Spacing-inflated overlap of `a` and `b`, nm²:
+    /// `(gx + hw_a + hw_b − |Δx|)⁺ · (gy + hh_a + hh_b − |Δy|)⁺` over [`Self::gaps`].
+    #[inline]
+    #[must_use]
+    pub fn encroach(&self, l: &Layout, a: usize, b: usize) -> f64 {
+        // Pairs farther apart than any rule reaches skip the profile lookup.
+        let far = self.far;
+        if (l.x[a] - l.x[b]).abs() >= l.hw[a] + l.hw[b] + far || (l.y[a] - l.y[b]).abs() >= l.hh[a] + l.hh[b] + far {
+            return 0.0;
+        }
+        let (gx, gy) = self.gaps(l, a, b);
+        let ox = (l.hw[a] + l.hw[b] + gx) - (l.x[a] - l.x[b]).abs();
+        let oy = (l.hh[a] + l.hh[b] + gy) - (l.y[a] - l.y[b]).abs();
+        if ox > 0 && oy > 0 {
+            f64::from(ox) * f64::from(oy)
+        } else {
+            0.0
+        }
+    }
+
+    /// [`Self::encroach`] over all pairs; `+0.0` with fewer than two cells.
+    #[must_use]
+    pub fn encroachment(&self, l: &Layout) -> f64 {
+        let n = l.x.len();
+        (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + self.encroach(l, a, b))
+    }
+
+    /// Room cell `c` can owe past its bbox ([`spacing::SpacingTable::halo`]);
+    /// `fallback` without a profile.
+    #[must_use]
+    pub fn halo(&self, l: &Layout, c: usize) -> i32 {
+        self.profile(l, c).map_or(self.spacing.fallback, |p| self.spacing.halo(p))
+    }
 }
 
 const MAX_ITERS: u32 = 500;
@@ -238,7 +354,7 @@ pub struct GpInput<'a> {
     pub variants: &'a [VariantSpace],
     pub assignment: &'a [u16],
     pub reqs: &'a Requirements<Layout>,
-    pub rules: Rules,
+    pub rules: &'a PlaceRules,
     pub net_weight: &'a [f32],
     /// Symmetry axes, one per block (`Problem::blocks`).
     pub n_axes: usize,
@@ -270,6 +386,9 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     let (hw, hh) = half_extents(&drawn);
     let side = canvas_side(&hw, &hh, UTILIZATION, rules.grid);
     let mut l = initial_layout(&drawn, variant, side, n_axes, &mut rng);
+    // gp minimises `L_ref·E` (PLC-18): hw/hh are fixed here, so that is a constant
+    // multiple of E and (a)/(c) keep their nm-unit balance against (b).
+    let l_ref = l.l_ref();
     if power_uw.len() == n {
         l.power_uw.copy_from_slice(power_uw);
     }
@@ -277,7 +396,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     let nets = Nets::from_macros(&drawn).weigh(net_weight);
     if n == 0 || !iterate {
         l.refresh_temps();
-        let rep = report(&nets, reqs, &l, prices, rules.clearance);
+        let rep = report(&nets, reqs, &l, prices, rules);
         return (l, rep);
     }
     let mut pairs = Vec::new();
@@ -321,7 +440,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         }
 
         // (b) analog-cost gradient (priced budgets included) by central difference.
-        let inv = 1.0f32 / (2.0 * ANALOG_PROBE as f32);
+        let inv = l_ref / (2.0 * ANALOG_PROBE as f32);
         for i in 0..n {
             let ox = l.x[i];
             l.x[i] = ox + ANALOG_PROBE;
@@ -341,15 +460,8 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         }
 
         // (c) density push: overfull bins push toward the emptiest neighbour.
-        util.fill(0.0);
-        let bin_of = |x: i32, y: i32| -> usize {
-            let bx = ((x as f32 / bw) as usize).min(nb - 1);
-            let by = ((y as f32 / bw) as usize).min(nb - 1);
-            by * nb + bx
-        };
-        for i in 0..n {
-            util[bin_of(l.x[i], l.y[i])] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
-        }
+        fill_bins(&mut util, &l, nb, bw);
+        let bin_of = |x: i32, y: i32| bin_of(x, y, nb, bw);
         for i in 0..n {
             let b = bin_of(l.x[i], l.y[i]);
             let over = util[b] - TARGET_UTIL;
@@ -417,8 +529,23 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     }
 
     l.refresh_temps();
-    let rep = report(&nets, reqs, &l, prices, rules.clearance);
+    let rep = report(&nets, reqs, &l, prices, rules);
     (l, rep)
+}
+
+/// Row-major `nb × nb` bin of a point, bins `bw` nm wide from the origin.
+fn bin_of(x: i32, y: i32, nb: usize, bw: f32) -> usize {
+    let bx = ((x as f32 / bw) as usize).min(nb - 1);
+    let by = ((y as f32 / bw) as usize).min(nb - 1);
+    by * nb + bx
+}
+
+/// Each bin's cell area over its own area, cells binned by centre.
+fn fill_bins(util: &mut [f32], l: &Layout, nb: usize, bw: f32) {
+    util.fill(0.0);
+    for i in 0..l.x.len() {
+        util[bin_of(l.x[i], l.y[i], nb, bw)] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
+    }
 }
 
 /// Σ bin overflow area over total device area.
@@ -434,6 +561,40 @@ fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
 mod price_tests {
     use super::*;
     use analog::Rule;
+
+    /// PLC-11 kept the analytic loop (the flat dp, still the default, starts
+    /// from it): 16 equal cells, no nets, no rules, start as a pile at the
+    /// centre; the loop must spread them to the density target.
+    #[test]
+    fn gp_spreads_a_pile() {
+        let m = Macro { bbox: pnr_core::Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
+        let macros = vec![m; 16];
+        let reqs = Requirements::<Layout>::default();
+        let rules = PlaceRules::uniform(10, 0);
+        let inp = GpInput {
+            macros: &macros,
+            variants: &[],
+            assignment: &[],
+            reqs: &reqs,
+            rules: &rules,
+            net_weight: &[],
+            n_axes: 1,
+            power_uw: &[],
+            units: Default::default(),
+            iterate: true,
+        };
+        let (l, _) = place(&inp, &mut Prices::new(), 1);
+        let side = canvas_side(&l.hw, &l.hh, UTILIZATION, 10);
+        let nb = 4;
+        let bw = side as f32 / nb as f32;
+        let mut util = vec![0.0; nb * nb];
+        fill_bins(&mut util, &l, nb, bw);
+        let overflow = bin_overflow(&util, &l, bw);
+        assert!(overflow <= OVERFLOW_TARGET, "overflow {overflow} at x {:?} y {:?}", l.x, l.y);
+        let (pile, _) = place(&GpInput { iterate: false, ..inp }, &mut Prices::new(), 1);
+        fill_bins(&mut util, &pile, nb, bw);
+        assert!(bin_overflow(&util, &pile, bw) > OVERFLOW_TARGET, "the start was already spread");
+    }
 
     /// A budget rule whose residual is **read out of the layout**, so a test can drive
     /// it epoch by epoch: `x[0] = 1000` ⇒ one full budget past spec, `x[0] = 0` ⇒
@@ -705,14 +866,43 @@ mod weight_tests {
     #[test]
     fn a_tighter_budget_pulls_harder_and_sensitivities_win() {
         let classes = [class(0, Some(1_000)), class(1, Some(4_000)), class(2, None)];
-        let w = super::net_weights(&classes, &[]);
+        let w = super::net_weights(&classes, &[], &[]);
         assert!(w[0] > w[1], "1 fF budget outweighs 4 fF: {w:?}");
         assert!((w[0] + w[1] - 2.0).abs() < 1e-5, "mean 1 over weighted nets");
-        assert_eq!(w[2], 1.0, "a rail keeps unit weight");
+        assert_eq!(w[2], 1.0, "an unbudgeted signal net keeps unit weight");
 
         // A spec that feels net 1 hardest overrides its class weight.
-        let w = super::net_weights(&classes, &[(NetId(1), 1e-2), (NetId(1), -5.0)]);
+        let w = super::net_weights(&classes, &[(NetId(1), 1e-2), (NetId(1), -5.0)], &[]);
         assert!(w[1] > w[0], "{w:?}");
+    }
+
+    fn rail(net: u16, class: NetClass, c_budget_af: Option<i64>) -> NetClassification {
+        NetClassification { net: NetId(net), class, c_budget_af, max_coupling_af: None }
+    }
+
+    /// PLC-17: a rail pulls by its op current over the largest rail's,
+    /// floored at `RAIL_MIN`; no current reads `RAIL_UNKNOWN`.
+    #[test]
+    fn supply_weight_scales_with_current() {
+        let classes = [rail(0, NetClass::Supply, None), rail(1, NetClass::Ground, None), rail(2, NetClass::Supply, None), class(3, Some(1_000))];
+        let w = super::net_weights(&classes, &[], &[Some(100), Some(1_000), None, None]);
+        assert!((w[0] - 0.1).abs() < 1e-6, "{w:?}");
+        assert_eq!(w[1], 1.0, "{w:?}");
+        assert_eq!(w[2], super::RAIL_UNKNOWN, "{w:?}");
+        assert_eq!(w[3], 1.0, "sole budgeted net, mean 1: {w:?}");
+        let w = super::net_weights(&classes, &[], &[]);
+        assert!(w[..3].iter().all(|&x| x == super::RAIL_UNKNOWN), "{w:?}");
+        let w = super::net_weights(&classes, &[], &[Some(10), Some(1_000)]);
+        assert_eq!(w[0], super::RAIL_MIN, "0.01 raw clamps: {w:?}");
+    }
+
+    /// A rail's C budget does not move the signal nets' mean.
+    #[test]
+    fn rails_do_not_move_the_signal_mean() {
+        let classes = [class(0, Some(1_000)), class(1, Some(4_000)), rail(2, NetClass::Supply, Some(10))];
+        let w = super::net_weights(&classes, &[], &[None, None, Some(50)]);
+        assert!((w[0] + w[1] - 2.0).abs() < 1e-5, "{w:?}");
+        assert_eq!(w[2], 1.0, "only rail: I_ref is its own current: {w:?}");
     }
 
 }
@@ -721,7 +911,7 @@ mod weight_tests {
 mod place_tests {
     use super::*;
     use analog::matching::mismatch::{Budget, Coeffs, MatchKind};
-    use analog::placement::symmetry::{Symmetry, SymmetryGroup};
+    use analog::placement::symmetry::{SymMode, Symmetry, SymmetryGroup};
     use analog::placement::MatchedSet;
     use pnr_core::geom::Rect;
     use pnr_core::ids::{AxisId, DeviceId, Target};
@@ -732,7 +922,7 @@ mod place_tests {
             variants: &[],
             assignment: &[],
             reqs,
-            rules: Rules { grid: 10, clearance: 270 },
+            rules: Box::leak(Box::new(PlaceRules::uniform(10, 270))),
             net_weight: &[],
             n_axes,
             power_uw: power,
@@ -741,12 +931,40 @@ mod place_tests {
         }
     }
 
+    /// PLC-07: without profiles the per-pair rules are exactly the scalar clearance.
+    #[test]
+    fn uniform_rules_match_scalar_encroach() {
+        let mut rng = SplitMix64::new(11);
+        let mut r = |m: u64| (rng.next_u64() % m) as i32;
+        for _ in 0..50 {
+            let n = 2 + r(8) as usize;
+            let (g, c) = (5 * (1 + r(4)), r(2_000));
+            let mut v = || (0..n).map(|_| r(20_000)).collect::<Vec<i32>>();
+            let (x, y, hw, hh) = (v(), v(), v(), v());
+            let l = Layout {
+                x,
+                y,
+                hw: hw.iter().map(|w| 1 + w / 7).collect(),
+                hh: hh.iter().map(|h| 1 + h / 7).collect(),
+                variant: vec![0; n],
+                axis: vec![],
+                branch: vec![],
+                groups: vec![],
+                orient: vec![pnr_core::Orient::R0; n],
+                power_uw: vec![0; n],
+                temp_mc: vec![0; n],
+                units: Default::default(),
+            };
+            assert_eq!(PlaceRules::uniform(g, c).encroachment(&l), mechanics::encroachment(&l, c), "g {g} c {c}");
+        }
+    }
+
     fn cells(n: usize) -> Vec<Macro> {
         vec![Macro { bbox: Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() }; n]
     }
 
     fn sym(a: u16, b: u16, axis: u16) -> SymmetryGroup {
-        SymmetryGroup(vec![Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(axis) }])
+        SymmetryGroup(vec![Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(axis), mode: SymMode::Perfect }])
     }
 
     #[test]
@@ -777,12 +995,15 @@ mod place_tests {
             cost: vec![Box::new(MatchedSet {
                 members: vec![DeviceId(0), DeviceId(1)],
                 kind: MatchKind::Voltage,
-                mos: true,
+                family: analog::matching::class::Family::Mos,
+                class: pnr_core::MatchClass::Moderate,
                 coeffs: Coeffs { tc_uv_per_k: Some(1_000.0), ..Default::default() },
                 budget: Budget::Allowance(1.0),
                 gate_um2: vec![],
                 tol_nm: 5.0,
                 cell_of: vec![],
+                gm_over_id: None,
+                sigma_rand_override: None,
             })],
         };
         let hot = [0, 0, 10_000];

@@ -43,8 +43,8 @@ fn main() {
 
     // ── The part of the design the *user* does themselves ──
     // Register a pre-drawn macro for the output PMOS `M8` under its instance name.
-    // In a full flow you author this as a `macro_master::Generator` and realise it
-    // against the PDK; here we hand in the `Macro` directly. The library uses it
+    // It is drawn by a `cells::Cell` generator (`cells::mosfet::Mosfet`); a
+    // `macro_master::Composition` could assemble it from parts too. The library uses it
     // verbatim and auto-generates M1–M7, M9.
     let mut macros = Macros::default();
     macros.register("M8", user_output_pmos(&pdk));
@@ -72,14 +72,14 @@ fn main() {
 
     // Show the placed-and-routed layout (blocks until the window closes; a no-op
     // on a headless host — `Probe::open` reports "no display" and returns).
-    let polys = library::visualizer::polys_from_shapes(&sol.geometry());
+    let polys = library::visualizer::polys_from_shapes(&sol.geometry(), &pdk.layer_gds());
     let mut probe = library::visualizer::Probe::open("three_stage_opamp");
     probe.send(&polys, Some("three_stage_opamp: placed + routed"));
     probe.wait();
 }
 
 /// The user's output PMOS, drawn outside the flow with the same MOSFET
-/// generator a `macro_master::Generator` would call: one 40/0.5 µm device with
+/// generator (`cells::mosfet::Mosfet`) the flow's own cells use: one 40/0.5 µm device with
 /// contacts, implant, well and bulk tap — a real transistor, so LVS pairs it.
 /// (A hand-drawn bar of diff and poly with no implant or contacts extracts to
 /// nothing and unpairs the whole circuit.)
@@ -101,9 +101,9 @@ fn user_output_pmos(pdk: &Pdk) -> Macro {
         unit_w: 40_000,
         unit_l: 500,
         series_parallel: SeriesParallel::Parallel,
-        same_variant_required: true,
         dummy_required: false,
         route_matching_required: false,
+        class: None, kind: None, series: Vec::new(), style: None,
     });
     let variant = Mosfet::enumerate(&group, &c, pdk).into_iter().next().expect("a PMOS variant");
     let mut m = variant.draw(&group, &c, pdk);

@@ -32,6 +32,30 @@ pub struct Policy {
     /// busiest net's current (relative, so a µA bias net is not budgeted like a
     /// mA branch).
     pub ir_high_current_share: f64,
+    /// ProxNet star cap (EXT-13, Philis policy: the survey does not say whether rails are excluded;
+    /// BAL1-49).
+    pub pn_max_degree: usize,
+    /// Series resistance below which a diffusion on a pin net is a
+    /// minority-carrier injector, Ω (GAP-03): Hastings §14.2 L43629–43638
+    /// (below about 50 kΩ); H05-47 (10 kΩ usual, 50–100 kΩ conservative).
+    pub inj_series_ohm: f64,
+    /// Yield reserve in spec σ held back from every margin (EXT-21): graeb_centering.txt
+    /// L4266–4281, three-σ design.
+    pub beta_target: f64,
+    /// Philis policy: a set's allowance is at most this many of its random 1σ (EXT-21).
+    pub max_eta: f32,
+    /// Philis policy: a set explaining less than this share of every spec's variance is
+    /// Minimal (EXT-21; < 1 %).
+    pub minor_weight: f32,
+    /// Philis policy (BAL2-16): keep sensitivity terms that help a spec in its
+    /// parasitic budget row (EXT-25); off, a row prices only adverse parasitics.
+    pub credit_helpful: bool,
+    /// Philis policy: wire length, µm, whose R and ground C are the reference
+    /// for a net's R/C class (EXT-25).
+    pub rc_ref_len_um: f64,
+    /// Philis policy: share of a bound's margin the reference wire must spend
+    /// for its R or C to class the net (EXT-25).
+    pub rc_share: f64,
 }
 
 impl Default for Policy {
@@ -47,6 +71,14 @@ impl Default for Policy {
             ir_headroom_share: 0.1,
             ir_rail_share: 0.01,
             ir_high_current_share: 0.1,
+            pn_max_degree: 8,
+            inj_series_ohm: 50_000.0,
+            beta_target: 3.0,
+            max_eta: 3.0,
+            minor_weight: 0.01,
+            credit_helpful: false,
+            rc_ref_len_um: 100.0,
+            rc_share: 0.05,
         }
     }
 }

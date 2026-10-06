@@ -242,7 +242,7 @@ fn run_circuit(
     // A counter its owning item has not built yet prints `n/a`, never a 0.
     let na = |v: Option<u64>| v.map_or_else(|| "n/a".to_string(), |v| v.to_string());
     let outcome = format!(
-        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | C total {:.1} fF, sig {:.1} fF | key tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {}",
+        "{} cells, {} nets | WL {} nm, unrouted {}{} | route hard {} | overuse {} | DRC {} | LVS {} | ERC {}{} | warnings {} | skipped [{}] | EM/IR ran {}/{} | C total {:.1} fF, sig {:.1} fF | key tier {:.1} | area {:.1} um2 | util {:.1}% | active {:.1}% | best {}/{}{} | outer {}, esc {}, pruned {} | seed {} | bias {} | EM {} | usage {:.3} | lattice off {} | overlap {:.0} nm2 | clr residue {:.0} nm2 | matched mismatch {} | islands extra {} | clusters extra {} | dp temps {}, proposals {}, accepted {}, decode fail {}, matched incompat {} | axes on lattice {}/{}",
         sol.netlist.devices.len(),
         n_nets,
         wl,
@@ -262,6 +262,8 @@ fn run_circuit(
         if engine > 0 { format!(" | engine fails {engine}") } else { String::new() },
         signoff.warnings.len(),
         signoff.coverage.skipped_rules.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>().join(", "),
+        signoff.coverage.em_ir.0,
+        signoff.coverage.em_ir.1,
         // Total (every net, coupling on both ends, rails included) and
         // signal-class C (NaN on a label short), both from this signoff of the final (filled)
         // layout; then the search key's C tier (`RunStats::c_tier`), from
@@ -277,10 +279,20 @@ fn run_circuit(
         if s.converged { " converged" } else { " budget" },
         s.outer_iterations,
         s.variant_escalations,
+        s.pruned,
         seed,
         sol.metadata.bias.as_ref().map_or_else(
             || "none".to_string(),
-            |b| format!("{} uW, {}", b.total_power_uw, if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" })
+            |b| format!(
+                "{} uW, {}, EM at {:.3} K ({}), aging pairs {} (max dVds {:.1} mV), V-rating unknown {}",
+                b.total_power_uw,
+                if b.provenance.starts_with("SYNTH") { "probe" } else { "testbench" },
+                b.em_temp_k,
+                b.em_derate,
+                sol.metadata.aging.len(),
+                sol.metadata.aging.iter().map(|a| a.2).fold(0.0, f64::max),
+                sol.metadata.voltage_unknown
+            )
         ),
         // Per fixture (REL T3/T4): nets checked, of them violated, unknown, and
         // the worst known net's need/have (T3's `min(w/need) ≥ 1` is `use ≤ 1`).
@@ -300,11 +312,14 @@ fn run_circuit(
         s.place.clearance_residue_nm2,
         s.place.matched_geometry_mismatch,
         na(s.place.islands_extra.map(u64::from)),
+        na(s.place.clusters_extra.map(u64::from)),
         s.dp.temps,
         s.dp.proposals,
         s.dp.accepted,
         na(s.dp.decode_fail),
         na(s.dp.matched_incompatible.map(u64::from)),
+        s.dp.axes_on_lattice,
+        s.dp.axes,
     );
 
     // Per-constraint-type satisfaction: the run's own cell-space placement
@@ -342,7 +357,7 @@ fn run_circuit(
     let shapes = sol.geometry();
     let debug_dir = Path::new("target/bench_debug").join(&c.name);
     let _ = std::fs::create_dir_all(&debug_dir);
-    let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]);
+    let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]).unwrap_or_else(|e| panic!("{}: {e}", c.name));
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
     match library::post_layout_spice(&sol, pdk, &c.name) {
         Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),
@@ -487,7 +502,10 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            let ln = visualizer::parse_layer_names(&deck);
+            // Drawn layers only: a derived layer's `(0, 0)` row names nothing.
+            let gds = p.layer_gds();
+            let pairs: Vec<_> = p.layers.iter().map(|(n, id)| (n.clone(), gds[id.0 as usize])).filter(|(_, g)| *g != (0, 0)).collect();
+            let ln = visualizer::layer_names(&pairs);
             pdk_cache.insert(pdk_json_path.clone(), (p, ln));
         }
         let (pdk, layer_names) = &pdk_cache[&pdk_json_path];

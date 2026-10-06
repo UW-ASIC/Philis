@@ -51,7 +51,7 @@ pub struct Drawn {
     pub device: Option<crate::ids::DeviceId>,
     pub kind: DrawnKind,
     /// Terminal nodes in the LVS reference's pin order: R/C/D `[P, N]`; BJT
-    /// `cellgen::BJT_PINS` (the order `cellgen::reference` uses, one const so
+    /// `cellgen::BJT_PINS`, `[C, B, E]` (the order `cellgen::reference` uses, one const so
     /// the two cannot diverge).
     pub nodes: [Node; 3],
     /// Drawn body, nm: resistor segment W×L, MIM plate W×L, diode junction
@@ -91,9 +91,17 @@ pub enum KeepWhy {
     CapPlate { owner: u8 },
 }
 
-/// Per-variant figures; filled by CELL-19.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Figures {}
+/// Per-variant figures (CELL-19); empty for generators that draw none.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Figures {
+    /// (owner, "S"/"D", area nm², perimeter nm), sorted by (owner, terminal): BSIM AS/AD, PS/PD.
+    /// A region whose two sides are different (owner, terminal) counts half to each; gate-side
+    /// edges are excluded; regions beyond the outer dummy gates and the LOD moat are not counted.
+    pub sd: Vec<(u8, &'static str, i64, i64)>,
+    /// (owner, Ω): (R□_poly·W_f/(k·L) + R_cut)/N_f, k = 3 one-ended, 12 two-ended. Empty when the
+    /// deck characterises poly or its gate cut not.
+    pub gate_ohm: Vec<(u8, f32)>,
+}
 
 /// A dummy gate on member `owner`'s diffusion: gate and far side tied to the
 /// member's bulk, near side its `edge` terminal (`"S"` or `"D"`), so it is an
@@ -119,13 +127,7 @@ pub fn place_macro(m: &Macro, l: &Layout, i: usize) -> Macro {
     if i >= l.x.len() {
         return m.clone();
     }
-    let o = l.orient.get(i).copied().unwrap_or_default();
-    let anchor = o.apply_rect(m.bbox);
-    let (ax, ay) = (l.x[i] - l.hw[i] - anchor.x, l.y[i] - l.hh[i] - anchor.y);
-    let shift = |r: Rect| {
-        let r = o.apply_rect(r);
-        Rect { x: r.x + ax, y: r.y + ay, w: r.w, h: r.h }
-    };
+    let shift = |r: Rect| place_rect(m.bbox, r, l, i);
     Macro {
         bbox: shift(m.bbox),
         shapes: m.shapes.iter().map(|s| Shape { layer: s.layer, rect: shift(s.rect) }).collect(),
@@ -134,8 +136,19 @@ pub fn place_macro(m: &Macro, l: &Layout, i: usize) -> Macro {
         dummies: m.dummies.clone(),
         drawn: m.drawn.clone(),
         keepouts: m.keepouts.iter().map(|k| Keepout { rect: shift(k.rect), ..*k }).collect(),
-        figures: m.figures,
+        figures: m.figures.clone(),
     }
+}
+
+/// `r` (in the macro's local frame, whose bbox is `bbox`) as cell `i` of `l`
+/// places it: turned by `l.orient[i]`, then shifted so the turned bbox's
+/// lower-left lands on `(x − hw, y − hh)`. The one stamp [`place_macro`] applies.
+#[must_use]
+pub fn place_rect(bbox: Rect, r: Rect, l: &Layout, i: usize) -> Rect {
+    let o = l.orient.get(i).copied().unwrap_or_default();
+    let anchor = o.apply_rect(bbox);
+    let r = o.apply_rect(r);
+    Rect { x: r.x + l.x[i] - l.hw[i] - anchor.x, y: r.y + l.y[i] - l.hh[i] - anchor.y, w: r.w, h: r.h }
 }
 
 /// [`place_macro`] over the whole table.
@@ -252,6 +265,40 @@ mod tests {
         assert_eq!(p.drawn, drawn);
         let r = place_macro(&m, &at(Orient::R90), 0).keepouts[0].rect;
         assert_eq!((r.w, r.h), (50, 100));
+    }
+
+    /// `place_rect` is the stamp `place_macro` applies under every orient,
+    /// and that stamp centres the turned bbox on `(x, y)` with the shape inside.
+    #[test]
+    fn place_rect_is_place_macros_stamp() {
+        use Orient::{Mx, Mx180, Mx270, Mx90, R0, R180, R270, R90};
+        let m = Macro {
+            bbox: Rect { x: 0, y: 0, w: 1000, h: 200 },
+            shapes: vec![Shape { layer: LayerId(0), rect: Rect { x: 100, y: 50, w: 300, h: 40 } }],
+            ..Default::default()
+        };
+        for o in [R0, R90, R180, R270, Mx, Mx90, Mx180, Mx270] {
+            let turned = o.apply_rect(m.bbox);
+            let l = Layout {
+                x: vec![5000],
+                y: vec![700],
+                hw: vec![turned.w / 2],
+                hh: vec![turned.h / 2],
+                orient: vec![o],
+                variant: vec![0],
+                axis: vec![],
+                branch: vec![],
+                groups: vec![],
+                power_uw: vec![0],
+                temp_mc: vec![0],
+                units: Default::default(),
+            };
+            let p = place_macro(&m, &l, 0);
+            let r = place_rect(m.bbox, m.shapes[0].rect, &l, 0);
+            assert_eq!(p.shapes[0].rect, r, "{o:?}");
+            assert_eq!((p.bbox.x + p.bbox.w / 2, p.bbox.y + p.bbox.h / 2), (5000, 700), "{o:?}");
+            assert!(r.x >= p.bbox.x && r.y >= p.bbox.y && r.x + r.w <= p.bbox.x + p.bbox.w && r.y + r.h <= p.bbox.y + p.bbox.h, "{o:?}");
+        }
     }
 
     #[test]

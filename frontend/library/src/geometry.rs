@@ -32,21 +32,26 @@ pub struct PlacementMetrics {
     /// Matched pairs (`RuleBatch::matched_pairs`) drawn at different orient,
     /// or at different shape `(variant, hw, hh)` inside one shape set.
     pub matched_geometry_mismatch: u32,
-    /// Symmetry islands beyond one per group; `None` (not measured) until PLC-12.
+    /// Symmetry islands beyond one per axis: Σ residual of the `SymmetryIsland`
+    /// budget batches (PLC-12); `Some(0)` when there is none.
     pub islands_extra: Option<u32>,
+    /// The same count over the recognition blocks (glue excluded), each with
+    /// `touch = spacing.max_gap() + lattice`: metric only.
+    pub clusters_extra: Option<u32>,
 }
 
 /// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
-/// against the cut `lattice` and the cell-to-cell `clearance`, nm; `locks`
+/// against the cut `lattice` and the per-pair cell spacing `rules`; `locks`
 /// says which matched pairs must share a shape.
 #[must_use]
 pub fn placement_metrics(
     macros: &[Macro],
     l: &Layout,
     lattice: i32,
-    clearance: i32,
+    rules: &gp::PlaceRules,
     reqs: &analog::Requirements<Layout>,
     locks: &dp::locks::Locks,
+    groups: &[Vec<pnr_core::DeviceId>],
 ) -> PlacementMetrics {
     let n = l.x.len();
     let cells: f64 = (0..n).map(|i| 4.0 * f64::from(l.hw[i]) * f64::from(l.hh[i])).sum();
@@ -79,11 +84,28 @@ pub fn placement_metrics(
     PlacementMetrics {
         area_usage: if cells > 0.0 { (l.footprint_nm2() / cells) as f32 } else { 0.0 },
         lattice_off,
-        clearance_residue_nm2: gp::mechanics::encroachment(l, clearance) - overlap_nm2,
+        clearance_residue_nm2: rules.encroachment(l) - overlap_nm2,
         overlap_nm2,
         matched_geometry_mismatch,
-        islands_extra: None,
+        islands_extra: Some(reqs.budget.iter().filter(|b| b.kind() == "SymmetryIsland").map(|b| b.residual(l) as u32).sum()),
+        clusters_extra: Some(clusters_extra(l, groups, rules.spacing.max_gap() + lattice)),
     }
+}
+
+/// Σ over `groups` but the last (the glue block) with ≥ 2 distinct cells of
+/// their islands past the first ([`analog::placement::island::components`]).
+fn clusters_extra(l: &Layout, groups: &[Vec<pnr_core::DeviceId>], touch_nm: i32) -> u32 {
+    let n = l.x.len();
+    groups[..groups.len().saturating_sub(1)]
+        .iter()
+        .map(|g| {
+            let mut ids: Vec<u16> = g.iter().map(|d| d.0).filter(|&d| usize::from(d) < n).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            let m: Vec<pnr_core::ids::Target> = ids.into_iter().map(|d| pnr_core::ids::Target::Device(pnr_core::DeviceId(d))).collect();
+            if m.len() < 2 { 0 } else { analog::placement::island::components(l, &m, touch_nm) - 1 }
+        })
+        .sum()
 }
 
 /// Merge `layer`'s rects wherever two overlap or abut into exactly one
@@ -378,7 +400,7 @@ mod tests {
     /// c1: inside clearance only; origin 330 is off the lattice).
     #[test]
     fn placement_metrics_counts_each_defect() {
-        use analog::placement::symmetry::Symmetry;
+        use analog::placement::symmetry::{SymMode, Symmetry};
         use pnr_core::ids::{AxisId, DeviceId, Target};
         let mut l = layout_of(Orient::R0, 0, 0);
         l.x = vec![100, 200, 430];
@@ -387,7 +409,7 @@ mod tests {
         l.hh = vec![100; 3];
         l.orient = vec![Orient::R0; 3];
         l.variant = vec![0, 0, 1];
-        let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0) };
+        let sym = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Perfect };
         let reqs = analog::Requirements::<Layout> {
             // (0, 2) differs in variant; (0, 1) matches; (1, 1) is a pair collapsed into one cell.
             hard: vec![Box::new(vec![sym(0, 2), sym(0, 1), sym(1, 1)])],
@@ -397,7 +419,7 @@ mod tests {
         };
         // No variants: every pair is shape-locked.
         let locks = dp::locks::locks(&reqs, 3, &[]);
-        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs, &locks);
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, &gp::PlaceRules::uniform(100, 50), &reqs, &locks, &[]);
         assert_eq!(m.lattice_off, 1, "{m:?}");
         // c0–c1: 100 × 200.
         assert_eq!(m.overlap_nm2, 20_000.0, "{m:?}");
@@ -406,10 +428,10 @@ mod tests {
         assert_eq!(m.matched_geometry_mismatch, 2, "{m:?}");
         // Footprint 530 × 200 over 3 × 200 × 200.
         assert!((m.area_usage - 106_000.0 / 120_000.0).abs() < 1e-6, "{m:?}");
-        assert_eq!(m.islands_extra, None, "not measured before PLC-12");
+        assert_eq!((m.islands_extra, m.clusters_extra), (Some(0), Some(0)), "no island batch, no block");
         // A turned partner counts on orient alone: (0, 1) joins.
         l.orient[1] = Orient::R90;
-        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, 50, &reqs, &locks);
+        let m = placement_metrics(&vec![Macro::default(); 3], &l, 100, &gp::PlaceRules::uniform(100, 50), &reqs, &locks, &[]);
         assert_eq!(m.matched_geometry_mismatch, 3, "{m:?}");
     }
 

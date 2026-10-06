@@ -50,6 +50,27 @@ pub(crate) fn ota() -> Netlist {
     }
 }
 
+/// The three-stage op-amp (`examples/three_stage_opamp`, corpus `three_stage`).
+pub(crate) fn three_stage() -> Netlist {
+    // Nets: 0=n1 1=vin_p 2=tail 3=vss 4=n2 5=vin_n 6=vbias 7=vdd 8=n3 9=vout.
+    let (n, p) = (DeviceKind::Nmos, DeviceKind::Pmos);
+    Netlist {
+        devices: vec![
+            fet("M1", n, 1, 0, 2, 3, 4_000, 500),
+            fet("M2", n, 5, 4, 2, 3, 4_000, 500),
+            fet("M3", n, 6, 2, 3, 3, 8_000, 500),
+            fet("M4", p, 0, 0, 7, 7, 6_000, 500),
+            fet("M5", p, 0, 4, 7, 7, 6_000, 500),
+            fet("M6", p, 4, 8, 7, 7, 12_000, 500),
+            fet("M7", n, 6, 8, 3, 3, 6_000, 500),
+            fet("M8", p, 8, 9, 7, 7, 40_000, 500),
+            fet("M9", n, 6, 9, 3, 3, 20_000, 500),
+        ],
+        nets: nets(&["n1", "vin_p", "tail", "vss", "n2", "vin_n", "vbias", "vdd", "n3", "vout"]),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn diff_pair_halves_share_a_block() {
     let nl = ota();
@@ -421,9 +442,15 @@ fn guard_rings_tie_to_the_guarded_device_s_bulk() {
     // hardcoded `NetId(0)` — here `vout1` — and `dr` folds ring pins in as real
     // routing terminals, so the router wired every guard ring in the design to
     // that signal net.
-    let nl = ota();
-    let p = annotate(&nl, &AnnotationConfig::default());
-    assert!(!p.constraints.guard_rings.is_empty(), "matched FETs get rings");
+    // REL-07: only an aggressor gets a ring, so M1 is clocked; its bulk
+    // (net 3) is not net 0.
+    let nl = Netlist {
+        devices: vec![fet("M1", DeviceKind::Nmos, 1, 2, 3, 3, 1_000, 150), fet("M2", DeviceKind::Pmos, 1, 2, 4, 4, 1_000, 150)],
+        nets: nets(&["out", "clk", "x", "vss", "vdd"]),
+        ..Default::default()
+    };
+    let p = annotate(&nl, &AnnotationConfig { clock_nets: vec!["clk".into()], ..AnnotationConfig::default() });
+    assert!(!p.constraints.guard_rings.is_empty(), "clocked FETs get rings");
     for r in &p.constraints.guard_rings {
         let dev = &nl.devices[r.device.0 as usize];
         let bulk = dev.terminals.iter().find(|(t, _)| t == "B").expect("a FET states a bulk").1;
@@ -445,7 +472,7 @@ fn a_differential_stage_is_symmetric_about_one_axis() {
     assert_eq!(sym, 3, "diff pair + load pair + self-symmetric tail");
     let tail = p.constraints.unitization.iter().find(|u| u.devices == [DeviceId(4)]);
     assert!(tail.is_some(), "the tail gets a sizing directive");
-    assert!(p.constraints.guard_rings.iter().any(|g| g.device == DeviceId(4)), "and a ring");
+    assert!(p.constraints.guard_rings.is_empty(), "no aggressor: no ring (T8)");
 }
 
 /// AA-23: only declared selfs go on the axis. `telescopic_ota_full` declares
@@ -490,8 +517,8 @@ fn a_shared_gate_chain_is_a_series_stack_not_a_cascode() {
     let p = annotate(&nl, &AnnotationConfig::default());
     assert_eq!(p.blocks[0].devices.len(), 4, "one series_stack_4 group");
     assert!(p.blocks[0].sub_blocks.iter().all(|b| b.kind == BlockKind::Stack), "stack pairs, not a cascode");
-    // The shared gate net is still a Sensitive bias reference (EXT-18 changes this).
-    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Sensitive);
+    // The shared gate net (gates only) is a bias line (EXT-18: was `Sensitive`).
+    assert_eq!(p.net_classes[0].class, analog::metadata::NetClass::Bias);
 }
 
 #[test]
@@ -511,20 +538,31 @@ fn a_cascode_stack_is_adjacent_not_matched() {
     assert!(kinds.iter().any(|k| k.ends_with("Proximity")), "{kinds:?}");
     assert!(!kinds.iter().any(|k| k.ends_with("MatchedSet")), "{kinds:?}");
     assert!(p.placement.hard.is_empty());
-    // `vcas` (gates M2 only, no DC path) is still a Sensitive bias reference.
-    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Sensitive);
+    // `vcas` (gates M2 only, no DC path) is a bias line (EXT-18: was `Sensitive`).
+    assert_eq!(p.net_classes[3].class, analog::metadata::NetClass::Bias);
 }
 
 /// EXT-07: a `Stack` is adjacent/symmetric, not a gate reference, so it is no
 /// longer an isolation victim. A clocked switch elsewhere used to be an
-/// aggressor that forced isolation onto the stack's two devices.
+/// aggressor that forced isolation onto the stack's two devices. Since EXT-23
+/// a Bias-gated FET is a victim on its own, so `R1`/`R2` give both gates a DC
+/// path (Signal, not Bias): only the stack membership is under test.
 #[test]
 fn a_cascode_stack_is_not_an_isolation_victim() {
+    let r = |name: &str, p: u16| Device {
+        name: name.into(),
+        kind: DeviceKind::Resistor,
+        model: String::new(),
+        terminals: vec![("P".into(), pnr_core::NetId(p)), ("N".into(), pnr_core::NetId(2))],
+        params: vec![],
+    };
     let nl = Netlist {
         devices: vec![
             fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 4_000, 500),
             fet("M2", DeviceKind::Nmos, 3, 4, 1, 2, 8_000, 500),
             fet("XS", DeviceKind::Nmos, 5, 6, 2, 2, 1_000, 150),
+            r("R1", 0),
+            r("R2", 3),
         ],
         nets: nets(&["vin", "x", "VSS", "vcas", "out", "clk", "sw"]),
         ..Default::default()
@@ -596,7 +634,7 @@ fn shields_are_requested_only_against_a_clock() {
     b.shield_pairs(&mut pairs);
     assert!(!pairs.is_empty());
     let vss = 3u32;
-    assert!(pairs.iter().all(|&(_, r)| r == vss), "shielded by ground: {pairs:?}");
+    assert!(pairs.iter().all(|&(_, r, _)| r == vss), "shielded by ground: {pairs:?}");
 }
 
 #[test]
@@ -615,7 +653,7 @@ fn a_shielded_victim_books_no_coupling_to_its_shield() {
     let p = annotate(&nl, &cfg);
     let mut pairs = Vec::new();
     p.routing.budget.iter().find(|b| b.kind().ends_with("Shield")).expect("shield batch").shield_pairs(&mut pairs);
-    let (victim, vss) = pairs[0];
+    let (victim, vss, _) = pairs[0];
     let coup = p.routing.budget.iter().find(|b| b.kind().ends_with("CouplingBudget")).expect("coupling batch");
     // 100 mm of victim between its shield tracks 1 nm away: far past any budget.
     let wire = |y: i32| Shape { layer: LayerId(0), rect: Rect { x: 0, y, w: 100_000_000, h: 1 } };
@@ -631,10 +669,10 @@ fn a_shielded_victim_books_no_coupling_to_its_shield() {
     assert!(coup.violations(&clocked) > 0, "a clock beside the victim still counts");
 }
 
+/// EXT-20 (AA-23): a mirror with no compound is matched, not mirrored: one
+/// `MatchedSet` on both devices and its Axis Orientation, no Symmetry.
 #[test]
-fn a_lone_mirror_stage_is_symmetric_too() {
-    // No diff pair in the stage: the mirror pair still shares the stage axis,
-    // hard (the equality) and cost (the pull toward it).
+fn a_lone_mirror_is_matched_not_mirrored() {
     let nl = Netlist {
         devices: vec![
             fet("XM1", DeviceKind::Pmos, 0, 0, 2, 2, 5_000, 1_000),
@@ -644,14 +682,18 @@ fn a_lone_mirror_stage_is_symmetric_too() {
         ..Default::default()
     };
     let p = annotate(&nl, &AnnotationConfig::default());
-    let sym = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>| {
-        a.iter().filter(|b| b.kind() == "Symmetry").map(|b| b.count()).sum::<usize>()
-    };
-    assert_eq!(sym(&p.placement.hard), 1);
-    assert_eq!(sym(&p.placement.cost), 1);
-    let mut pairs = Vec::new();
-    p.placement.hard.iter().for_each(|b| b.mirror_pairs(&mut pairs));
-    assert_eq!(pairs, [(0, 1, 0)], "the reference and output mirror about stage 0's axis");
+    let count = |a: &Vec<Box<dyn RuleBatch<pnr_core::Layout>>>, k: &str| a.iter().filter(|b| b.kind() == k).map(|b| b.count()).sum::<usize>();
+    assert_eq!(count(&p.placement.hard, "Symmetry") + count(&p.placement.cost, "Symmetry"), 0);
+    let sets: Vec<Vec<u32>> = (p.placement.budget.iter().filter(|b| b.kind() == "MatchedSet"))
+        .map(|b| {
+            let mut t = Vec::new();
+            b.touched(&mut t);
+            t.sort_unstable();
+            t
+        })
+        .collect();
+    assert_eq!(sets, [vec![0, 1]]);
+    assert_eq!(p.placement.hard.iter().filter(|b| b.kind() == "Orientation").count(), 1);
 }
 
 #[test]
@@ -669,6 +711,53 @@ fn matched_sets_are_budgeted_and_missing_deck_terms_are_listed() {
     assert!(!full.missing.iter().any(|m| m.0 == "MatchedSet"));
 }
 
+/// MAT-16: with the deck's S(L) fit the XM1/XM2 pair's gradient term reads
+/// S at L = 0.48 µm (0.580 µV/µm), 0.356 of the worst-case 1.63.
+#[test]
+fn svt_fit_sets_s_of_l() {
+    let mut nl = ota();
+    for d in &mut nl.devices[..2] {
+        d.params.iter_mut().filter(|(k, _)| k == "l").for_each(|(_, v)| *v = 480);
+    }
+    // Two point cells 1 mm apart, no units.
+    let l = pnr_core::Layout {
+        x: vec![0, 1_000_000],
+        y: vec![0; 2],
+        hw: vec![0; 2],
+        hh: vec![0; 2],
+        axis: vec![0; 8],
+        groups: vec![],
+        orient: vec![pnr_core::Orient::default(); 2],
+        variant: vec![0; 2],
+        branch: Vec::new(),
+        power_uw: vec![0; 2],
+        temp_mc: vec![0; 2],
+        units: Default::default(),
+    };
+    let ratio = |fit| {
+        let mut cfg = AnnotationConfig::default();
+        cfg.process.avt_mv_um = [Some(5.0), Some(6.0)];
+        cfg.process.svt_fit = fit;
+        cfg.process.svt_uv_per_um = Some(1.63);
+        let p = annotate(&nl, &cfg);
+        let set = (p.placement.budget.iter())
+            .find(|b| {
+                let mut t = Vec::new();
+                b.touched(&mut t);
+                t.sort_unstable();
+                b.kind() == "MatchedSet" && t == [0, 1]
+            })
+            .expect("XM1/XM2 MatchedSet");
+        let mut rows = Vec::new();
+        set.ledger_rows(&l, &mut rows);
+        rows[0].sigma_layout / 1.63
+    };
+    let r = ratio(Some((0.1835, 0.03533)));
+    assert!((r - 0.356).abs() < 0.005, "{r}");
+    let r = ratio(None);
+    assert!((r - 1.0).abs() < 1e-4, "{r}");
+}
+
 #[test]
 fn clocked_devices_are_kept_away_from_matched_ones() {
     let is_iso = |b: &Box<dyn RuleBatch<pnr_core::Layout>>| b.kind().ends_with("Isolation");
@@ -682,7 +771,7 @@ fn clocked_devices_are_kept_away_from_matched_ones() {
     nl.devices.push(fet("XS", DeviceKind::Nmos, clk, sw, 3, 3, 1_000, 150));
     let p = annotate(&nl, &AnnotationConfig::default());
     let b = p.placement.cost.iter().find(|b| is_iso(b)).expect("isolation pull");
-    assert_eq!(b.count(), 4, "XS against each of the four matched devices");
+    assert_eq!(b.count(), 5, "XS against the four matched devices and the bias-gated tail (EXT-23)");
     assert!(!p.placement.budget.iter().any(is_iso), "uncalibrated: a pull, not a budget");
     assert!(p.missing.iter().any(|m| m.0 == "Isolation"), "and reported unknown");
 
@@ -744,4 +833,215 @@ fn more_nets_than_u16_ids_is_refused_not_wrapped() {
     // `NetId(n as u16)` would alias net 65536 onto net 0 (AA-35).
     let nl = Netlist { devices: Vec::new(), nets: vec![Net { name: "n".into() }; 65_536], ..Default::default() };
     let _ = annotate(&nl, &AnnotationConfig::default());
+}
+
+// ── REL-07: guard rings by role ──────────────────────────────────────────
+
+mod rings {
+    use super::*;
+    use crate::rings::{plan, Carrier, RingInputs};
+    use analog::cell::{GuardRingType, RingRole};
+    use pnr_core::SubstrateKind;
+
+    const SUB30: (&str, &str) = ("GuardRing", "victim rings: no quiet ring return (SUB-30)");
+
+    /// M1 (NMOS, gate `clk`), M2/M3 (NMOS victims), M4 (PMOS). Nets: 0=clk
+    /// 1=x 2=vss 3=vssq 4=vdd.
+    fn nl() -> Netlist {
+        Netlist {
+            devices: vec![
+                fet("M1", DeviceKind::Nmos, 0, 1, 2, 2, 1_000, 150),
+                fet("M2", DeviceKind::Nmos, 1, 1, 2, 2, 1_000, 150),
+                fet("M3", DeviceKind::Nmos, 1, 1, 2, 2, 1_000, 150),
+                fet("M4", DeviceKind::Pmos, 1, 1, 4, 4, 1_000, 150),
+            ],
+            nets: nets(&["clk", "x", "vss", "vssq", "vdd"]),
+            ..Default::default()
+        }
+    }
+
+    fn inputs<'a>(nl: &'a Netlist, aggressor: &'a [bool], victim: &'a [bool], injector: &'a [Option<Carrier>]) -> RingInputs<'a> {
+        RingInputs {
+            netlist: nl,
+            aggressor,
+            victim,
+            injector,
+            substrate: SubstrateKind::Bulk,
+            quiet_ring_net: None,
+            highest_supply: Some(NetId(4)),
+            ground: Some(NetId(2)),
+            min_ring_width_nm: 420,
+            ecgr_min_width_nm: None,
+            ecgr_drawable: false,
+            hcgr_drawable: false,
+            tubs: &[],
+            tub_drawable: false,
+        }
+    }
+
+    /// GAP-14: tub members get the tub's ring on its tie; the rest keep their rows.
+    #[test]
+    fn tub_members_get_a_tub_ring() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(1), DeviceId(2)], NetId(4))];
+        let i = RingInputs { tubs: &tubs, tub_drawable: true, ..inputs(&nl, &[true, false, false, false], &[false; 4], &[None; 4]) };
+        let (rings, missing) = plan(&i);
+        let tub: Vec<_> = rings.iter().filter(|r| r.ring_type == GuardRingType::Tub { id: 0 }).map(|r| (r.device, r.connection_net, r.shareable)).collect();
+        assert_eq!(tub, [(DeviceId(1), NetId(4), true), (DeviceId(2), NetId(4), true)]);
+        let other: Vec<_> = rings.iter().filter(|r| !matches!(r.ring_type, GuardRingType::Tub { .. })).map(|r| (r.device, r.ring_type)).collect();
+        assert_eq!(other, [(DeviceId(0), GuardRingType::Tap { in_well: false })]);
+        assert!(!missing.iter().any(|m| m.0 == "IsolatedTub"));
+    }
+
+    #[test]
+    fn no_dnwell_falls_back_and_says_so() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(1), DeviceId(2)], NetId(4))];
+        let (rings, missing) = plan(&RingInputs { tubs: &tubs, ..inputs(&nl, &[true, false, false, false], &[false; 4], &[None; 4]) });
+        assert!(rings.iter().all(|r| !matches!(r.ring_type, GuardRingType::Tub { .. })));
+        assert!(missing.contains(&("IsolatedTub", "deck has no deep n-well: tub drawn as an ordinary ring")), "{missing:?}");
+    }
+
+    #[test]
+    fn an_ota_without_clocks_or_ports_gets_no_rings() {
+        assert!(annotate(&ota(), &AnnotationConfig::default()).constraints.guard_rings.is_empty());
+    }
+
+    #[test]
+    fn clocked_devices_get_aggressor_tap_rings() {
+        let nl = nl();
+        let (rings, missing) = plan(&inputs(&nl, &[true, false, false, false], &[false, true, false, false], &[None; 4]));
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.device, r.ring_type, r.role, r.connection_net), (DeviceId(0), GuardRingType::Tap { in_well: false }, RingRole::Aggressor, NetId(2)));
+        assert!(missing.contains(&SUB30), "{missing:?}");
+    }
+
+    #[test]
+    fn a_quiet_net_turns_on_victim_rings() {
+        let nl = nl();
+        let i = RingInputs { quiet_ring_net: Some(NetId(3)), ..inputs(&nl, &[true, false, false, false], &[false, true, true, false], &[None; 4]) };
+        let (rings, missing) = plan(&i);
+        let v: Vec<_> = rings.iter().filter(|r| r.role == RingRole::Victim).collect();
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|r| r.connection_net == NetId(3) && r.shareable));
+        assert!(!missing.contains(&SUB30));
+    }
+
+    #[test]
+    fn an_electron_injector_gets_a_supply_tied_ecgr() {
+        let nl = nl();
+        let inj = [Some(Carrier::Electrons), None, None, None];
+        let (rings, missing) = plan(&RingInputs { ecgr_drawable: true, ..inputs(&nl, &[false; 4], &[false; 4], &inj) });
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.ring_type, r.role, r.connection_net, r.min_width_nm, r.shareable), (GuardRingType::Ecgr, RingRole::Injector, NetId(4), 420, false));
+        assert!(missing.contains(&("GuardRing", "ECGR width rule not given: collection efficiency unknown")), "{missing:?}");
+    }
+
+    #[test]
+    fn a_hole_injector_falls_back_to_a_well_tap() {
+        let nl = nl();
+        let inj = [None, None, None, Some(Carrier::Holes)];
+        let (rings, _) = plan(&inputs(&nl, &[false; 4], &[false; 4], &inj));
+        assert_eq!(rings.len(), 1);
+        let r = &rings[0];
+        assert_eq!((r.device, r.ring_type, r.role, r.connection_net), (DeviceId(3), GuardRingType::Tap { in_well: true }, RingRole::Injector, NetId(4)));
+    }
+
+    #[test]
+    fn epi_substrate_draws_no_aggressor_or_victim_rings() {
+        let nl = nl();
+        let i = RingInputs {
+            substrate: SubstrateKind::EpiOnLowRes,
+            quiet_ring_net: Some(NetId(3)),
+            ..inputs(&nl, &[true, false, false, false], &[false, true, true, false], &[None; 4])
+        };
+        assert!(plan(&i).0.is_empty());
+    }
+}
+
+#[test]
+fn intent_axes_per_compound() {
+    let p = annotate(&ota(), &AnnotationConfig::default());
+    // EXT-14 fills compounds (one here), EXT-15 sets (DP and load; without a unit
+    // deck they have no unit); EXT-20: one axis per compound.
+    assert!(p.intent.sets.len() == 2 && p.intent.compounds.len() == 1);
+    assert_eq!(p.axis_count, 1);
+    assert!(p.blocks.len() > 1, "not per block");
+}
+
+/// EXT-21: offset f0 0, hi 5 (M 5) touches the DP (S 1) and the load (S 0.2);
+/// K 2 gives the DP 5/(2·1) = 2.5 mV (its cap 3·5/√10 = 4.74 does not bind)
+/// and the load min(12.5, 3·5/√20 = 3.35).
+#[test]
+fn ext21_ota_dp_allowance_below_load() {
+    use crate::evidence::{Evidence, Sensitivities, SpecSens};
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.avt_mv_um = [Some(5.0), Some(5.0)];
+    let d_vt = vec![(DeviceId(0), 1.0), (DeviceId(1), -1.0), (DeviceId(2), 0.2), (DeviceId(3), -0.2)];
+    let s = SpecSens { metric: "offset".into(), f0: 0.0, lo: None, hi: Some(5.0), proc: None, sigma_f: None, d_c: vec![], d_r: vec![], d_vt, d_t: vec![], d_cc: vec![] };
+    let ev = Evidence { sens: Some(Sensitivities { specs: vec![s] }), ..Evidence::default() };
+    let p = crate::annotate_with(&ota(), &cfg, &ev);
+    let allowance = |d: u16| p.intent.sets.iter().find(|s| s.members.iter().any(|m| m.device == DeviceId(d))).and_then(|s| s.allowance);
+    let (dp, load) = (allowance(0).expect("DP allowance"), allowance(2).expect("load allowance"));
+    assert!((dp - 2.5).abs() < 1e-4, "{dp}");
+    assert!(dp < load, "{dp} vs {load}");
+    let bare = annotate(&ota(), &cfg);
+    assert!(bare.intent.sets.iter().all(|s| s.allowance.is_none()));
+}
+
+/// EXT-21 class rules: σ_f = 4 mV puts the load (σ ≈ 1.58 mV, S = 0.2) at weight
+/// ≈ 0.006 < `minor_weight` and the DP (σ ≈ 2.24 mV, S = 1) at ≈ 0.31, so D5 makes
+/// only the load (Minimal, Spec); the ceiling 2 + β·σ_f leaves a 2 mV margin, so
+/// the DP's allowance is 1 mV and its 6 mV target makes it (Moderate, Spec), apart
+/// from both the role default (Moderate, Role) and D5. (At the 2.5 mV of
+/// `ext21_ota_dp_allowance_below_load` the 15 mV target is itself Minimal.)
+#[test]
+fn ext21_minor_weight_and_allowance_set_class() {
+    use crate::evidence::{Evidence, Sensitivities, SpecSens};
+    use analog::intent::{ClassSource, MatchClass};
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.avt_mv_um = [Some(5.0), Some(5.0)];
+    let d_vt = vec![(DeviceId(0), 1.0), (DeviceId(1), -1.0), (DeviceId(2), 0.2), (DeviceId(3), -0.2)];
+    let sf = 4.0;
+    let s = SpecSens { metric: "offset".into(), f0: 0.0, lo: None, hi: Some(2.0 + cfg.policy.beta_target * sf), proc: None, sigma_f: Some(sf), d_c: vec![], d_r: vec![], d_vt, d_t: vec![], d_cc: vec![] };
+    let ev = Evidence { sens: Some(Sensitivities { specs: vec![s] }), ..Evidence::default() };
+    let p = crate::annotate_with(&ota(), &cfg, &ev);
+    let set = |d: u16| p.intent.sets.iter().find(|s| s.members.iter().any(|m| m.device == DeviceId(d))).expect("set");
+    let (dp, load) = (set(0), set(2));
+    assert!(load.weight.is_some_and(|w| w < cfg.policy.minor_weight), "{:?}", load.weight);
+    assert!(dp.weight.is_some_and(|w| w > cfg.policy.minor_weight), "{:?}", dp.weight);
+    assert_eq!((load.class, load.class_source), (MatchClass::Minimal, ClassSource::Spec));
+    assert_ne!((dp.class, dp.class_source), (MatchClass::Minimal, ClassSource::Spec));
+    assert_eq!(dp.kind, analog::intent::MatchKind::Voltage);
+    assert!((dp.allowance.expect("DP allowance") - 1.0).abs() < 1e-4, "{:?}", dp.allowance);
+    let mut diags = Vec::new();
+    let mut ctx = crate::class::ClassCtx { user: None, spec_6sigma: Some(6.0 * 1.0), role: crate::class::SetRole::InputPair, diags: &mut diags };
+    assert_eq!((dp.class, dp.class_source), crate::class::class_of(dp, &mut ctx));
+    assert_eq!((dp.class, dp.class_source), (MatchClass::Moderate, ClassSource::Spec));
+    // Without σ_f there is no weight, so the load keeps its role class.
+    let bare = annotate(&ota(), &cfg);
+    let load = bare.intent.sets.iter().find(|s| s.members.iter().any(|m| m.device == DeviceId(2))).expect("set");
+    assert_ne!(load.class, MatchClass::Minimal);
+}
+
+/// EXT-25 (AA-25): a drain-only net's load is off-netlist, so it is unbudgeted
+/// and listed missing until a sidecar `Load` states it; a gate-driving net
+/// (vbias) keeps its gate-load budget.
+#[test]
+fn drain_only_net_without_load_is_unknown() {
+    let mut cfg = AnnotationConfig::default();
+    cfg.process.gate_af_per_um2 = Some(8325.0);
+    cfg.process.wire_af_per_um = Some(50.0);
+    let budget = |p: &crate::Problem, n: u16| p.net_classes[n as usize].c_budget_af;
+    let missing = |p: &crate::Problem| p.missing.iter().any(|m| m.0 == "ParasiticBudget" && m.1.contains("AA-25"));
+    let p = annotate(&ota(), &cfg);
+    assert_eq!((budget(&p, 4), budget(&p, 2)), (None, None), "vout2, vtail");
+    assert!(missing(&p));
+    assert!(budget(&p, 6).is_some(), "vbias drives gates");
+    cfg.loads = vec![(NetId(4), 1e6)];
+    let p = annotate(&ota(), &cfg);
+    assert!(budget(&p, 4).is_some());
+    assert!(budget(&p, 6).is_some());
 }

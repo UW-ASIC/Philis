@@ -84,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "analog",
  "pnr_core",
+ "serde_json",
 ]
 
 [[package]]
@@ -132,6 +133,7 @@ dependencies = [
  "analog",
  "annotator",
  "gpurify",
+ "gr",
  "library",
  "pnr_core",
  "serde_json",
@@ -926,6 +928,7 @@ dependencies = [
  "gr",
  "macro_master",
  "pnr_core",
+ "serde_json",
  "verify",
  "visualizer",
 ]
@@ -1430,6 +1433,7 @@ version = "0.1.0"
 dependencies = [
  "library",
  "pnr_core",
+ "serde_json",
  "verify",
 ]
 
@@ -2085,7 +2089,6 @@ dependencies = [
  "earcutr",
  "pnr_core",
  "pollster",
- "serde_json",
  "wgpu",
  "winit",
 ]

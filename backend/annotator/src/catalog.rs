@@ -2290,6 +2290,51 @@ pub const DIFF_PAIR_WITH_REFERENCE: Pattern = Pattern {
 /// All registered patterns, ordered by priority (highest first).
 /// The engine applies greedy non-overlapping selection, so larger/
 /// more-specific patterns consume devices before smaller ones can.
+// ═══════════════════════════════════════════════════════════════════════
+//  Bipolar primitives (EXT-19; Hastings §9: ratioed pair, diff pair, mirror)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// The three bipolar 2-device patterns for one polarity: slot 0 of kind `$k`,
+/// slot 1 the same kind with an exact emitter (`ExactAs`: W/L or a
+/// fixed-geometry model).
+macro_rules! bjt_patterns {
+    ($ratio:ident, $diff:ident, $mirror:ident, $k:expr, $sfx:literal) => {
+        /// Ratioed pair (bandgap ΔV_BE core): shared base, distinct emitters; the
+        /// base may be a rail (`bgr_core`). Ratio from `m`.
+        pub const $ratio: Pattern = Pattern {
+            name: concat!("bjt_ratioed_pair_", $sfx),
+            priority: 9,
+            slots: &[
+                Slot { kind: SlotKind::Kind($k), ..S_ANY },
+                Slot { kind: SlotKind::SameKindAs(0), size_match: SizeMatch::ExactAs(0), ..S_ANY },
+            ],
+            links: &[eq(0, "B", 1, "B"), ne(0, "E", 1, "E")],
+        };
+        /// Differential pair: shared signal emitter node, distinct bases and collectors.
+        pub const $diff: Pattern = Pattern {
+            name: concat!("bjt_diff_pair_", $sfx),
+            priority: 10,
+            slots: &[
+                Slot { kind: SlotKind::Kind($k), ..S_ANY },
+                Slot { kind: SlotKind::SameKindAs(0), size_match: SizeMatch::ExactAs(0), ..S_ANY },
+            ],
+            links: &[eq_sig(0, "E", 1, "E"), ne(0, "B", 1, "B"), ne(0, "C", 1, "C")],
+        };
+        /// Mirror: diode-connected reference (C == B), shared base and emitter.
+        pub const $mirror: Pattern = Pattern {
+            name: concat!("bjt_mirror_", $sfx),
+            priority: 8,
+            slots: &[
+                Slot { kind: SlotKind::Kind($k), diode: DiodeReq::Required, ..S_ANY },
+                Slot { kind: SlotKind::SameKindAs(0), size_match: SizeMatch::ExactAs(0), ..S_ANY },
+            ],
+            links: &[eq(0, "B", 1, "B"), eq(0, "E", 1, "E")],
+        };
+    };
+}
+bjt_patterns!(BJT_RATIOED_PAIR_NPN, BJT_DIFF_PAIR_NPN, BJT_MIRROR_NPN, pnr_core::netlist::DeviceKind::Npn, "npn");
+bjt_patterns!(BJT_RATIOED_PAIR_PNP, BJT_DIFF_PAIR_PNP, BJT_MIRROR_PNP, pnr_core::netlist::DeviceKind::Pnp, "pnp");
+
 pub const PATTERNS: &[Pattern] = &[
     // ── 8-device composites (50–59) ──
     TELESCOPIC_OTA_FULL,
@@ -2393,6 +2438,12 @@ pub const PATTERNS: &[Pattern] = &[
     CASCODE,
     DEGENERATION_PAIR,
     SWITCH_PAIR,
+    BJT_DIFF_PAIR_NPN,
+    BJT_DIFF_PAIR_PNP,
+    BJT_RATIOED_PAIR_NPN,
+    BJT_RATIOED_PAIR_PNP,
+    BJT_MIRROR_NPN,
+    BJT_MIRROR_PNP,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2443,6 +2494,13 @@ pub const ROLES: &[(&str, Roles)] = &[
     ("current_mirror_1_to_2", roles(&[(0, 1, CurrentMirror), (0, 2, CurrentMirror)], &[], &[])),
     // Slots 0,1 = one polarity's pair, 2,3 = the complement's (rail-to-rail input).
     ("complementary_diff_pair", roles(&[(0, 1, DiffPair), (2, 3, DiffPair)], &[], &[])),
+    // EXT-19: a ratioed pair is matched (a MatchBlock edge); `class::kind_of` makes it Voltage (ΔV_BE).
+    ("bjt_ratioed_pair_npn", roles(&[(0, 1, CurrentMirror)], &[], &[])),
+    ("bjt_ratioed_pair_pnp", roles(&[(0, 1, CurrentMirror)], &[], &[])),
+    ("bjt_diff_pair_npn", roles(&[(0, 1, DiffPair)], &[], &[])),
+    ("bjt_diff_pair_pnp", roles(&[(0, 1, DiffPair)], &[], &[])),
+    ("bjt_mirror_npn", roles(&[(0, 1, CurrentMirror)], &[], &[])),
+    ("bjt_mirror_pnp", roles(&[(0, 1, CurrentMirror)], &[], &[])),
 ];
 
 /// `ROLES` entry; else for a 2-slot pattern today's [`BlockKind::from_template`]
@@ -2476,8 +2534,8 @@ mod tests {
     /// The slots `kind` and `size_match` refer to (0, 1 or 2 of them).
     fn back_refs(slot: &Slot) -> impl Iterator<Item = u8> {
         let kr = match slot.kind {
-            SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) => Some(r),
-            SlotKind::AnyFet => None,
+            SlotKind::SameTypeAs(r) | SlotKind::ComplementOf(r) | SlotKind::SameKindAs(r) => Some(r),
+            SlotKind::AnyFet | SlotKind::Kind(_) => None,
         };
         let sr = match slot.size_match {
             SizeMatch::ExactAs(r) | SizeMatch::SameLAs(r) => Some(r),
@@ -2503,8 +2561,11 @@ mod tests {
                     "{}: link slot out of range",
                     p.name
                 );
-                for pin in [l.pin_a, l.pin_b] {
-                    assert!(["G", "D", "S", "B"].contains(&pin), "{}: link pin {pin} not G/D/S/B", p.name);
+                for (slot, pin) in [(l.a, l.pin_a), (l.b, l.pin_b)] {
+                    // A bipolar slot (EXT-19) is `Kind(Npn|Pnp)` or `SameKindAs` one.
+                    let bjt = matches!(p.slots[slot as usize].kind, SlotKind::Kind(DeviceKind::Npn | DeviceKind::Pnp) | SlotKind::SameKindAs(_));
+                    let ok: &[&str] = if bjt { &["C", "B", "E"] } else { &["G", "D", "S", "B"] };
+                    assert!(ok.contains(&pin), "{}: link pin {pin} not {ok:?}", p.name);
                 }
             }
             let mut link_keys: Vec<String> = p.links.iter().map(|l| format!("{l:?}")).collect();
@@ -2514,14 +2575,15 @@ mod tests {
         }
     }
 
-    /// FET terminal index `G/D/S/B = 0..3` within a slot's 4-pin block.
-    fn pin_idx(slot: u8, pin: &str) -> u32 {
-        slot as u32 * 4 + match pin {
-            "G" => 0,
-            "D" => 1,
-            "S" => 2,
-            "B" => 3,
-            _ => unreachable!("not a FET pin"),
+    /// Terminal index within a slot's 4-pin block: FET `G/D/S/B = 0..3`, BJT
+    /// `B/C/E = 0..2` (base, collector, emitter in the gate, drain, source places).
+    fn pin_idx(slot: u8, pin: &str, bjt: bool) -> u32 {
+        slot as u32 * 4 + match (bjt, pin) {
+            (false, "G") | (true, "B") => 0,
+            (false, "D") | (true, "C") => 1,
+            (false, "S") | (true, "E") => 2,
+            (false, "B") => 3,
+            _ => unreachable!("not a pin of this family"),
         }
     }
 
@@ -2530,25 +2592,6 @@ mod tests {
     /// demand, every other `B` tied to its device's own rail.
     fn minimal_netlist(p: &'static Pattern) -> Netlist {
         let n = p.slots.len();
-        let mut uf = pnr_core::UnionFind::new(n * 4);
-        for l in p.links {
-            if matches!(l.rel, PinRel::Same | PinRel::SameSignal) {
-                uf.union(pin_idx(l.a, l.pin_a), pin_idx(l.b, l.pin_b));
-            }
-        }
-        for (k, slot) in p.slots.iter().enumerate() {
-            if matches!(slot.diode, DiodeReq::Required) {
-                uf.union(pin_idx(k as u8, "G"), pin_idx(k as u8, "D"));
-            }
-        }
-        let linked_b: Vec<bool> = (0..n)
-            .map(|k| {
-                p.links.iter().any(|l| {
-                    (l.a as usize == k && l.pin_a == "B") || (l.b as usize == k && l.pin_b == "B")
-                })
-            })
-            .collect();
-
         let mut kinds = vec![DeviceKind::Nmos; n];
         for (k, slot) in p.slots.iter().enumerate() {
             kinds[k] = match slot.kind {
@@ -2557,8 +2600,30 @@ mod tests {
                 SlotKind::ComplementOf(r) => {
                     if kinds[r as usize] == DeviceKind::Nmos { DeviceKind::Pmos } else { DeviceKind::Nmos }
                 }
+                SlotKind::Kind(k) => k,
+                SlotKind::SameKindAs(r) => kinds[r as usize],
             };
         }
+
+        let bjt = |k: u8| matches!(kinds[k as usize], DeviceKind::Npn | DeviceKind::Pnp);
+        let mut uf = pnr_core::UnionFind::new(n * 4);
+        for l in p.links {
+            if matches!(l.rel, PinRel::Same | PinRel::SameSignal) {
+                uf.union(pin_idx(l.a, l.pin_a, bjt(l.a)), pin_idx(l.b, l.pin_b, bjt(l.b)));
+            }
+        }
+        for (k, slot) in p.slots.iter().enumerate() {
+            if matches!(slot.diode, DiodeReq::Required) {
+                uf.union(pin_idx(k as u8, "G", false), pin_idx(k as u8, "D", false));
+            }
+        }
+        let linked_b: Vec<bool> = (0..n)
+            .map(|k| {
+                p.links.iter().any(|l| {
+                    !bjt(k as u8) && ((l.a as usize == k && l.pin_a == "B") || (l.b as usize == k && l.pin_b == "B"))
+                })
+            })
+            .collect();
 
         let mut nets: Vec<Net> = Vec::new();
         let mut net_of_root: HashMap<u32, NetId> = HashMap::new();
@@ -2580,14 +2645,15 @@ mod tests {
 
         let devices = (0..n)
             .map(|k| {
-                let terminals = ["G", "D", "S", "B"]
-                    .into_iter()
-                    .map(|pin| {
-                        let net = if pin == "B" && !linked_b[k] {
+                let pins: &[&str] = if bjt(k as u8) { &["C", "B", "E"] } else { &["G", "D", "S", "B"] };
+                let terminals = pins
+                    .iter()
+                    .map(|&pin| {
+                        let net = if pin == "B" && !bjt(k as u8) && !linked_b[k] {
                             let name = if kinds[k] == DeviceKind::Nmos { "VSS" } else { "VDD" };
                             rail_net(name, &mut nets)
                         } else {
-                            let root = uf.find(pin_idx(k as u8, pin));
+                            let root = uf.find(pin_idx(k as u8, pin, bjt(k as u8)));
                             ensure(root, &mut nets)
                         };
                         (pin.to_string(), net)

@@ -42,17 +42,16 @@ const SLOW: &[(&str, usize, &[&str], bool)] = &[
 ];
 
 /// Devices LVS cannot compare on sky130, counted from the netlist alone: the
-/// deck recognises no BJT and no MOM capacitor, so each drawn unit — `m` per
-/// BJT, `max(nf, m)` per capacitor whose recipe draws no `plate` (MOM) — is
-/// one `lvs-coverage/` unit. A MIM-recipe capacitor is compared (CELL-08).
+/// deck recognises no MOM capacitor, so each drawn unit — `max(nf, m)` per
+/// capacitor whose recipe draws no `plate` (MOM) — is one `lvs-coverage/`
+/// unit. BJTs are compared (PERF-18). A MIM-recipe capacitor is compared (CELL-08).
 fn unverified(netlist: &pnr_core::Netlist, pdk: &verify::Pdk) -> i64 {
-    use pnr_core::DeviceKind::{Capacitor, Npn, Pnp};
+    use pnr_core::DeviceKind::Capacitor;
     let p = |d: &pnr_core::Device, k: &str| d.params.iter().find(|(n, _)| n == k).map_or(1, |&(_, v)| v);
     netlist
         .devices
         .iter()
         .map(|d| match d.kind {
-            Npn | Pnp => p(d, "m"),
             Capacitor if pdk.recipe("capacitor", &d.model).is_some_and(|r| r.layers.iter().any(|(role, _)| role == "plate")) => 0,
             Capacitor => p(d, "nf").max(p(d, "m")),
             _ => 0,
@@ -229,21 +228,40 @@ fn antenna_in_loop_never_passes_what_signoff_fails() {
     }
 }
 
+/// dr's rule rows describe the routes that ship (RTE-23): the winner's
+/// batch rows (`sol.route`) equal `gr::analog_tiers` re-measured on
+/// `sol.routes`, rule and margin, antenna diode markers included.
+#[test]
+fn routing_rows_are_measured_on_the_shipped_routes() {
+    let pdk = pdk();
+    for &(name, ..) in BASELINE {
+        let spice = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("read fixture");
+        let cfg = library::Config { feedback_iters: 1, ..Default::default() };
+        let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let (hard, budget) = gr::analog_tiers(&sol.routes, &sol.routing);
+        let want: Vec<(String, i64)> = hard.iter().chain(&budget).filter(|v| v.is_batch_row()).map(|v| (v.rule.clone(), v.margin)).collect();
+        let got: Vec<(String, i64)> = sol.route.hard_violations.iter().chain(&sol.route.budget_violations).filter(|v| v.is_batch_row()).map(|v| (v.rule.clone(), v.margin)).collect();
+        println!("{name:16} dr rows {got:?}");
+        assert_eq!(got, want, "{name}");
+    }
+}
+
 /// A device LVS cannot compare is a signoff row, not an epoch violation: it
-/// is the same on every layout, so bjt_mirror (an NPN and a PNP, neither of
-/// which sky130 extracts) still stops converged at bench's 5 epochs, and its
-/// signoff still names both units.
+/// is the same on every layout, so a MOM capacitor (2 units, which sky130
+/// does not extract) beside a compared nfet still stops converged at bench's
+/// 5 epochs, and its signoff still names every unit. Not dac4: it stops on
+/// budget for its in-loop antenna on `top` (route_hard 1), not for coverage.
 #[test]
 fn uncompared_devices_do_not_block_convergence() {
-    let spice = std::fs::read_to_string(root().join("benchmarks/fixtures/bjt_mirror.spice")).expect("read fixture");
+    let spice = ".subckt momcap top b VSS\nXC1 top b cap_generic_m1m2 W=2u L=2u m=2\nXM1 b top VSS VSS nfet_01v8 W=1u L=0.15u\n.ends momcap\n";
     let cfg = library::Config { feedback_iters: 5, ..Default::default() };
     let pdk = pdk();
-    let sol = library::run(&spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("bjt_mirror: {e:?}"));
+    let sol = library::run(spice, &pdk, &library::Macros::default(), &cfg).unwrap_or_else(|e| panic!("momcap: {e:?}"));
     let report = library::signoff(&sol, &pdk).report;
     let uncompared: i64 = report.hard_violations.iter().filter(|v| v.rule.starts_with("lvs-coverage/")).map(|v| v.margin).sum();
     assert_eq!(uncompared, unverified(&sol.netlist, &pdk), "{:?}", report.hard_violations.iter().map(|v| &v.rule).collect::<Vec<_>>());
-    assert!(uncompared > 0, "bjt_mirror has no uncompared device: the test checks nothing");
-    assert!(sol.stats.converged, "bjt_mirror stopped on budget: {:?}", sol.stats);
+    assert!(uncompared > 0, "momcap has no uncompared device: the test checks nothing");
+    assert!(sol.stats.converged, "momcap stopped on budget: {:?}", sol.stats);
 }
 
 /// The named-ERC comparison is itself live: one extra row on a real report

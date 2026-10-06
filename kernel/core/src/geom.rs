@@ -42,6 +42,34 @@ pub enum Orient {
 }
 
 impl Orient {
+    /// The whole group, rotations first.
+    pub const ALL: [Orient; 8] = [
+        Orient::R0,
+        Orient::R90,
+        Orient::R180,
+        Orient::R270,
+        Orient::Mx,
+        Orient::Mx90,
+        Orient::Mx180,
+        Orient::Mx270,
+    ];
+
+    /// `self` then `next`: `a.then(b).apply(p) == b.apply(a.apply(p))`. D4 members are told apart by
+    /// the image of (1, 2) (`the_eight_transforms_are_distinct`), so the product is found by search.
+    // ponytail: 8-way search, a const product table only if a profile shows it.
+    #[must_use]
+    pub fn then(self, next: Orient) -> Orient {
+        let (x, y) = self.apply(1, 2);
+        let want = next.apply(x, y);
+        Orient::ALL.into_iter().find(|o| o.apply(1, 2) == want).expect("D4 is closed")
+    }
+
+    /// The member undoing `self`: `self.then(self.inverse()) == R0`.
+    #[must_use]
+    pub fn inverse(self) -> Orient {
+        Orient::ALL.into_iter().find(|&o| self.then(o) == Orient::R0).expect("D4 has inverses")
+    }
+
     /// The four 90° members: they swap a device's `hw`/`hh`.
     #[must_use]
     pub fn swaps_axes(self) -> bool {
@@ -109,26 +137,27 @@ mod tests {
         assert!(!a.touches(&Rect { x: 11, y: 0, w: 5, h: 5 }));
     }
 
-    const ALL: [Orient; 8] = [
-        Orient::R0,
-        Orient::R90,
-        Orient::R180,
-        Orient::R270,
-        Orient::Mx,
-        Orient::Mx90,
-        Orient::Mx180,
-        Orient::Mx270,
-    ];
-
     /// D4 is a group of order 8: no two members may act identically, or the
     /// placer's rotate move would propose a no-op it believes is a real turn.
     #[test]
     fn the_eight_transforms_are_distinct() {
         // (1, 2) is asymmetric under every axis, so it separates all 8.
-        let mut seen: Vec<(i32, i32)> = ALL.iter().map(|o| o.apply(1, 2)).collect();
+        let mut seen: Vec<(i32, i32)> = Orient::ALL.iter().map(|o| o.apply(1, 2)).collect();
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), 8);
+    }
+
+    /// dp turns Mirror partners by composing with `then`; a wrong product
+    /// would break the partner's reflection on every rotate.
+    #[test]
+    fn then_matches_apply_on_all_64_products() {
+        for a in Orient::ALL {
+            for b in Orient::ALL {
+                assert_eq!(a.then(b).apply(1, 2), b.apply(a.apply(1, 2).0, a.apply(1, 2).1), "{a:?} then {b:?}");
+            }
+            assert_eq!(a.then(a.inverse()), Orient::R0);
+        }
     }
 
     /// `swaps_axes` is what the placer trusts when it transposes `hw`/`hh`; if it
@@ -136,7 +165,7 @@ mod tests {
     #[test]
     fn swaps_axes_matches_the_drawn_extents() {
         let r = Rect { x: 10, y: 20, w: 300, h: 700 };
-        for o in ALL {
+        for o in Orient::ALL {
             let t = o.apply_rect(r);
             if o.swaps_axes() {
                 assert_eq!((t.w, t.h), (r.h, r.w), "{o:?}");

@@ -38,6 +38,13 @@ pub trait Process {
         None
     }
 
+    /// Spacing between two minimum-width shapes of a role's layer, nm: the
+    /// plain `min_spacing`, without [`Process::space`]'s wide-metal and
+    /// array steps (a contact landing is far under any width threshold).
+    fn min_space(&self, role: &str) -> Option<i32> {
+        self.space(role)
+    }
+
     /// Spacing a role's line end (a narrow edge) keeps to anything, nm;
     /// `None` = not given.
     fn eol_space(&self, role: &str) -> Option<i32> {
@@ -85,6 +92,23 @@ pub trait Process {
         None
     }
 
+    /// Entry `c as usize` of the 3-element sidecar tier array `key`
+    /// (`[MIN, MOD, EXC]`); `None` when absent or not an integer.
+    fn tier(&self, key: &str, c: MatchClass) -> Option<i32> {
+        let _ = (key, c);
+        None
+    }
+}
+
+/// Hastings §13.3 matching class (PDF p.712): what a matched set's
+/// environment and limits scale with. The discriminant indexes the sidecar's
+/// tier arrays.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub enum MatchClass {
+    Minimal = 0,
+    #[default]
+    Moderate = 1,
+    Exceptional = 2,
 }
 
 /// What the active area sits on, from the sidecar's `cell.substrate_kind`

@@ -256,6 +256,30 @@ pub fn analog_cost(reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> 
     objective + priced as f32
 }
 
+/// Augmented-Lagrangian cost (PLC-09): `Σ crit·cost` over `reqs.cost` plus
+/// `Σ_b (−λ_b·r_b + ½·ρ_b·r_b²)`, `r_b` = budget `b`'s residual clamped at 0.
+/// The quadratic term pulls before λ has grown.
+#[must_use]
+pub fn augmented_cost(reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> f64 {
+    let objective: f64 = reqs.cost.iter().map(|b| f64::from(b.criticality(l) * b.cost(l))).sum();
+    let priced: f64 = reqs
+        .budget
+        .iter()
+        .enumerate()
+        .map(|(bi, b)| {
+            let r = b.residual(l).max(0.0);
+            f64::from(prices.weight_of(bi)) * r + 0.5 * f64::from(prices.rho_of(bi)) * r * r
+        })
+        .sum();
+    objective + priced
+}
+
+/// PEX-tier energy, dimensionless (PLC-18): `HPWL / L_ref + analog_cost`.
+#[must_use]
+pub fn pex(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices) -> f64 {
+    hpwl(nets, l) / f64::from(l.l_ref()) + f64::from(analog_cost(reqs, l, prices))
+}
+
 /// Φ over `reqs.hard`: `(violating batches, Σ their residuals)`; the same
 /// numbers [`report`] writes.
 #[must_use]
@@ -287,9 +311,9 @@ pub fn analog_violations(reqs: &Requirements<Layout>, l: &Layout) -> u32 {
 
 /// Stage report: one hard entry per violating hard batch plus residual device
 /// overlap and clearance-only encroachment, one budget entry per positive
-/// residual, cost = HPWL + analog cost.
+/// residual, cost = HPWL/L_ref + analog cost ([`pex`]).
 #[must_use]
-pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices, clearance: i32) -> Report {
+pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Prices, rules: &crate::PlaceRules) -> Report {
     let mut hard_violations: Vec<Violation> = reqs
         .hard
         .iter()
@@ -313,11 +337,11 @@ pub fn report(nets: &Nets, reqs: &Requirements<Layout>, l: &Layout, prices: &Pri
     if ov > 0.5 {
         hard_violations.push(Violation { rule: "device overlap".into(), margin: ov as i64 });
     }
-    let residue = encroachment(l, clearance) - ov;
+    let residue = rules.encroachment(l) - ov;
     if residue > 0.5 {
         hard_violations.push(Violation { rule: "clearance encroachment".into(), margin: residue.ceil() as i64 });
     }
-    let cost = hpwl(nets, l) as f32 + analog_cost(reqs, l, prices);
+    let cost = pex(nets, reqs, l, prices) as f32;
     Report { hard_violations, budget_violations, cost }
 }
 

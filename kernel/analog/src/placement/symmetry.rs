@@ -4,8 +4,26 @@ use pnr_core::ids::{AxisId, Target};
 use pnr_core::layout::Layout;
 use crate::rule::{Rule, RuleBatch};
 
+/// Direction of a symmetry axis (C14): `V` mirrors in x about a vertical line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AxisDir {
+    #[default]
+    V,
+    H,
+}
+
+/// How distinct partners are drawn (PLC-21): `Perfect` = same orient (PLC-03);
+/// `Mirror` = `b` is `a` reflected about the vertical axis (`orient[b] = orient[a].then(Mx180)`),
+/// legal only when every unit's φ has no x component ([`crate::matching::moments::mirror_allowed`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SymMode {
+    #[default]
+    Perfect,
+    Mirror,
+}
+
 /// Partners mirror about `axis`: `x_a + x_b = 2·axis`, `y_a = y_b`, and
-/// distinct partners also share `hw`, `hh`, `variant`, `orient`. The mirror
+/// distinct partners also share `hw`, `hh`, `variant` and `orient` up to `mode`. The mirror
 /// equation is an exact integer equality, so it is enforced by
 /// [`Rule::project`], not by weight; `residual` is the mirror error in µm.
 #[derive(Clone, Copy)]
@@ -13,15 +31,17 @@ pub struct Symmetry {
     pub a: Target,
     pub b: Target,
     pub axis: AxisId,
+    pub mode: SymMode,
 }
 
 impl Rule for Symmetry {
     type On = Layout;
-    /// `(ex² + ey²)·1e-3` with `ex = xa + xb − 2·axis`, `ey = ya − yb`.
+    /// `((|ex| + |ey|) / L_ref)²` with `ex = xa + xb − 2·axis`, `ey = ya − yb`,
+    /// `L_ref` = [`Layout::l_ref`] (PLC-18: dimensionless).
     fn cost(self, l: &Layout) -> f32 {
         let (ex, ey) = self.error(l);
-        let (ex, ey) = (ex as f32, ey as f32);
-        (ex * ex + ey * ey) * 1e-3
+        let e = (ex.abs() + ey.abs()) as f32 / l.l_ref();
+        e * e
     }
     fn satisfied(self, l: &Layout) -> bool {
         self.error(l) == (0, 0) && self.same_shape(l)
@@ -81,14 +101,20 @@ impl Symmetry {
         (ax + bx - 2 * l.axis_x(self.axis), ay - by)
     }
 
-    /// Perfect symmetry (PLC-03; Mirror mode is PLC-21): distinct partners drawn
-    /// alike. A column too short to hold either index reads as equal.
+    /// Distinct partners drawn alike (PLC-03), the orient related by `mode`
+    /// (PLC-21). A column too short to hold either index reads as equal.
     fn same_shape(self, l: &Layout) -> bool {
         let Some((ia, ib)) = self.indices(l) else { return true };
         fn eq<T: PartialEq>(v: &[T], a: usize, b: usize) -> bool {
             v.get(a).zip(v.get(b)).is_none_or(|(a, b)| a == b)
         }
-        ia == ib || (l.hw[ia] == l.hw[ib] && l.hh[ia] == l.hh[ib] && eq(&l.variant, ia, ib) && eq(&l.orient, ia, ib))
+        let orient_ok = l.orient.get(ia).zip(l.orient.get(ib)).is_none_or(|(&oa, &ob)| {
+            ob == match self.mode {
+                SymMode::Perfect => oa,
+                SymMode::Mirror => oa.then(pnr_core::Orient::Mx180),
+            }
+        });
+        ia == ib || (l.hw[ia] == l.hw[ib] && l.hh[ia] == l.hh[ib] && eq(&l.variant, ia, ib) && orient_ok)
     }
 
     /// Device indices when both targets are in-range devices. `ia == ib` is
@@ -161,6 +187,17 @@ impl RuleBatch<Layout> for SymmetryGroup {
     fn matched_pairs(&self, out: &mut Vec<(u32, u32)>) {
         self.0.matched_pairs(out);
     }
+    // ponytail: on SymmetryGroup only; a bare `Vec<Symmetry>` is never a placement batch.
+    fn mirrored_pairs(&self, out: &mut Vec<(u32, u32)>) {
+        out.extend(self.0.iter().filter(|r| r.mode == SymMode::Mirror).filter_map(|r| r.matched_pair()));
+    }
+    fn demote_mirrors(&mut self, keep: &dyn Fn(u32, u32) -> bool) {
+        for r in &mut self.0 {
+            if r.mode == SymMode::Mirror && r.matched_pair().is_none_or(|(a, b)| !keep(a, b)) {
+                r.mode = SymMode::Perfect;
+            }
+        }
+    }
     fn residual(&self, l: &Layout) -> f64 {
         self.0.residual(l)
     }
@@ -223,6 +260,7 @@ mod tests {
             a: Target::Device(DeviceId(0)),
             b: Target::Device(DeviceId(1)),
             axis: AxisId(0),
+            mode: SymMode::Perfect,
         }
     }
 
@@ -295,8 +333,8 @@ mod tests {
         };
         let shared = AxisId(0);
         let g = SymmetryGroup(vec![
-            Symmetry { a: Target::Device(DeviceId(0)), b: Target::Device(DeviceId(1)), axis: shared },
-            Symmetry { a: Target::Device(DeviceId(2)), b: Target::Device(DeviceId(3)), axis: shared },
+            Symmetry { a: Target::Device(DeviceId(0)), b: Target::Device(DeviceId(1)), axis: shared, mode: SymMode::Perfect },
+            Symmetry { a: Target::Device(DeviceId(2)), b: Target::Device(DeviceId(3)), axis: shared, mode: SymMode::Perfect },
         ]);
         // Pair midpoints are 3000 and 25000 — two different mirror lines.
         g.project(&mut l, 5);
@@ -329,8 +367,8 @@ mod tests {
         };
         let shared = AxisId(0);
         let grp = SymmetryGroup(vec![
-            Symmetry { a: Target::Device(DeviceId(0)), b: Target::Device(DeviceId(1)), axis: shared },
-            Symmetry { a: Target::Device(DeviceId(2)), b: Target::Device(DeviceId(3)), axis: shared },
+            Symmetry { a: Target::Device(DeviceId(0)), b: Target::Device(DeviceId(1)), axis: shared, mode: SymMode::Perfect },
+            Symmetry { a: Target::Device(DeviceId(2)), b: Target::Device(DeviceId(3)), axis: shared, mode: SymMode::Perfect },
         ]);
         grp.project(&mut l, 5);
         // Devices move onto the shared axis but keep their own spacing: the
@@ -346,6 +384,32 @@ mod tests {
         assert!(rule().satisfied(&l));
         l.variant = vec![0, 1];
         assert!(!rule().satisfied(&l));
+    }
+
+    #[test]
+    fn mirror_pair_satisfies_only_with_mx180_partner() {
+        use pnr_core::Orient::{Mx180, R0, R90};
+        let mut l = layout(-500, 0, 500, 0);
+        let mirror = Symmetry { mode: SymMode::Mirror, ..rule() };
+        let with = |l: &mut Layout, a, b| l.orient = vec![a, b];
+        with(&mut l, R0, R0);
+        assert!(!mirror.satisfied(&l));
+        with(&mut l, R0, Mx180);
+        assert!(mirror.satisfied(&l));
+        with(&mut l, R90, R90.then(Mx180));
+        assert!(mirror.satisfied(&l));
+        with(&mut l, R0, Mx180);
+        assert!(!rule().satisfied(&l), "Perfect still wants equal orients");
+    }
+
+    #[test]
+    fn demote_mirrors_keeps_only_allowed_pairs() {
+        let pair = |a: u16, b: u16| Symmetry { a: Target::Device(DeviceId(a)), b: Target::Device(DeviceId(b)), axis: AxisId(0), mode: SymMode::Mirror };
+        let mut g = SymmetryGroup(vec![pair(0, 1), pair(2, 3)]);
+        g.demote_mirrors(&|a, _| a == 2);
+        let mut out = Vec::new();
+        g.mirrored_pairs(&mut out);
+        assert_eq!(out, [(2, 3)]);
     }
 
     #[test]
@@ -369,6 +433,7 @@ mod tests {
             a: Target::Device(DeviceId(1)),
             b: Target::Device(DeviceId(2)),
             axis: AxisId(0),
+            mode: SymMode::Perfect,
         }
         .retarget(&cell_of);
         assert_eq!(r.a, Target::Device(DeviceId(0)));
@@ -395,6 +460,7 @@ mod tests {
             a: Target::Device(DeviceId(0)),
             b: Target::Device(DeviceId(0)),
             axis: AxisId(0),
+            mode: SymMode::Perfect,
         };
         self_pair.project(&mut l, g);
         assert!(self_pair.satisfied(&l), "self-pair must land exactly on the axis");

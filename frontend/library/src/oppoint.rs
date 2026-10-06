@@ -35,6 +35,10 @@ pub struct OpPoint {
     pub vds_v: Vec<Option<f64>>,
     /// Bulk-source voltage per device, V; `None` for a non-FET or unresolved.
     pub vbs_v: Vec<Option<f64>>,
+    /// DC voltage per net, V, indexed by `NetId`; ground nets read 0.0. `None`
+    /// for a net the simulated circuit does not reach (only capacitors, which
+    /// the flat deck drops) or that ngspice did not print.
+    pub net_v: Vec<Option<f64>>,
     /// How the bias was obtained, so a probe bench is never passed off as real.
     pub provenance: String,
     /// Devices the simulation reported.
@@ -44,6 +48,33 @@ pub struct OpPoint {
 }
 
 impl OpPoint {
+    /// The annotator's view (EXT-17): volts to mV; a device with `id_ua`,
+    /// `headroom_mv` and `gm_us` all resolved becomes a `DeviceOp` (PERF-09
+    /// has no `vth`/`gmb`/`gds`: `None`). `probe`: the bias is the synthesised
+    /// probe bench. Testbench sources are [`testbench_sources`]'s.
+    #[must_use]
+    pub fn evidence(&self, netlist: &Netlist, probe: bool) -> annotator::Evidence {
+        let mv = |v: &Vec<Option<f64>>, i: usize| v.get(i).copied().flatten().map(|v| v * 1000.0);
+        let dev = (0..netlist.devices.len())
+            .map(|i| {
+                let get = |v: &Vec<Option<f64>>| v.get(i).copied().flatten();
+                Some(annotator::evidence::DeviceOp {
+                    id_ua: get(&self.id_ua)?,
+                    headroom_mv: get(&self.headroom_mv)?,
+                    gm_us: get(&self.gm_us)?,
+                    power_uw: f64::from(self.power_uw.get(i).copied().unwrap_or(0)),
+                    vgs_mv: mv(&self.vgs_v, i),
+                    vbs_mv: mv(&self.vbs_v, i),
+                    vth_mv: None,
+                    gmb_us: None,
+                    gds_us: None,
+                })
+            })
+            .collect();
+        let net_mv = (0..netlist.nets.len()).map(|i| mv(&self.net_v, i)).collect();
+        annotator::Evidence { op: Some(annotator::OpFacts { dev, net_mv }), probe_bias: probe, ..Default::default() }
+    }
+
     /// DC current each device terminal draws from its net, µA, per device:
     /// FET `D` draws `+Id` (`id_ua`, into the drain), `S` `−Id`, and
     /// the gate and bulk none; a resistor `P` draws `+I`, `N` `−I`; a BJT
@@ -143,6 +174,10 @@ pub struct OpConfig {
     /// Simulation temperature, °C: the bias is solved at it, and EM limits
     /// rated at a hotter reference are derated to it (never credited cooler).
     pub temp_c: f64,
+    /// Package junction-to-ambient resistance θ_JA, °C/W (Hastings eq. 5.1):
+    /// EM is derated at `temp_c + θ_JA·P_total` plus the on-die rise. `None`
+    /// = no package rise (no ref/ source or deck gives one).
+    pub theta_ja_c_per_w: Option<f64>,
 }
 
 impl Default for OpConfig {
@@ -158,6 +193,7 @@ impl Default for OpConfig {
             pmos_model: String::new(),
             ngspice: "ngspice".into(),
             temp_c: 27.0,
+            theta_ja_c_per_w: None,
         }
     }
 }
@@ -233,7 +269,9 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     let (deck, provenance) = build_deck(netlist, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
     let out = run_deck(&cfg.ngspice, "op", &deck)?;
 
-    let table = parse_show(&String::from_utf8_lossy(&out.stdout));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let table = parse_show(&stdout);
+    let nodes = parse_nodes(&stdout);
     if table.is_empty() {
         let tail: String = String::from_utf8_lossy(&out.stderr)
             .chars()
@@ -251,6 +289,12 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
         vgs_v: vec![None; n],
         vds_v: vec![None; n],
         vbs_v: vec![None; n],
+        net_v: (0..netlist.nets.len())
+            .map(|i| {
+                let n = node_name(netlist, pnr_core::NetId(i as u16));
+                if n == "0" { Some(0.0) } else { nodes.get(&n).copied() }
+            })
+            .collect(),
         provenance,
         resolved: 0,
         unresolved: Vec::new(),
@@ -310,7 +354,7 @@ struct DevOp {
 }
 
 /// Assemble the deck: model library, the circuit, a bias bench, and a control
-/// block that dumps every MOSFET's operating point at once.
+/// block that dumps every MOSFET's operating point and every node voltage at once.
 ///
 /// The circuit is emitted **flat, from the parsed netlist**, not by reusing the
 /// input text. A `.subckt` cannot be biased from outside: its internal bias nodes
@@ -339,6 +383,9 @@ fn build_deck(netlist: &Netlist, cfg: &OpConfig) -> Result<(String, String), Str
          show q : ic,ib,ie,p\n\
          show r : i,p\n\
          echo @@PHILIS_END\n\
+         echo @@PHILIS_NV\n\
+         print all\n\
+         echo @@PHILIS_NV_END\n\
          .endc\n\
          .end\n"
     );
@@ -472,6 +519,52 @@ pub(crate) fn node_name(netlist: &Netlist, id: pnr_core::NetId) -> String {
     }
 }
 
+/// Testbench `V…` cards as `(switching nets, DC-held nets in mV)` (EXT-17).
+/// Nodes resolve case-insensitively to nets; node `0` or a ground-role net is
+/// the reference. A card with `pulse(`/`pwl(`/`sin(` marks its non-reference
+/// node switching; otherwise the first number after an optional `dc` is that
+/// node's level, V×1000. A card between two non-reference nodes is skipped:
+/// it holds a difference, not a level.
+#[must_use]
+pub fn testbench_sources(netlist: &Netlist, tb: &str) -> (Vec<pnr_core::NetId>, Vec<(pnr_core::NetId, f64)>) {
+    let (mut switching, mut dc) = (Vec::new(), Vec::new());
+    let find = |s: &str| (0..netlist.nets.len()).find(|&i| netlist.nets[i].name.eq_ignore_ascii_case(s)).map(|i| pnr_core::NetId(i as u16));
+    let reference = |s: &str| s == "0" || annotator::rail_of(s) == Some(NetRole::Ground);
+    for line in tb.lines().map(str::trim).filter(|l| l.as_bytes().first().is_some_and(|c| c.eq_ignore_ascii_case(&b'v'))) {
+        let lower = line.to_ascii_lowercase();
+        let tok: Vec<&str> = lower.split_whitespace().collect();
+        let (Some(&p), Some(&n)) = (tok.get(1), tok.get(2)) else { continue };
+        let node = match (reference(p), reference(n)) {
+            (false, true) => p,
+            (true, false) => n,
+            _ => continue,
+        };
+        let Some(net) = find(node) else { continue };
+        if ["pulse(", "pwl(", "sin("].iter().any(|k| lower.replace(' ', "").contains(k)) {
+            switching.push(net);
+        } else if let Some(v) = tok[3..].iter().filter(|t| **t != "dc").find_map(|t| spice_number(t)) {
+            dc.push((net, v * 1000.0));
+        }
+    }
+    (switching, dc)
+}
+
+/// A SPICE number with an optional scale suffix (`1.8`, `900m`, `1e-3`).
+fn spice_number(t: &str) -> Option<f64> {
+    let t = t.trim_end_matches('v');
+    let split = t.find(|c: char| c.is_ascii_alphabetic() && c != 'e').unwrap_or(t.len());
+    let (num, suf) = t.split_at(split);
+    let scale = match suf {
+        "" => 1.0,
+        "m" => 1e-3,
+        "u" => 1e-6,
+        "n" => 1e-9,
+        "k" => 1e3,
+        _ => return None,
+    };
+    num.parse::<f64>().ok().map(|v| v * scale)
+}
+
 /// Synthesise a mid-rail probe bench.
 ///
 /// Two classes of node need a source, and both are invisible from a `.subckt`
@@ -598,6 +691,23 @@ fn parse_show(text: &str) -> std::collections::HashMap<String, DevOp> {
     out
 }
 
+/// Node voltages from `print all` between `@@PHILIS_NV` and `@@PHILIS_NV_END`:
+/// one `name = value` line per node (ground is not printed), keyed lowercase.
+/// `v1#branch = …` source currents are skipped.
+fn parse_nodes(text: &str) -> std::collections::HashMap<String, f64> {
+    text.lines()
+        .skip_while(|l| !l.contains("@@PHILIS_NV"))
+        .skip(1)
+        .take_while(|l| !l.contains("@@PHILIS_NV_END"))
+        .filter_map(|l| match l.split_whitespace().collect::<Vec<_>>()[..] {
+            [name, "=", v] if !name.contains('#') => {
+                Some((name.to_ascii_lowercase(), v.parse::<f64>().ok()?))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// `m.xm5.msky130_fd_pr__` → `xm5`, `q.xq1.qsky130_fd_pr__` → `xq1`; a
 /// top-level `R` element's column is its own name (`rxr1` → `xr1`).
 fn instance_device(col: &str) -> Option<String> {
@@ -662,6 +772,20 @@ mod tests {
         );
         assert_eq!(instance_device("m.xdut.xm1.mnfet").as_deref(), Some("xdut"));
         assert_eq!(instance_device("notadevice"), None);
+    }
+
+    /// EXT-17: PULSE drives a switching net, DC cards their level in mV, a card
+    /// between two non-reference nodes holds no level.
+    #[test]
+    fn testbench_sources_split_switching_from_dc() {
+        let nl = stub_netlist();
+        let tb = "VDD VDD 0 DC 1.8\nvb vbias VSS 900m\nVclk vout 0 PULSE (0 1.8 0 1n 1n 5n 10n)\nVx vbias vout 1\n* comment";
+        let (sw, dc) = testbench_sources(&nl, tb);
+        assert_eq!(sw, [pnr_core::NetId(3)]);
+        assert_eq!(dc.len(), 2);
+        assert_eq!(dc[0].0, pnr_core::NetId(0));
+        assert!((dc[0].1 - 1800.0).abs() < 1e-9 && (dc[1].1 - 900.0).abs() < 1e-9, "{dc:?}");
+        assert_eq!(dc[1].0, pnr_core::NetId(2));
     }
 
     /// Mirror-ish stub: `vbias` reaches only gates (no DC path), `vout` is
@@ -965,6 +1089,23 @@ mod tests {
         for (i, want) in [(0, "0"), (1, "0"), (2, "0"), (3, "0"), (4, "vout")] {
             assert_eq!(node_name(&nl, pnr_core::NetId(i)), want, "{}", nl.nets[i as usize].name);
         }
+    }
+
+    #[test]
+    fn print_all_reads_node_voltages() {
+        let nv = "@@PHILIS_NV\nvdd = 1.800000e+00\nx1_mid = 9.000000e-01\nv1#branch = -9.00000e-04\n@@PHILIS_NV_END\n";
+        let text = format!("{SHOW}{nv}");
+        let m = parse_nodes(&text);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["vdd"], 1.8);
+        assert_eq!(m["x1_mid"], 0.9);
+        assert!(m.keys().all(|k| !k.contains('#')));
+        let key = |t: &std::collections::HashMap<String, DevOp>| {
+            let mut v: Vec<_> = t.iter().map(|(k, d)| (k.clone(), d.id.to_bits(), d.vds.to_bits(), d.gm.to_bits())).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(key(&parse_show(&text)), key(&parse_show(SHOW)));
     }
 
     #[test]

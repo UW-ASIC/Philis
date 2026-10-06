@@ -234,3 +234,63 @@ fn mos_device_card_carries_total_width() {
     let devs = variants::Mos::new(DeviceKind::Nmos, 420, 150, 2).devices().expect("Mos is transparent");
     assert_eq!(devs[0].params, vec![("w".into(), 840), ("l".into(), 150), ("nf".into(), 2)]);
 }
+
+/// A one-off build over the pair's ports.
+fn build_pair(f: impl FnOnce(&mut CompBuilder<verify::Pdk>) -> Result<(), GenError>) -> Result<BuiltComp, GenError> {
+    let ports = ["a", "b", "tail", "body"].map(String::from).to_vec();
+    build_with(&pdk(), ports, f)
+}
+
+#[test]
+fn duplicate_names_are_rejected() {
+    let r = build_pair(|c| {
+        let a = c.instantiate("m1", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 2))?;
+        let a = c.place(a)?;
+        let b = c.instantiate("m1", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 2))?;
+        c.place_by(b, AlignMode::ToTheRight, &a, 1000)?;
+        Ok(())
+    });
+    assert_eq!(r.err(), Some(GenError::DuplicateName("m1".into())));
+}
+
+#[test]
+fn an_unknown_terminal_is_rejected() {
+    let r = build_pair(|c| {
+        let a = c.instantiate("m1", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 2))?;
+        let a = c.place(a)?;
+        c.connect(&a.term("d"), "a");
+        c.connect("m9.d", "vout");
+        Ok(())
+    });
+    assert_eq!(r.err(), Some(GenError::UnknownTerminal("m9.d".into())));
+}
+
+/// One finger's current reverses under a mirror, so the pair would not match.
+#[test]
+fn mirroring_an_odd_finger_device_is_refused() {
+    let r = build_pair(|c| {
+        let a = c.instantiate("m1", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 1))?;
+        assert!(!a.mac.units.is_empty(), "the Mos instance carries its units");
+        let a = c.place(a)?;
+        let b = c.instantiate("m2", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 1))?;
+        c.place_mirrored(b, &a, 200)?;
+        Ok(())
+    });
+    assert!(matches!(r.err(), Some(GenError::Orientation(n)) if n == "m2"));
+}
+
+#[test]
+fn copy_keeps_orientation() {
+    let gap = 200;
+    build_pair(|c| {
+        let a = c.instantiate("m1", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 1))?;
+        let a = c.place(a)?;
+        let b = c.instantiate("m2", &variants::Mos::new(DeviceKind::Nmos, 420, 150, 1))?;
+        let b = c.place_copy(b, &a, gap)?;
+        assert_eq!(b.phi_sum(), a.phi_sum());
+        assert_eq!(b.bbox().x, a.bbox().x + a.bbox().w + gap);
+        assert_eq!(b.bbox().y, a.bbox().y);
+        Ok(())
+    })
+    .expect("a copy places");
+}

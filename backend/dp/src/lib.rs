@@ -8,16 +8,21 @@
 //! tier (pin HPWL + priced analog cost). [`legalize::separate_overlaps`] closes
 //! any residue.
 
+pub mod anneal;
+mod eval;
 pub mod legalize;
 pub mod locks;
+pub mod sp;
+
+pub use anneal::{place_sp, DpMode, PlaceInput, Start};
 
 use analog::Requirements;
 use pnr_core::ids::BranchId;
 use pnr_core::{Layout, Macro, Orient, Report};
 
 use gp::mechanics::{
-    analog_cost, analog_phi, analog_theta, choose_variants, encroach,
-    hpwl, report, snap, variant_extents, Nets, SplitMix64,
+    analog_phi, analog_theta, choose_variants,
+    pex, report, snap, variant_extents, Nets, SplitMix64,
 };
 
 /// Inner moves per epoch = `MOVES_PER_CELL · n`.
@@ -28,19 +33,24 @@ const RANGE_DECAY: f32 = 0.96;
 /// is grown until everything fits at this fill.
 const REGION_FILL: f64 = 0.5;
 
-/// The flat anneal's schedule (PLC-10 step 0): initial move window `range0` (fraction of the
+/// The anneal's schedule. Flat path (PLC-10 step 0): initial move window `range0` (fraction of the
 /// die span), `max_temps` temperature steps, `t0 = t0_scale · mean|ΔPEX|` over 128 probe moves.
+/// SP path (PLC-09, [`anneal::place_sp`]): `T0 = −mean(ΔE⁺)/ln p0`, cooling `alpha`,
+/// `moves_per_kid · Σ kids` moves per temperature, at most `max_temps` temperatures.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schedule {
     pub range0: f32,
     pub max_temps: u32,
     pub t0_scale: f64,
+    pub p0: f64,
+    pub alpha: f64,
+    pub moves_per_kid: u32,
 }
 impl Schedule {
-    /// Today's constants: refine gp, don't randomise it.
-    pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02 } }
-    /// FLOW-08 step 3's flat warm start from an incumbent [policy, measure].
-    pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002 } }
+    /// Today's constants: refine gp, don't randomise it. SP: P0 0.6 (Lampaert eq 4.37–4.38), α 0.9.
+    pub fn cold() -> Self { Self { range0: 0.4, max_temps: 220, t0_scale: 0.02, p0: 0.6, alpha: 0.9, moves_per_kid: 20 } }
+    /// FLOW-08 step 3's warm start from an incumbent [policy, measure]; SP: P0 0.1.
+    pub fn warm() -> Self { Self { range0: 0.05, max_temps: 60, t0_scale: 0.002, p0: 0.1, alpha: 0.9, moves_per_kid: 20 } }
 }
 /// Runaway guard for the terminal legalizer (it exits early when clean/stalled).
 const LEGALIZE_SWEEPS: u32 = 64;
@@ -61,6 +71,14 @@ pub struct PlaceStats {
     /// Distinct matched pairs whose variant spaces differ, so they cannot be
     /// shape-locked ([`locks::Locks::incompatible`]).
     pub matched_incompatible: Option<u32>,
+    /// [`anneal::place_sp`]: a [`anneal::Start::Warm`] tree no longer fit the
+    /// inputs (cells or symmetry groups changed), so the anneal started constructive.
+    pub warm_fallback: bool,
+    /// [`anneal::place_sp`]: symmetry axes placed, and of them those on a
+    /// routing track centreline (`axis ≡ p0/2 mod P`, PLC-28; `0` without
+    /// `PlaceRules::axis_grid`).
+    pub axes: u32,
+    pub axes_on_lattice: u32,
 }
 
 /// The mutable columns a move can touch, for rollback.
@@ -116,7 +134,8 @@ struct Sa<'a> {
     /// Read-only during the anneal: Metropolis needs a fixed energy.
     prices: &'a gp::Prices,
     fixed: &'a [bool],
-    clearance: i32,
+    /// Per-pair spacing (Arc-backed, cheap to own).
+    rules: gp::PlaceRules,
     grid: i32,
     snap: Snap,
     moved: Vec<usize>,
@@ -130,7 +149,7 @@ impl<'a> Sa<'a> {
         reqs: &'a Requirements<Layout>,
         prices: &'a gp::Prices,
         fixed: &'a [bool],
-        rules: gp::Rules,
+        rules: &gp::PlaceRules,
     ) -> Self {
         Sa {
             cell_nets: nets.cell_nets(n),
@@ -138,7 +157,7 @@ impl<'a> Sa<'a> {
             reqs,
             prices,
             fixed,
-            clearance: rules.clearance,
+            rules: rules.clone(),
             grid: rules.grid,
             snap: Snap::default(),
             moved: Vec::new(),
@@ -150,9 +169,9 @@ impl<'a> Sa<'a> {
         self.fixed.get(i).copied().unwrap_or(false)
     }
 
-    /// PEX tier: pin HPWL + priced analog cost.
+    /// PEX tier, dimensionless: pin HPWL / L_ref + priced analog cost.
     fn pex(&self, l: &Layout) -> f64 {
-        hpwl(&self.nets, l) + f64::from(analog_cost(self.reqs, l, self.prices))
+        pex(&self.nets, self.reqs, l, self.prices)
     }
 
     /// Clearance encroachment of every pair with a member in `self.moved`.
@@ -161,7 +180,7 @@ impl<'a> Sa<'a> {
         for (i, &c) in self.moved.iter().enumerate() {
             for b in 0..l.x.len() {
                 if b != c && !self.moved[..i].contains(&b) {
-                    t += encroach(l, c, b, self.clearance);
+                    t += self.rules.encroach(l, c, b);
                 }
             }
         }
@@ -235,12 +254,12 @@ pub fn place(
     fixed: &[bool],
     locks: &locks::Locks,
     prices: &mut gp::Prices,
-    rules: gp::Rules,
+    rules: &gp::PlaceRules,
     net_weight: &[f32],
     seed: u64,
     schedule: Schedule,
 ) -> (Layout, Report, PlaceStats) {
-    let gp::Rules { grid, clearance } = rules;
+    let grid = rules.grid;
     let n = coarse.x.len();
     let mut rng = SplitMix64::new(seed);
     let mut l = Layout {
@@ -258,6 +277,17 @@ pub fn place(
         units: coarse.units.clone(),
     };
     l.refresh_temps();
+    // PLC-21: seed Mirror partners as reflections of their set's first member;
+    // extents follow any member whose axes the realignment swapped.
+    if l.orient.len() == n {
+        let before = l.orient.clone();
+        locks.align(&mut l.orient);
+        for (c, o) in before.iter().enumerate() {
+            if o.swaps_axes() != l.orient[c].swaps_axes() {
+                (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
+            }
+        }
+    }
 
     let branch_ids = seed_branches(reqs, &mut l.branch);
     let sym = sym_groups(reqs, n);
@@ -266,12 +296,12 @@ pub fn place(
     // Nets from the geometry `l.variant` names, so HPWL scores real pins.
     let nets = Nets::from_macros(&choose_variants(macros, variants, &l.variant)).weigh(net_weight);
     if n == 0 {
-        let rep = report(&nets, reqs, &l, prices, clearance);
+        let rep = report(&nets, reqs, &l, prices, rules);
         return (l, rep, PlaceStats { matched_incompatible: Some(locks.incompatible), ..Default::default() });
     }
 
     // Move region: the coarse footprint bbox, grown about its centre until the
-    // clearance-inflated cells fit at `REGION_FILL`.
+    // halo-inflated cells fit at `REGION_FILL`.
     let (mut xmin, mut ymin, mut xmax, mut ymax) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
     let mut need = 0.0f64;
     for i in 0..n {
@@ -279,7 +309,8 @@ pub fn place(
         ymin = ymin.min(l.y[i] - l.hh[i]);
         xmax = xmax.max(l.x[i] + l.hw[i]);
         ymax = ymax.max(l.y[i] + l.hh[i]);
-        need += f64::from(2 * l.hw[i] + clearance) * f64::from(2 * l.hh[i] + clearance);
+        let halo = rules.halo(&l, i);
+        need += f64::from(2 * l.hw[i] + halo) * f64::from(2 * l.hh[i] + halo);
     }
     let side = (need / REGION_FILL).sqrt() as i32;
     let grow = |lo: &mut i32, hi: &mut i32| {
@@ -311,7 +342,10 @@ pub fn place(
         sum += (sa.pex(&l) - pex0).abs();
         (l.x[c], l.y[c]) = (ox, oy);
     }
-    let mut temp = (sum / 128.0).max(1.0) * schedule.t0_scale;
+    // No floor in PEX units (PLC-18: PEX is O(1)); the fallback only covers a
+    // layout where no probe changes PEX.
+    let mean = sum / 128.0;
+    let mut temp = if mean > 0.0 { mean } else { 1.0 } * schedule.t0_scale;
 
     let can_rotate = l.orient.len() == n;
     let can_reshape = variants.len() == n && l.variant.len() == n;
@@ -361,7 +395,7 @@ pub fn place(
                 let set = locks.members(c, false);
                 can_rotate
                     && !set.iter().any(|&m| sa.is_fixed(m))
-                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &clamp_x, &clamp_y)
+                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &locks.rel, &clamp_x, &clamp_y)
             };
         }
 
@@ -383,11 +417,11 @@ pub fn place(
         l.y[i] = snap(l.y[i], grid);
     }
     // Grid snap can shave a clearance by a few nm; the legalizer restores it.
-    legalize::separate_overlaps(&mut l, reqs, grid, clearance, LEGALIZE_SWEEPS);
+    legalize::separate_overlaps(&mut l, reqs, rules, LEGALIZE_SWEEPS);
     l.refresh_temps();
 
     let Sa { nets, stats, .. } = sa;
-    let rep = report(&nets, reqs, &l, prices, clearance);
+    let rep = report(&nets, reqs, &l, prices, rules);
     (l, rep, stats)
 }
 
@@ -591,21 +625,25 @@ fn quarter_turn(o: Orient) -> Orient {
 }
 
 /// Turn a whole orient set a quarter, in one trial; `hw`/`hh` swap with the
-/// orientation (`Layout::orient`). No move introduces a mirror, so a matched
-/// set keeps one orientation: channels stay parallel and S→D current runs the
-/// same way across it.
+/// orientation (`Layout::orient`). Every member becomes `o0.then(rel[c])` with
+/// `o0` the first member's turned orient, so a Perfect set keeps one
+/// orientation and a Mirror partner stays its `Mx180` reflection (PLC-21). No
+/// move introduces a mirror; only seeding ([`locks::Locks::align`]) does.
+#[allow(clippy::too_many_arguments)]
 fn try_rotate(
     sa: &mut Sa,
     l: &mut Layout,
     rng: &mut SplitMix64,
     temp: f64,
     set: &[usize],
+    rel: &[Orient],
     clamp_x: &impl Fn(i32, i32) -> i32,
     clamp_y: &impl Fn(i32, i32) -> i32,
 ) -> bool {
     sa.trial(l, rng, temp, |l, _, _| {
+        let o0 = quarter_turn(l.orient[set[0]]);
         for &c in set {
-            l.orient[c] = quarter_turn(l.orient[c]);
+            l.orient[c] = o0.then(rel.get(c).copied().unwrap_or(Orient::R0));
             (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
             l.x[c] = clamp_x(l.x[c], l.hw[c]);
             l.y[c] = clamp_y(l.y[c], l.hh[c]);

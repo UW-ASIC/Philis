@@ -4,10 +4,11 @@
 
 use crate::builder::dim;
 use analog::cell::SeriesParallel;
+use analog::matching::{class::resistor_env, pattern::segment_row};
 use analog::Constraints;
-use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, Node, Process, Rect};
+use pnr_core::{DeviceGroup, Drawn, DrawnKind, Macro, MatchClass, Node, Process, Rect};
 
-use crate::builder::{cut_lattice, greedy_centroid, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
+use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// A recipe's per-device resistance, integers from the sidecar:
@@ -84,11 +85,74 @@ pub fn value_tol_ppm(p: &dyn Process) -> i32 {
     p.rule("res_value_tol_ppm", 0)
 }
 
+/// κ_ox, W/(m·K) (Hastings's 0.011 W/cm/°C).
+const K_OX: f64 = 1.1;
+
+/// Hastings eq. 5.8 (L12044–12073): W_min = I·√(t_ox·R_s/(κ_ox·ΔT)), nm, rounded up; 0 when any input ≤ 0.
+/// `t_ox_nm` = the oxide under the body (sidecar `res_tox_nm`, else the body layer's pex `height_nm`);
+/// `dt_k` = the allowed rise (`res_self_heat_dt_k`, 5 K). CELL-23 applies it.
+#[must_use]
+pub fn self_heating_min_width_nm(i_ua: f32, sheet_ohm: f32, t_ox_nm: f32, dt_k: f32) -> i32 {
+    if i_ua <= 0.0 || sheet_ohm <= 0.0 || t_ox_nm <= 0.0 || dt_k <= 0.0 {
+        return 0;
+    }
+    let w = f64::from(i_ua) * 1e-6 * (f64::from(t_ox_nm) * 1e-9 * f64::from(sheet_ohm) / (K_OX * f64::from(dt_k))).sqrt();
+    (w * 1e9).ceil() as i32
+}
+
+/// Eq. 5.8 inverted, the reported figure: ΔT = t_ox·R_s·(I/W)²/κ_ox, K; 0 when any input ≤ 0.
+#[must_use]
+pub fn self_heating_rise_k(i_ua: f32, sheet_ohm: f32, t_ox_nm: f32, w_nm: i32) -> f32 {
+    if i_ua <= 0.0 || sheet_ohm <= 0.0 || t_ox_nm <= 0.0 || w_nm <= 0 {
+        return 0.0;
+    }
+    let j = f64::from(i_ua) * 1e-6 / (f64::from(w_nm) * 1e-9);
+    (f64::from(t_ox_nm) * 1e-9 * f64::from(sheet_ohm) * j * j / K_OX) as f32
+}
+
 /// Parallel strings per member: `dev_nf[d]` when the unitization composes
 /// units in parallel (SPICE `m`), else one.
 fn strings(group: &DeviceGroup, c: &Constraints, s: &Sizing) -> Vec<usize> {
     let parallel = unitization(group, c).is_some_and(|u| u.series_parallel == SeriesParallel::Parallel);
     s.dev_nf.iter().map(|&nf| if parallel { usize::from(nf.max(1)) } else { 1 }).collect()
+}
+
+/// Per member of `group`, its series unit count (`series_d = L_d / L_u`, EXT-15) when the covering unitization
+/// composes `Series` units with a non-empty `series` over ≥ 2 members; `None` for an equal-length group.
+fn series_counts(group: &DeviceGroup, c: &Constraints) -> Option<Vec<u16>> {
+    let u = unitization(group, c).filter(|u| u.series_parallel == SeriesParallel::Series && !u.series.is_empty())?;
+    (group.devices.len() >= 2).then(|| {
+        group
+            .devices
+            .iter()
+            .map(|d| u.devices.iter().position(|x| x == d).and_then(|i| u.series.get(i)).copied().unwrap_or(1).max(1))
+            .collect()
+    })
+}
+
+/// The unit length L_u′ that makes the smallest member exact, `seg_len(body_w, ohm(unit_w, ser_min·unit_l)/ser_min, 1,
+/// 0, lat, i32::MAX)`; `Some` only when every member passes |ser_d·ohm(body_w, L_u′) − ohm(unit_w, ser_d·unit_l)| ≤
+/// res_value_tol_ppm·ohm(…)/1e6 (plan-03 value rule: heads and `dl` make a series chain of units differ from one
+/// long body). `None` without a `ResModel`.
+fn unit_len(s: &Sizing, series: &[u16], process: &dyn Process) -> Option<i32> {
+    let m = ResModel::of(process)?;
+    let body_w = s.unit_w.max(process.rule("res_min_width", 0));
+    let k_min = f64::from(*series.iter().min()?);
+    let target = m.ohm(s.unit_w, (k_min as i32).saturating_mul(s.unit_l)) / k_min;
+    let lu = m.seg_len(body_w, target, 1, 0, cut_lattice(process), i32::MAX)?;
+    let tol = f64::from(value_tol_ppm(process));
+    series
+        .iter()
+        .all(|&k| {
+            let want = m.ohm(s.unit_w, i32::from(k).saturating_mul(s.unit_l));
+            (f64::from(k) * m.ohm(body_w, lu) - want).abs() <= tol * want / 1e6
+        })
+        .then_some(lu)
+}
+
+/// Whether some string's consecutive segments sit more than one column apart (a met1 jumper).
+fn far_join(seq: &[usize]) -> bool {
+    seq.iter().enumerate().any(|(i, &g)| seq[i + 1..].iter().position(|&h| h == g).is_some_and(|k| k > 0))
 }
 
 /// One resistor variant: each string split into `segments` series segments
@@ -108,22 +172,30 @@ impl Cell for Resistor {
             return vec![];
         }
         let s = group_sizing(group, constraints, process);
+        let tracks = jumper_tracks(process, head_len(process)).len();
+        // Unequal lengths (EXT-15): exact per-member blocks always; a common-centroid array of series units, one met1
+        // track per member (heads grown to fit, [`head_for`]), where one unit length keeps every member's value.
+        if let Some(ser) = series_counts(group, constraints) {
+            let mut out = vec![Resistor { segments: 1, pattern: Pattern::Single }];
+            if unit_len(&s, &ser, process).is_some() {
+                out.push(Resistor { segments: 1, pattern: Pattern::Interdig });
+            }
+            return out;
+        }
         let patterns = if group.devices.len() > 1 {
             vec![Pattern::Single, Pattern::Interdig]
         } else {
             vec![Pattern::Single]
         };
-        // Interleaved multi-segment devices jump between their columns on
-        // met1, one track per device inside the heads: as many devices as
-        // tracks fit.
-        let tracks = jumper_tracks(process).len();
+        // A sequence with a non-adjacent join puts every join on met1, one
+        // track per string inside the heads: as many strings as tracks fit.
         let n_strings: usize = strings(group, constraints, &s).iter().sum();
-        feasible_segments(&s, process)
+        feasible_segments(s.unit_w, s.unit_l, process)
             .into_iter()
             .flat_map(|segments| {
                 patterns.iter().map(move |&pattern| Resistor { segments, pattern })
             })
-            .filter(|r| !(matches!(r.pattern, Pattern::Interdig) && r.segments > 1 && n_strings > tracks))
+            .filter(|r| !(n_strings > tracks && far_join(&res_segment_sequence(&vec![r.segments; n_strings], r.pattern))))
             .collect()
     }
 
@@ -139,7 +211,6 @@ impl Cell for Resistor {
         let licon = req(process, "licon");
         let (mcon, met1) = (req(process, "mcon"), req(process, "met1"));
         let (m_ct, m_enc) = (dim(process, "mcon_size"), dim(process, "m1_enc"));
-        let tracks = jumper_tracks(process);
         let lat = cut_lattice(process);
 
         let ct = dim(process, "contact");
@@ -153,7 +224,6 @@ impl Cell for Resistor {
             .max(process.enclosure("poly", "licon").unwrap_or(0))
             .max(process.endcap("poly", "licon").unwrap_or(0))
             .max(process.endcap("li", "licon").unwrap_or(0));
-        let head = head_len(process);
         let lap = LAP;
         // A cut's inner side keeps the marker's spacing too, where the deck
         // states one.
@@ -164,15 +234,47 @@ impl Cell for Resistor {
         let seg_gap = seg_gap(process);
         let n_segments = i32::from(self.segments.max(1));
         let body_w = s.unit_w.max(r("res_min_width", 0));
-        // Each segment's length keeps the string at the schematic device's
-        // model value (heads included); without a model only n = 1 is
-        // offered, which draws the written L.
-        let seg_l = ResModel::of(process)
-            .and_then(|m| m.seg_len(body_w, m.ohm(s.unit_w, s.unit_l), n_segments as u32, 0, lat, i32::MAX))
-            .unwrap_or(s.unit_l / n_segments)
-            .max(process.width("rpoly").unwrap_or(0));
+        // Per member, (segments, segment length). Each segment's length keeps
+        // the string at the schematic device's model value (heads included);
+        // without a model only n = 1 is offered, which draws the written L.
+        let model = ResModel::of(process);
+        let fit = |n: i32, l_nm: i32| {
+            model
+                .and_then(|m| m.seg_len(body_w, m.ohm(s.unit_w, l_nm), n as u32, 0, lat, i32::MAX))
+                .unwrap_or(l_nm / n)
+                .max(process.width("rpoly").unwrap_or(0))
+        };
+        let cols: Vec<(i32, i32)> = match series_counts(group, constraints) {
+            None => vec![(n_segments, fit(n_segments, s.unit_l)); n_dev],
+            // Series units: member d is ser_d columns of the common unit.
+            Some(ser) if self.pattern == Pattern::Interdig => {
+                let lu = unit_len(&s, &ser, process).expect("Interdig is offered only with an exact unit").max(process.width("rpoly").unwrap_or(0));
+                ser.iter().map(|&k| (i32::from(k), lu)).collect()
+            }
+            // Blocks: member d at the most segments (≤ ser_d) that keep its value.
+            Some(ser) => ser
+                .iter()
+                .map(|&k| {
+                    let l = i32::from(k).saturating_mul(s.unit_l);
+                    let n = i32::from(feasible_segments(s.unit_w, l, process).into_iter().filter(|&n| n <= k).max().unwrap_or(1));
+                    (n, fit(n, l))
+                })
+                .collect(),
+        };
+        // String g is string j of member di: one pseudo-device for sequencing.
+        let per = strings(group, constraints, &s);
+        let owner: Vec<(usize, usize)> = per.iter().enumerate().flat_map(|(d, &k)| (0..k).map(move |j| (d, j))).collect();
+        let counts: Vec<u16> = owner.iter().map(|&(d, _)| cols[d].0 as u16).collect();
+        let sequence = res_segment_sequence(&counts, self.pattern);
+        // One non-adjacent join puts every join on met1 + 2 mcon, so every
+        // string sees the same contact resistance per join.
+        let all_met1 = far_join(&sequence);
+        // Heads long enough for one met1 track per string where any join is.
+        let head = if all_met1 { head_for(process, owner.len()) } else { head_len(process) };
+        let tracks = jumper_tracks(process, head);
         let seg_pitch = body_w + seg_gap;
-        let total_h = head + seg_l + head;
+        let col_h = |di: usize| head + cols[di].1 + head;
+        let max_h = (0..n_dev).map(col_h).max().unwrap_or(2 * head);
         let head_li_h = head - lap;
 
         // Contact column of a head, outer end first (the top head mirrors it).
@@ -182,22 +284,20 @@ impl Cell for Resistor {
             .take_while(|&y| y + ch + inner <= head_li_h)
             .collect();
         // The outermost cut of a head: where the pins land.
-        let end_cut = |sx: i32, top: bool| Rect {
+        let end_cut = |sx: i32, top: bool, total_h: i32| Rect {
             x: sx + cut_x,
             y: if top { total_h - border - ch } else { border },
             w: cw,
             h: ch,
         };
 
-        // String g is string j of member di: one pseudo-device for sequencing.
-        let per = strings(group, constraints, &s);
-        let owner: Vec<(usize, usize)> = per.iter().enumerate().flat_map(|(d, &k)| (0..k).map(move |j| (d, j))).collect();
-        let sequence = res_segment_sequence(owner.len(), self.pattern, n_segments);
         let mut seg_of = vec![0i32; owner.len()];
         // Per string, the column x of its previous segment.
         let mut prev: Vec<Option<i32>> = vec![None; owner.len()];
         for (slot, &g) in sequence.iter().enumerate() {
             let (di, j) = owner[g];
+            let (n_d, seg_l) = cols[di];
+            let total_h = col_h(di);
             let seg = seg_of[g];
             seg_of[g] += 1;
             let sx = slot as i32 * seg_pitch;
@@ -234,11 +334,11 @@ impl Cell for Resistor {
             }
             match prev[g] {
                 // One pin pair per string; the router joins repeated names.
-                None => b.pin(pin(di, "P", end_cut(sx, enters_top), li)),
+                None => b.pin(pin(di, "P", end_cut(sx, enters_top, total_h), li)),
                 // Jumper from the previous segment's exit head, which is at
                 // this segment's entry end: li to an adjacent column, else
                 // met1 on the string's own track (over others' heads).
-                Some(px) if sx - px == seg_pitch => {
+                Some(px) if !all_met1 && sx - px == seg_pitch => {
                     let h = border + ch + border;
                     let y = if enters_top { total_h - h } else { 0 };
                     b.rect(li, Rect { x: px, y, w: sx + body_w - px, h });
@@ -256,35 +356,50 @@ impl Cell for Resistor {
             // P -> Internal(j·n + 1) -> ... -> Internal(j·n + n-1) -> N.
             let node = |k: i32| match k {
                 0 => Node::Pin("P"),
-                k if k == n_segments => Node::Pin("N"),
-                k => Node::Internal((j as i32 * n_segments + k) as u16),
+                k if k == n_d => Node::Pin("N"),
+                k => Node::Internal((j as i32 * n_d + k) as u16),
             };
             b.drawn(Drawn { owner: di as u8, device: None, kind: DrawnKind::Resistor, nodes: [node(seg), node(seg + 1), Node::Unused], w: body_w, l: seg_l });
             prev[g] = Some(sx);
-            if seg == n_segments - 1 {
-                b.pin(pin(di, "N", end_cut(sx, !enters_top), li));
+            if seg == n_d - 1 {
+                b.pin(pin(di, "N", end_cut(sx, !enters_top, total_h), li));
             }
         }
 
-        // End dummies on a matched array: a poly strip one pitch past each end,
-        // contacted like a segment but unmarked (no rpoly: interconnect, not a
-        // resistor), tied to ground through a `GND` pin, so the end segments
-        // see the same etch neighbours as the inner ones (Hastings §8.3 r7).
+        // End dummies on a matched array: poly strips at the segment pitch
+        // past each end, contacted like a segment but unmarked (no rpoly:
+        // interconnect, not a resistor), tied to ground through a `GND` pin,
+        // so the end segments see the same etch neighbours as the inner ones
+        // (Hastings §8.3 r7). Per end, the class's count (H08-13): one, and
+        // on Exceptional enough to span `dummy_span_nm`.
         let n_cols = sequence.len() as i32;
-        let dummies = n_dev > 1 || crate::builder::unitization(group, constraints).is_some_and(|u| u.dummy_required);
-        // Dummies are plain poly: they keep the deck's resistor-body-to-poly
-        // spacing (sky130 poly.9), never less than the segment gap.
-        let d_pitch = body_w + seg_gap.max(process.space_between("rpoly", "poly").unwrap_or(0));
+        let u = crate::builder::unitization(group, constraints);
+        let dummies = n_dev > 1 || u.is_some_and(|u| u.dummy_required);
+        let class = u.and_then(|u| u.class).unwrap_or(MatchClass::Moderate);
+        let env = resistor_env(class, process);
+        let k_dum = i32::from(env.min_dummies).max((env.dummy_span_nm + seg_pitch - 1) / seg_pitch);
+        // Minimal takes a minimum-width dummy; its inner edge stays a gap from
+        // the end body.
+        let dw = if class == MatchClass::Minimal { r("res_min_width", 0).max(process.width("poly").unwrap_or(0)) } else { body_w };
         // Plain poly takes plain (square) contacts: the precision slot is
         // the resistor body's.
-        let sq_x = snap_cut(body_w / 2 - ct / 2, lat);
+        let sq_x = snap_cut(dw / 2 - ct / 2, lat);
         let sq_ys: Vec<i32> = (0..).map(|k| border + k * (ct + cut_space)).take_while(|&y| y + ct + inner <= head_li_h).collect();
-        let (lo, hi) = if dummies {
-            for sx in [-d_pitch, (n_cols - 1) * seg_pitch + d_pitch] {
-                b.rect(poly, Rect { x: sx, y: 0, w: body_w, h: total_h });
+        // Every poly column left to right as (x, w, seg_l), dummies included.
+        let end_l = |slot: usize| sequence.get(slot).map_or(0, |&g| cols[owner[g].0].1);
+        let mut columns: Vec<(i32, i32, i32)> = (0..n_cols).map(|i| (i * seg_pitch, body_w, end_l(i as usize))).collect();
+        if dummies {
+            let (l_lo, l_hi) = (end_l(0), end_l(sequence.len().saturating_sub(1)));
+            for i in 1..=k_dum {
+                columns.insert(0, (-(i - 1) * seg_pitch - seg_gap - dw, dw, l_lo));
+                columns.push(((n_cols - 1 + i) * seg_pitch, dw, l_hi));
+            }
+            for &(sx, _, l) in columns.iter().filter(|c| c.0 < 0 || c.0 >= n_cols * seg_pitch) {
+                let total_h = head + l + head;
+                b.rect(poly, Rect { x: sx, y: 0, w: dw, h: total_h });
                 for top in [false, true] {
                     let y0 = if top { total_h - head_li_h } else { 0 };
-                    b.rect(li, Rect { x: sx, y: y0, w: body_w, h: head_li_h });
+                    b.rect(li, Rect { x: sx, y: y0, w: dw, h: head_li_h });
                     for &cy in &sq_ys {
                         let y = if top { total_h - cy - ct } else { cy };
                         b.rect(licon, Rect { x: sx + sq_x, y, w: ct, h: ct });
@@ -293,10 +408,9 @@ impl Cell for Resistor {
                 let at = Rect { x: sx + sq_x, y: border, w: ct, h: ct };
                 b.pin(pnr_core::Pin { name: "GND".into(), net: pnr_core::NetId(u16::MAX), at, layer: li });
             }
-            (-d_pitch, (n_cols - 1) * seg_pitch + d_pitch + body_w)
-        } else {
-            (0, n_cols * seg_pitch - seg_gap)
-        };
+        }
+        let (lo, hi) = (columns[0].0, columns.last().map_or(0, |c| c.0 + c.1));
+        let total_h = max_h;
 
         // A precision recipe's region over the array: rpm with npc on it
         // (sky130 xhrpoly), and the recipe's implant reaching `res_keepout`
@@ -320,20 +434,32 @@ impl Cell for Resistor {
             let (y0, y1) = ((rpm_rect.y - ri).min(-keep), (rpm_rect.y + rpm_rect.h + ri).max(total_h + keep));
             b.rect(imp, Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
         }
-        // One salicide block over every body (dummies too: a blocked
-        // neighbour is the resistor's own environment), past the poly by the
-        // deck's extension, widened to its min area.
+        // A salicide block over every body (dummies too: a blocked neighbour
+        // is the resistor's own environment), past the poly by the deck's
+        // extension: one rect per run of equal body length, meeting its
+        // neighbour mid-gap (one stepped union); one run is widened to its
+        // min area.
         if let Some(blk) = process.layer("res_block") {
             let ext = process.extension("res_block", "poly").unwrap_or(0);
-            let (y0, h) = (head - lap, seg_l + 2 * lap);
-            let mut x0 = lo - ext;
-            let mut w = hi - lo + 2 * ext;
-            let need = i32::try_from(process.area("res_block").unwrap_or(0) / i64::from(h.max(1)) + 1).unwrap_or(0);
-            if w < need {
-                x0 -= (need - w) / 2;
-                w = need;
+            let mid = |i: usize| crate::builder::snap_to_grid((columns[i].0 + columns[i].1 + columns[i + 1].0) / 2, process.grid());
+            let mut runs: Vec<(i32, i32, i32)> = Vec::new();
+            for (i, &(_, _, l)) in columns.iter().enumerate() {
+                let x1 = if i + 1 < columns.len() { mid(i) } else { hi + ext };
+                match runs.last_mut() {
+                    Some(run) if run.2 == l => run.1 = x1,
+                    _ => runs.push((runs.last().map_or(lo - ext, |r| r.1), x1, l)),
+                }
             }
-            b.rect(blk, Rect { x: x0, y: y0, w, h });
+            if let [(x0, x1, l)] = runs[..] {
+                let h = l + 2 * lap;
+                let need = i32::try_from(process.area("res_block").unwrap_or(0) / i64::from(h.max(1)) + 1).unwrap_or(0);
+                let w = (x1 - x0).max(need);
+                b.rect(blk, Rect { x: x0 - (w - (x1 - x0)) / 2, y: head - lap, w, h });
+            } else {
+                for (x0, x1, l) in runs {
+                    b.rect(blk, Rect { x: x0, y: head - lap, w: x1 - x0, h: l + 2 * lap });
+                }
+            }
         }
         // Head contacts on poly outside a precision region still sit in npc.
         b.cover_poly_cuts(process);
@@ -343,8 +469,8 @@ impl Cell for Resistor {
 
 /// Heights (from a head's outer end) of the met1 jumper tracks: clear of the
 /// pin's cut row by a met1 pad (the router lands one on the pin) and met1
-/// spacing, a met1 pitch apart, inside the head.
-fn jumper_tracks(process: &dyn Process) -> Vec<i32> {
+/// spacing, a met1 pitch apart, inside a head of length `head`.
+fn jumper_tracks(process: &dyn Process, head: i32) -> Vec<i32> {
     let r = |name: &str, default: i32| process.rule(name, default);
     let lat = cut_lattice(process);
     let (ct, m_ct, m_enc) = (dim(process, "contact"), dim(process, "mcon_size"), dim(process, "m1_enc"));
@@ -353,17 +479,30 @@ fn jumper_tracks(process: &dyn Process) -> Vec<i32> {
             .max(process.enclosure("poly", "licon").unwrap_or(0))
             .max(process.endcap("poly", "licon").unwrap_or(0))
             .max(process.endcap("li", "licon").unwrap_or(0));
-    let head_li_h = head_len(process) - LAP;
+    let head_li_h = head - LAP;
     let pitch = m_ct + 2 * m_enc + dim(process, "met1_space");
     let first = snap_cut(border + ct + (m_ct + 2 * m_enc) + dim(process, "met1_space") + lat - 1, lat);
     (0..).map(|k| first + k * snap_cut(pitch + lat - 1, lat)).take_while(|&y| y + m_ct + m_enc + border <= head_li_h).collect()
 }
 
-/// Column gap: the deck's segment gap, and never under the li spacing its
-/// full-width heads need (wide-metal spacing included).
+/// [`head_len`], grown a cut lattice step at a time until `n` jumper tracks fit.
+// ponytail: linear search, a few hundred steps at most; closed form if it ever shows up in a profile.
+fn head_for(process: &dyn Process, n: usize) -> i32 {
+    let mut head = head_len(process);
+    while jumper_tracks(process, head).len() < n {
+        head += cut_lattice(process).max(1);
+    }
+    head
+}
+
+/// Column gap: the deck's segment gap, never under the li spacing its
+/// full-width heads need (wide-metal spacing included), nor the body-to-poly
+/// spacing a plain-poly dummy needs (sky130 poly.9), so dummies sit at the
+/// array pitch.
 fn seg_gap(process: &dyn Process) -> i32 {
     let lat = cut_lattice(process);
-    snap_cut(process.rule("res_seg_gap", 0).max(process.space("li").unwrap_or(0)) + lat - 1, lat)
+    let gap = process.rule("res_seg_gap", 0).max(process.space("li").unwrap_or(0)).max(process.space_between("rpoly", "poly").unwrap_or(0));
+    snap_cut(gap + lat - 1, lat)
 }
 
 /// Head contact `(w, h)`: the sidecar's precision-resistor slot
@@ -406,33 +545,33 @@ fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> 
     sizing(group, c, def_w, def_l)
 }
 
-/// String index per segment column: `Interdig` interleaves strings (greedy
-/// centroid), anything else keeps each string's segments adjacent.
-fn res_segment_sequence(n_dev: usize, pattern: Pattern, n_segments: i32) -> Vec<usize> {
-    let per_dev = n_segments as usize;
-    if pattern == Pattern::Interdig && n_dev >= 2 {
-        return greedy_centroid(&vec![per_dev; n_dev]);
+/// String index per segment column from per-string segment counts:
+/// `Interdig` is the common-centroid row ([`segment_row`]), anything else
+/// keeps each string's segments adjacent.
+fn res_segment_sequence(counts: &[u16], pattern: Pattern) -> Vec<usize> {
+    if pattern == Pattern::Interdig && counts.len() >= 2 {
+        return segment_row(counts).0;
     }
-    (0..n_dev).flat_map(|di| std::iter::repeat_n(di, per_dev)).collect()
+    counts.iter().enumerate().flat_map(|(g, &n)| std::iter::repeat_n(g, usize::from(n))).collect()
 }
 
 /// Segment counts (1 or even) whose value-preserving length
 /// ([`ResModel::seg_len`]) is at least `res_min_segment` and within
 /// `res_value_tol_ppm` once snapped, the 8 squarest. Without a model only 1:
 /// splitting adds head terms the generator cannot account for.
-fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
+fn feasible_segments(w_nm: i32, l_nm: i32, process: &dyn Process) -> Vec<u16> {
     let tol = value_tol_ppm(process);
     let min_seg = process.rule("res_min_segment", 0).max(1);
     let Some(model) = ResModel::of(process) else { return vec![1] };
     let lat = cut_lattice(process);
-    let target = model.ohm(s.unit_w, s.unit_l);
-    let body_w = s.unit_w.max(process.rule("res_min_width", 0));
+    let target = model.ohm(w_nm, l_nm);
+    let body_w = w_nm.max(process.rule("res_min_width", 0));
     let seg_gap = seg_gap(process);
     let head = head_len(process);
     // n = 1 never changes the value: kept even below the minimum segment.
     let mut opts: Vec<(i32, i32)> = (1..=64u32)
         .filter(|&n| n == 1 || n % 2 == 0)
-        .filter_map(|n| Some((n as i32, model.seg_len(body_w, target, n, min_seg, lat, tol).or((n == 1).then_some(s.unit_l))?)))
+        .filter_map(|n| Some((n as i32, model.seg_len(body_w, target, n, min_seg, lat, tol).or((n == 1).then_some(l_nm))?)))
         .collect();
     opts.sort_by(|&(a, la), &(b, lb)| {
         let quality = |n: i32, l: i32| (f64::from(n * (body_w + seg_gap)) / f64::from(2 * head + l)).ln().abs();
@@ -447,6 +586,20 @@ fn feasible_segments(s: &Sizing, process: &dyn Process) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2 kΩ/□ poly over 326.2 nm of oxide (sky130 `rbody_po`), 5 K.
+    #[test]
+    fn hastings_eq_5_8() {
+        assert!((self_heating_min_width_nm(100.0, 2000.0, 326.2, 5.0) - 1089).abs() <= 5);
+        assert!((self_heating_min_width_nm(1000.0, 2000.0, 326.2, 5.0) - 10_891).abs() <= 5);
+        for (i, r, t, dt) in [(0.0, 2000.0, 326.2, 5.0), (100.0, -1.0, 326.2, 5.0), (100.0, 2000.0, 0.0, 5.0), (100.0, 2000.0, 326.2, 0.0)] {
+            assert_eq!(self_heating_min_width_nm(i, r, t, dt), 0);
+        }
+        assert_eq!(self_heating_rise_k(100.0, 2000.0, 326.2, 0), 0.0);
+        assert_eq!(self_heating_rise_k(-1.0, 2000.0, 326.2, 1089), 0.0);
+        let dt = self_heating_rise_k(100.0, 2000.0, 326.2, 1089);
+        assert!((dt - 5.0).abs() < 0.02, "{dt}");
+    }
 
     /// Every variant, drawn alone, is DRC- and ERC-clean.
     #[test]
@@ -475,7 +628,122 @@ mod tests {
                 }
             }
         }
+        // Unequal members (EXT-15): series-unit arrays and exact blocks.
+        let gp = generic_po(&pdk);
+        for (name, p) in [("generic_po", &gp as &dyn Process), ("high_po", &op)] {
+            for ser in [[1, 4], [2, 3]] {
+                for class in [MatchClass::Moderate, MatchClass::Exceptional] {
+                    let (g, c) = series_group(&ser, 690, 10_000, class);
+                    for (i, v) in Resistor::enumerate(&g, &c, p).iter().enumerate() {
+                        let m = v.draw(&g, &c, p);
+                        let rules = testkit::findings(&m.shapes, &testkit::ports_with(&m, &[]), &pdk);
+                        if !rules.is_empty() {
+                            dirty.push(format!("{name} {ser:?} {class:?} #{i}: {rules:?}"));
+                        }
+                    }
+                }
+            }
+        }
         assert!(dirty.is_empty(), "DRC/ERC-dirty variants:\n{}", dirty.join("\n"));
+    }
+
+    fn generic_po(pdk: &verify::Pdk) -> verify::pdk::Overlay<'_> {
+        verify::pdk::Overlay { pdk, recipe: pdk.recipe("resistor", "res_generic_po").expect("generic_po recipe") }
+    }
+
+    /// Two or more members of one `Series` unitization, member d `ser[d]` units of `w`×`l` (EXT-15), dummies on.
+    fn series_group(ser: &[u16], w: i32, l: i32, class: MatchClass) -> (DeviceGroup, Constraints) {
+        let (group, mut c) = crate::testkit::group_of(pnr_core::DeviceKind::Resistor, ser.len(), 1, w, l);
+        let u = &mut c.unitization[0];
+        u.series_parallel = SeriesParallel::Series;
+        u.series = ser.to_vec();
+        u.dummy_required = true;
+        u.class = Some(class);
+        (group, c)
+    }
+
+    fn interdig(ser: &[u16], p: &dyn Process, class: MatchClass) -> Macro {
+        let (g, c) = series_group(ser, 690, 10_000, class);
+        let v = Resistor::enumerate(&g, &c, p).into_iter().find(|v| v.pattern == Pattern::Interdig);
+        v.unwrap_or_else(|| panic!("{ser:?}: no Interdig variant")).draw(&g, &c, p)
+    }
+
+    #[test]
+    fn ratio_arrays_are_common_centroid() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let gp = generic_po(&pdk);
+        for ser in [[1, 2], [2, 3], [1, 4], [3, 2], [4, 5], [9, 4]] {
+            let m = interdig(&ser, &gp, MatchClass::Moderate);
+            let sum = |o: u8| m.units.iter().filter(|u| u.owner == o).map(|u| i64::from(u.x)).sum::<i64>();
+            assert_eq!(i64::from(ser[1]) * sum(0), i64::from(ser[0]) * sum(1), "{ser:?}");
+            for o in 0..2u8 {
+                assert_eq!(m.units.iter().filter(|u| u.owner == o).count(), usize::from(ser[usize::from(o)]), "{ser:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn high_po_ratios_fall_back_to_exact_blocks() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let op = high_po(&pdk);
+        let model = ResModel::of(&op).expect("model");
+        let (g, c) = series_group(&[1, 4], 690, 10_000, MatchClass::Moderate);
+        let vs = Resistor::enumerate(&g, &c, &op);
+        assert!(!vs.is_empty() && vs.iter().all(|v| v.pattern == Pattern::Single));
+        for v in vs {
+            let m = v.draw(&g, &c, &op);
+            for (o, want) in [(0u8, 5_129.7), (1, R_690_40)] {
+                let r: f64 = m.drawn.iter().filter(|d| d.owner == o).map(|d| model.ohm(d.w, d.l)).sum();
+                assert!((r - want).abs() / want <= 0.005, "owner {o}: {r} vs {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn dummies_sit_at_the_segment_pitch() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let gp = generic_po(&pdk);
+        let poly = req(&gp, "poly");
+        let pitch = 690 + seg_gap(&gp);
+        for class in [MatchClass::Moderate, MatchClass::Exceptional] {
+            let (g, c) = series_group(&[1, 4], 690, 10_000, class);
+            for v in Resistor::enumerate(&g, &c, &gp) {
+                let m = v.draw(&g, &c, &gp);
+                let mut xs: Vec<i32> = m.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect.x).collect();
+                xs.sort_unstable();
+                xs.dedup();
+                let mut steps: Vec<i32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+                steps.dedup();
+                assert_eq!(steps, [pitch], "{class:?} {:?}", v.pattern);
+                if class == MatchClass::Exceptional {
+                    assert_eq!(xs.iter().filter(|&&x| x < 0).count() as i32, (10_000 + pitch - 1) / pitch);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_join_has_the_same_via_count() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let (gp, op) = (generic_po(&pdk), high_po(&pdk));
+        let check = |m: &Macro, p: &dyn Process, joins: usize| {
+            let (mcon, li) = (req(p, "mcon"), req(p, "li"));
+            assert_eq!(m.shapes.iter().filter(|s| s.layer == mcon).count(), 2 * joins);
+            assert!(m.shapes.iter().filter(|s| s.layer == li).all(|s| s.rect.w <= 690));
+        };
+        check(&interdig(&[1, 4], &gp, MatchClass::Moderate), &gp, 3);
+        let (g, c) = crate::testkit::group_of(pnr_core::DeviceKind::Resistor, 2, 1, 690, 40_000);
+        let v = Resistor::enumerate(&g, &c, &op).into_iter().find(|v| v.segments == 2 && v.pattern == Pattern::Interdig).expect("2-segment Interdig");
+        check(&v.draw(&g, &c, &op), &op, 2);
+    }
+
+    #[test]
+    fn each_member_s_current_directions_cancel() {
+        let Some(pdk) = crate::testkit::pdk() else { return };
+        let m = interdig(&[2, 4], &generic_po(&pdk), MatchClass::Moderate);
+        for o in 0..2u8 {
+            assert_eq!(m.units.iter().filter(|u| u.owner == o).map(|u| i32::from(u.phi.1)).sum::<i32>(), 0, "owner {o}");
+        }
     }
 
     /// sky130 `res_high_po` W = 0.69, L = 40 µm, from the model card (derived).

@@ -1,7 +1,7 @@
 //! DC electromigration (routing tier, hard), plus the per-layer limit model
 //! the detailed router sizes segments and via arrays with.
 
-use pnr_core::geom::Shape;
+use pnr_core::geom::{Rect, Shape};
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use crate::rule::Rule;
@@ -105,6 +105,26 @@ pub struct Electromigration {
     /// layer and cut included); unused slots `u16::MAX`.
     pub limits: [(u16, Limit); MAX_LAYERS],
     pub stack: Option<&'static Stack>,
+    /// Count a via group by its front row (sidecar `em_front_row_cuts`, default
+    /// `true`): current crowds into the cuts first met along a landing metal, so
+    /// a deep array carries only the row across the flow (Hastings §5.1.3).
+    /// `have` = min over the metals touching every cut of the group of the most
+    /// cuts sharing one centre coordinate along that metal's long axis (a square
+    /// metal: the whole group); no such metal, the group size. `false` keeps
+    /// REL-03's whole-group count.
+    pub front_row: bool,
+}
+
+/// The most of `cuts` sharing one centre coordinate along `m`'s long axis (x
+/// when `m` is wider than tall, else y): the cuts across the current. A square
+/// `m` has no long axis: all of them.
+fn front_row(cuts: &[&Rect], m: &Rect) -> u32 {
+    if m.w == m.h {
+        return cuts.len() as u32;
+    }
+    let mut c: Vec<i64> = cuts.iter().map(|r| if m.w > m.h { 2 * r.x as i64 + r.w as i64 } else { 2 * r.y as i64 + r.h as i64 }).collect();
+    c.sort_unstable();
+    c.chunk_by(|a, b| a == b).map(|g| g.len() as u32).max().unwrap_or(0)
 }
 
 impl Electromigration {
@@ -117,20 +137,41 @@ impl Electromigration {
     /// both read `≤ 1` together exactly when every check passes. `None` when
     /// unknown (see the type).
     fn check(self, r: &Routes) -> Option<(f32, f32)> {
+        let (mut worst, mut checked) = ((0.0f32, 0.0f32), false);
+        self.walk(r, |_, need, have, ratio| {
+            checked = true;
+            worst = (worst.0.max(crate::rule::over(need - have, need)), worst.1.max(ratio));
+        })?;
+        checked.then_some(worst)
+    }
+
+    /// Indices into `r.shapes(self.net)` of the routed shapes that fail:
+    /// metal narrower than its need, and every member cut of an under-cut via
+    /// group. `None` when unknown (as [`Rule::known`]); `Some(vec![])` passes.
+    #[must_use]
+    pub fn failing(self, r: &Routes) -> Option<Vec<usize>> {
+        let mut out = Vec::new();
+        self.walk(r, |i, need, have, _| {
+            if need > have {
+                out.push(i);
+            }
+        })?;
+        Some(out)
+    }
+
+    /// Calls `f(shape index into r.shapes(net), need, have, need/have-ratio)`
+    /// once per limited metal shape and once per member cut of each via group
+    /// (the group's figures). `None` when the flow is unknown.
+    fn walk(self, r: &Routes, mut f: impl FnMut(usize, f32, f32, f32)) -> Option<()> {
         let stack = self.stack?;
         let routed = r.shapes(self.net);
         let all = [routed, r.cell_metal(self.net)].concat();
         let flow = net_flow(stack, &all, r.terminals(self.net))?;
-        let (mut worst, mut checked) = ((0.0f32, 0.0f32), false);
-        let mut fold = |need: f32, have: f32, ratio: f32| {
-            checked = true;
-            worst = (worst.0.max(crate::rule::over(need - have, need)), worst.1.max(ratio));
-        };
-        for (s, &ua) in routed.iter().zip(&flow.shape_ua) {
+        for (i, (s, &ua)) in routed.iter().zip(&flow.shape_ua).enumerate() {
             let Some(lim) = self.limit(s.layer.0).filter(|l| l.ua_per_um > 0.0) else { continue };
             let have = s.rect.w.min(s.rect.h).max(1) as f32;
             let need = lim.width_nm(ua, s.rect.w.max(s.rect.h) as f32);
-            fold(need, have, need / have);
+            f(i, need, have, need / have);
         }
         // Via groups: cuts of one layer in parallel between the same metals,
         // i.e. landing on a common shape below and a common shape above (by
@@ -173,11 +214,100 @@ impl Electromigration {
             let g = &mut group[uf.find(i as u32) as usize];
             *g = (g.0 + 1, g.1.max(flow.shape_ua[cut.0]));
         }
-        for (i, &(have, ua)) in group.iter().enumerate().filter(|(_, g)| g.0 > 0) {
-            let lim = cuts[i].1;
-            fold(lim.cuts(ua) as f32, have as f32, ua / (lim.ua_per_cut * have as f32));
+        if self.front_row {
+            // Per root: members, then `have` = min front row over the metals
+            // touching every member (dr's per-cut pads are not common).
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); cuts.len()];
+            for i in 0..cuts.len() {
+                members[uf.find(i as u32) as usize].push(i);
+            }
+            for (root, ms) in members.iter().enumerate().filter(|(_, ms)| !ms.is_empty()) {
+                let rects: Vec<&Rect> = ms.iter().map(|&i| &routed[cuts[i].0].rect).collect();
+                let first = &cuts[ms[0]];
+                let front = first.2.iter().chain(&first.3)
+                    .filter(|m| ms.iter().all(|&i| cuts[i].2.contains(m) || cuts[i].3.contains(m)))
+                    .map(|&m| front_row(&rects, &all[m].rect))
+                    .min();
+                if let Some(n) = front {
+                    group[root].0 = n;
+                }
+            }
         }
-        checked.then_some(worst)
+        for (i, cut) in cuts.iter().enumerate() {
+            let (have, ua) = group[uf.find(i as u32) as usize];
+            let lim = cuts[uf.find(i as u32) as usize].1;
+            f(cut.0, lim.cuts(ua) as f32, have as f32, ua / (lim.ua_per_cut * have as f32));
+        }
+        Some(())
+    }
+}
+
+/// Hastings eq. 14.6 (L45870–45932): A = √(ρ·τ·I_pk²/(2·C_V·ΔT)), τ 225 ns, ΔT 50 K, I_pk = hbm_v/1500 Ω; µm².
+#[must_use]
+pub fn esd_area_um2(hbm_v: f32, rho_uohm_cm: f32, cv_j_per_k_cm3: f32) -> f32 {
+    let (rho, i) = (f64::from(rho_uohm_cm) * 1e-6, f64::from(hbm_v) / 1500.0);
+    ((rho * 225e-9 * i * i / (2.0 * f64::from(cv_j_per_k_cm3) * 50.0)).sqrt() * 1e8) as f32
+}
+
+/// Table 14.3 (ρ µΩ·cm, C_V J/K/cm³) for `metal_family`: "al" (2.7, 2.42), "cu" (1.7, 3.45); absent or other → Al,
+/// the larger area.
+#[must_use]
+pub fn metal_family(key: Option<&str>) -> (f32, f32) {
+    match key {
+        Some("cu") => (1.7, 3.45),
+        _ => (2.7, 2.42),
+    }
+}
+
+/// Every routed metal shape of an ESD pad net has a cross-section ≥ `area_um2`:
+/// short side ≥ area·1e6/thickness_nm. A layer of thickness 0 is unknown for it.
+/// Separate from [`Electromigration`]: the floor needs no DC current, which a
+/// pad net rarely has.
+#[derive(Clone, Copy)]
+pub struct EsdWidth {
+    pub net: NetId,
+    pub area_um2: f32,
+    pub stack: &'static Stack,
+}
+
+impl EsdWidth {
+    /// `(worst residual, worst need/have)` over the net's routed metal shapes
+    /// of known thickness; `None` when there is none.
+    fn check(self, r: &Routes) -> Option<(f32, f32)> {
+        let mut worst: Option<(f32, f32)> = None;
+        for s in r.shapes(self.net) {
+            let Some(l) = self.stack.layers.iter().find(|l| l.id == s.layer.0 && !l.cut && l.thickness_nm > 0.0) else { continue };
+            let need = (f64::from(self.area_um2) * 1e6 / f64::from(l.thickness_nm)) as f32;
+            let have = s.rect.w.min(s.rect.h).max(1) as f32;
+            let (res, q) = worst.unwrap_or((f32::MIN, 0.0));
+            worst = Some((res.max(crate::rule::over(need - have, need)), q.max(need / have)));
+        }
+        worst
+    }
+}
+
+impl Rule for EsdWidth {
+    type On = Routes;
+    const REPAIR: crate::RepairKind = crate::RepairKind::Em;
+    fn cost(self, r: &Routes) -> f32 {
+        self.residual(r)
+    }
+    fn satisfied(self, r: &Routes) -> bool {
+        self.residual(r) <= 0.0
+    }
+    fn known(self, r: &Routes) -> bool {
+        self.check(r).is_some()
+    }
+    /// Worst `over(need − have, need)` over the known shapes.
+    fn residual(self, r: &Routes) -> f32 {
+        self.check(r).map_or(0.0, |(res, _)| res)
+    }
+    /// Worst `need/have`.
+    fn usage(self, r: &Routes) -> Option<f32> {
+        self.check(r).map(|(_, q)| q)
+    }
+    fn touches(self, out: &mut Vec<u32>) {
+        out.push(u32::from(self.net.0));
     }
 }
 
@@ -218,6 +348,14 @@ mod tests {
     use pnr_core::geom::{LayerId, Rect};
     use pnr_core::routes::Terminal;
 
+    /// REL-05: sky130's 90 °C rating with the Cu fallback (0.9 eV, n 1.1)
+    /// allows ≈ 10 % of the current at 125 °C.
+    #[test]
+    fn fallback_derating_at_125c() {
+        let f = derate(398.15, 363.15, 0.9, 1.1);
+        assert!((f - 0.100).abs() <= 0.002, "{f}");
+    }
+
     /// met1 (id 1, 0.125 Ω/□), via (2, 4.5 Ω/cut), met2 (3).
     fn stack() -> &'static Stack {
         let metal = |id| Layer { id, sheet_ohm: 0.125, ..Layer::default() };
@@ -232,7 +370,7 @@ mod tests {
         limits[0] = (1, Limit { ua_per_um: 2_800.0, ua_per_cut: 360.0, ..Limit::default() });
         limits[1] = (2, Limit { ua_per_cut: 290.0, ..Limit::default() });
         limits[2] = (3, Limit { ua_per_um: 2_800.0, ua_per_cut: 290.0, ..Limit::default() });
-        Electromigration { net: NetId(0), limits, stack: Some(stack()) }
+        Electromigration { net: NetId(0), limits, stack: Some(stack()), front_row: true }
     }
 
     fn shape(layer: u16, x: i32, y: i32, w: i32, h: i32) -> Shape {
@@ -271,6 +409,15 @@ mod tests {
     }
 
     #[test]
+    fn failing_names_the_violating_shapes() {
+        // 1 000 µA end to end needs 357.1 nm: the 200 nm shape fails, the 400 nm one passes.
+        let wires = vec![shape(1, 0, 0, 2_000, 200), shape(1, 2_000, 0, 2_000, 400)];
+        let r = |b| routes(wires.clone(), vec![term(0, 0, 200, 200, Some(1_000.0)), term(3_800, 0, 200, 400, b)]);
+        assert_eq!(em().failing(&r(Some(-1_000.0))), Some(vec![0]));
+        assert_eq!(em().failing(&r(None)), None);
+    }
+
+    #[test]
     fn a_trunk_carries_the_sum_of_its_branches() {
         // Root sink at the trunk's left end; branches up at x = 4 µm (+300)
         // and 8 µm (+200).
@@ -289,7 +436,9 @@ mod tests {
         let wires = vec![shape(1, 0, 0, 5_000, 1_000), shape(2, 4_200, 200, 200, 200), shape(2, 4_600, 600, 200, 200), shape(3, 4_000, 0, 6_000, 1_000)];
         let r = routes(wires, vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))]);
         assert_eq!(em().limit(2).unwrap().cuts(700.0), 3, "⌈700/290⌉");
-        let e = em();
+        // Front row: the cuts lie along both metals' long axis x, one per column.
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "(3 − 1)/3: {}", em().residual(&r));
+        let e = Electromigration { front_row: false, ..em() };
         assert!(e.known(&r) && !e.satisfied(&r));
         assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
         // A third cut in the group meets it.
@@ -322,13 +471,66 @@ mod tests {
         }
         let terms = vec![term(0, 400, 200, 200, Some(700.0)), term(9_800, 400, 200, 200, Some(-700.0))];
         let r = routes(wires.clone(), terms.clone());
-        let e = em();
+        // Front row: the pads touch one cut each; met1 and the trunk run along
+        // x, the cuts' row, so one cut faces the current.
+        assert!((em().residual(&r) - 2.0 / 3.0).abs() < 1e-4, "{}", em().residual(&r));
+        let e = Electromigration { front_row: false, ..em() };
         assert!(e.known(&r) && e.satisfied(&r), "⌈700/290⌉ = 3 cuts in one group: {}", e.residual(&r));
         // usage = I/(I_cut·n) pins n = 3 (a pad may carry all 700 µA: 250/350 nm).
         assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 3.0)).abs() < 1e-4, "{:?}", e.usage(&r));
         // Two cuts left: still one group, now short.
         wires.pop();
         assert!((e.residual(&routes(wires, terms)) - 1.0 / 3.0).abs() < 1e-4);
+    }
+
+    /// A 3 × 2 array on a long met1 (along x) under a square met2 pad: two
+    /// cuts per column face the current, so 700 µA (3 cuts) is short by one.
+    #[test]
+    fn a_deep_array_counts_its_front_row() {
+        let mut wires = vec![shape(1, 0, 0, 10_000, 800), shape(3, -100, -100, 1_500, 1_500)];
+        for x in [0, 500, 1_000] {
+            for y in [0, 500] {
+                wires.push(shape(2, x, y, 200, 200));
+            }
+        }
+        let r = routes(wires, vec![term(9_800, 0, 200, 800, Some(700.0)), term(500, 1_200, 200, 200, Some(-700.0))]);
+        let e = em();
+        assert!(e.known(&r) && !e.satisfied(&r));
+        assert!((e.usage(&r).unwrap() - 700.0 / (290.0 * 2.0)).abs() < 1e-4, "{:?}", e.usage(&r));
+        assert!((e.residual(&r) - 1.0 / 3.0).abs() < 1e-4, "(3 − 2)/3: {}", e.residual(&r));
+        let all = Electromigration { front_row: false, ..em() };
+        assert!(all.known(&r) && all.satisfied(&r), "6 ≥ 3: {}", all.residual(&r));
+    }
+
+    #[test]
+    fn hbm_2kv_on_sky130_met1_needs_18_6um() {
+        assert!((esd_area_um2(2000., 2.7, 2.42) - 6.68).abs() < 0.01, "{}", esd_area_um2(2000., 2.7, 2.42));
+        assert!((esd_area_um2(2000., 1.7, 3.45) - 4.44).abs() < 0.01, "{}", esd_area_um2(2000., 1.7, 3.45));
+        assert_eq!(metal_family(None), metal_family(Some("al")));
+        assert_eq!(metal_family(Some("cu")), (1.7, 3.45));
+        let need = esd_area_um2(2000., 2.7, 2.42) * 1e6 / 360.0;
+        assert!((need - 18_557.0).abs() < 30.0, "{need}");
+    }
+
+    #[test]
+    fn an_esd_net_narrower_than_its_floor_fails() {
+        let at = |t: f32| -> &'static Stack {
+            Box::leak(Box::new(Stack { layers: vec![Layer { id: 1, thickness_nm: t, ..Layer::default() }], ..Stack::default() }))
+        };
+        let rule = |t| EsdWidth { net: NetId(0), area_um2: esd_area_um2(2000., 2.7, 2.42), stack: at(t) };
+        let one = |w, h| routes(vec![shape(1, 0, 0, w, h)], vec![]);
+        let e = rule(360.0);
+        // Short side ≥ 18 557 nm passes; 10 000 does not, whatever the length.
+        for r in [one(20_000, 20_000), one(40_000, 18_600)] {
+            assert!(e.known(&r) && e.satisfied(&r), "{}", e.residual(&r));
+        }
+        assert!(!e.satisfied(&one(10_000, 18_000)));
+        let r = one(10_000, 9_000);
+        assert!(e.known(&r) && !e.satisfied(&r));
+        let need = esd_area_um2(2000., 2.7, 2.42) * 1e6 / 360.0;
+        assert!((e.residual(&r) - (need - 9_000.0) / need).abs() < 1e-3, "{}", e.residual(&r));
+        assert!((e.residual(&r) - (18_557.0 - 9_000.0) / 18_557.0).abs() < 1e-3);
+        assert!(!rule(0.0).known(&r), "thickness unknown");
     }
 
     /// A terminal joined only through its cell's strap is reached (the cell

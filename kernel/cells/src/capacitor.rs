@@ -391,9 +391,9 @@ mod tests {
                 unit_w: side,
                 unit_l: side,
                 series_parallel: SeriesParallel::Series,
-                same_variant_required: false,
                 dummy_required: false,
                 route_matching_required: false,
+                class: None, kind: None, series: Vec::new(), style: None,
             }],
             ..Default::default()
         };

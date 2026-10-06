@@ -110,7 +110,7 @@ pub fn classify_nets(hg: &BipartiteHypergraph, cfg: &AnnotationConfig) -> Vec<Ne
     roles
 }
 
-fn is_clock(lower: &str) -> bool {
+pub(crate) fn is_clock(lower: &str) -> bool {
     CLK_SUBSTR.iter().any(|p| lower.contains(p))
         || CLK_PREFIX.iter().any(|p| {
             lower.strip_prefix(p).is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '_' || c == 'b'))
@@ -137,6 +137,35 @@ pub struct AnnotationConfig {
     pub offset_sigma_mv: Option<f32>,
     /// Emission tuning numbers ([`crate::policy::Policy`]).
     pub policy: crate::policy::Policy,
+    /// Victim guard rings' return net (case-insensitive name). `None`: a
+    /// Ground-class net named like `avss`/`vssa`/`agnd` that no aggressor
+    /// touches, else no victim rings ([`crate::rings`]).
+    pub quiet_ring_net: Option<String>,
+    /// Sidecar symmetry seeds (EXT-26), ahead of the recognised ones; ids
+    /// `u32::MAX − entry`, so they never collide with leaf-index seeds.
+    pub seeds: Vec<crate::symmetry::Seed>,
+    /// Sidecar `SymmetricBlocks` direction: the axis of a single compound.
+    pub symmetry_dir: Option<analog::intent::AxisDir>,
+    /// Sidecar `GroupBlocks`: (entry index, members) kept together (ProxBlock,
+    /// Proximity); the batches carry `Origin::User { index }`.
+    pub groups: Vec<(u32, Vec<pnr_core::ids::DeviceId>)>,
+    /// Sidecar `Match`: the class (and optionally kind) of the set holding these devices.
+    pub classes: Vec<(Vec<pnr_core::ids::DeviceId>, analog::intent::MatchClass, Option<analog::intent::MatchKind>)>,
+    /// Sidecar `NetClass`: overrides with `User` evidence.
+    pub net_classes: Vec<(pnr_core::ids::NetId, analog::metadata::NetClass)>,
+    /// Sidecar `OffsetBudget`: 1σ offset, mV, of the set holding these devices.
+    pub offset_budgets: Vec<(Vec<pnr_core::ids::DeviceId>, f32)>,
+    /// Sidecar `Load`: external load per net, aF, added to its gate load (AA-25).
+    pub loads: Vec<(pnr_core::ids::NetId, f32)>,
+    /// Sidecar `IsolatedTub` (GAP-14): NMOS members drawn in one deep-n-well tub, its ring tied to the net.
+    /// User-declared only: the sources give no automatic threshold for when a tub pays.
+    pub tubs: Vec<(Vec<pnr_core::ids::DeviceId>, pnr_core::ids::NetId)>,
+    /// Sidecar `Kelvin` requests, appended to the extracted ones.
+    pub kelvins: Vec<analog::intent::KelvinReq>,
+    /// Sidecar `Order` (EXT-28): placed ahead of the extracted orders, `reversible: false`.
+    pub order: Vec<analog::intent::Order>,
+    /// The sidecar parse's diagnostics, carried into `Intent.diagnostics`.
+    pub sidecar_diags: Vec<analog::intent::Diagnostic>,
 }
 
 /// Every process number the annotator uses. A `None` means the deck does not
@@ -149,21 +178,35 @@ pub struct ProcessNumbers {
     pub gate_af_per_um2: Option<f32>,
     /// Ground capacitance of a minimum-width lowest routing wire, aF/µm.
     pub wire_af_per_um: Option<f32>,
+    /// Series resistance of a minimum-width lowest routing wire, Ω/µm (sheet
+    /// ohms / width; EXT-25's R class reference).
+    pub wire_ohm_per_um: Option<f32>,
     /// Lowest routing metal's min spacing, nm; crosstalk spacings are multiples.
     pub route_space_nm: i32,
     /// Deep-trench isolation: (max spacing sharing one trench, trench width), nm.
     pub dti: Option<(i32, i32)>,
     /// Pelgrom `A_VT` (ΔVT of a pair), mV·µm, `[nmos, pmos]`.
     pub avt_mv_um: [Option<f32>; 2],
+    /// Current-factor mismatch `A_β` (Δβ/β of a pair), %·µm, `[nmos, pmos]`:
+    /// with a mirror's `g_m/I` it puts the ledger in % (MAT-09).
+    pub abeta_pct_um: [Option<f32>; 2],
     /// Pelgrom distance coefficient `S_VT`, µV/µm. Process-specific and rarely
     /// published: absent leaves the matching distance check unknown.
     pub svt_uv_per_um: Option<f32>,
+    /// `S_VT² = a + b/L²` fit `(a µV²/µm², b µV²)`: with a set's gate L it
+    /// replaces `svt_uv_per_um` (MAT-16).
+    pub svt_fit: Option<(f32, f32)>,
     /// |dVT/dT|, µV/K, `[nmos, pmos]`: turns a matched pair's offset allowance
     /// into a ΔT limit.
     pub vt_tc_uv_per_k: [Option<f32>; 2],
     /// BSIM4 LOD `KVTH0` (ΔVT per unit `Δ(1/SA + 1/SB)`), mV·µm, `[nmos,
     /// pmos]`: prices LOD imbalance across a matched array.
     pub lod_kvth0_mv_um: [Option<f32>; 2],
+    /// Deck `bjt_ka_pct_um`: bipolar/diode area constant `k_A` (ΔI_S/I_S of a
+    /// pair), %·µm (MAT-10).
+    pub bjt_ka_pct_um: Option<f32>,
+    /// Deck `vbe_tc_uv_per_k`: bipolar/diode `|dV_BE/dT|`, µV/K (MAT-10).
+    pub vbe_tc_uv_per_k: Option<f32>,
     /// Cut lattice, nm (coincidence tolerance is half of it); 0 = unknown.
     pub lattice_nm: i32,
     /// What the active area sits on; only `EpiOnLowRes` gives isolation a
@@ -175,6 +218,20 @@ pub struct ProcessNumbers {
     /// The routing stack's per-layer parasitics and antenna stages; `None`
     /// leaves the routing budgets on drawn length and the cumulative antenna.
     pub stack: Option<&'static analog::routing::Stack>,
+    /// Deck `min_guard_ring_width`, nm; `0` = none stated.
+    pub min_ring_width_nm: i32,
+    /// Sidecar `ecgr_min_width_nm`: an electron-collecting ring's width for
+    /// a stated collection efficiency; `None` on every shipped deck.
+    pub ecgr_min_width_nm: Option<i32>,
+    /// The process can draw an `Ecgr` / `Hcgr` (`cells::post_cell::drawable`).
+    pub ecgr_drawable: bool,
+    pub hcgr_drawable: bool,
+    /// The process can draw a `Tub` (deep n-well; `cells::post_cell::drawable`).
+    pub tub_drawable: bool,
+    /// `Config.op` temperature, K (not a deck key): a mirror's mobility term (MAT-14).
+    pub die_temp_k: Option<f32>,
+    /// Unitization bounds (EXT-15); 0 = deck key missing.
+    pub unit: crate::sets::UnitDeck,
 }
 
 #[cfg(test)]

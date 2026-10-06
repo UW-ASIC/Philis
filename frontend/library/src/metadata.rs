@@ -93,12 +93,31 @@ pub struct MetadataReport {
     /// Post-layout specs: `(metric, measured, min, max, normalised miss)`.
     /// Empty when performance scoring is off.
     pub performance: Vec<(String, Option<f64>, Option<f64>, Option<f64>, f64)>,
+    /// Per finite spec bound, its worst value and scenario over the active
+    /// scenarios (PERF-10; the winner is not re-run over inactive ones).
+    pub performance_worst: Vec<String>,
     /// Per declared spec bound, its routing budget row or why it has none
     /// (`"ugf:min: row (3 nets)"`, `"…: do-not-worsen row …"`, `"…: no row (reason)"`).
     /// Empty from [`build`]; the flow fills it.
     pub budget_rows: Vec<String>,
+    /// Per active scenario's schematic sensitivity table (PERF-11): `"{scenario}:
+    /// {rows} rows, {sims} sims, {ms} ms"`, then `"{scenario}: nonlinear
+    /// {param:?}"` per row whose two difference quotients disagree. Empty from
+    /// [`build`]; the flow fills it.
+    pub sensitivity: Vec<String>,
+    /// Per finite spec bound of the winner (PERF-13): `"{metric}:{min|max} σ_f
+    /// … β … Φ(β) … (V_T only) top {device} {pct}%, …"`, or `"{metric}:{side}
+    /// UNKNOWN ({reason})"` ([`crate::robust::unknown_reason`]), then `"joint yield (linear, 1e5) …"`. Empty without
+    /// performance scoring.
+    pub robustness: Vec<String>,
     /// Post-layout simulations that could not run ([`crate::RunStats::sim_failures`]).
     pub sim_failures: u32,
+    /// One ledger row per matched pair on the placed layout, from the
+    /// placement budget arm (each set is also in cost; reading both would
+    /// duplicate it).
+    pub matched: Vec<analog::matching::mismatch::LedgerRow>,
+    /// One note per sizing-reach finding (GAP-02); report only.
+    pub sizing: Vec<analog::matching::sizing::SizingNote>,
     /// Sidecar process numbers used on an `UNVERIFIED` source
     /// ([`verify::Pdk::unverified`]). Reported, not blocking [`Self::certified`].
     pub assumed: Vec<String>,
@@ -118,6 +137,59 @@ pub struct MetadataReport {
     /// `(device, reason)` for every `annotator::Coverage::Unconstrained` device.
     /// Empty from [`build`]; the flow fills it.
     pub unconstrained: Vec<(String, &'static str)>,
+    /// REL-10: `(a, b, ΔV_DS, ΔV_GS, ΔV_BS)` mV per recognised matched pair
+    /// under the run's bias (reported, no threshold). Empty without an op.
+    pub aging: Vec<(String, String, f64, f64, f64)>,
+    /// EXT-29: the annotator's structure/bias audit findings (`annotator::audit::KINDS`),
+    /// `kind: message`. Empty from [`build`]; the flow fills it.
+    pub audit: Vec<String>,
+    /// REL-10: FETs whose voltage rating could not be checked (a voltage
+    /// unresolved, or no deck rule names the model). `0` without an op.
+    pub voltage_unknown: usize,
+    /// PERF-14: the non-dominated promoted epochs with `|V| = 0` and no failed
+    /// bound, over every start and topology ([`pareto_insert`]). Empty from
+    /// [`build`]; the flow fills it. The winner stays the lexicographic one.
+    pub pareto: Vec<ParetoPoint>,
+    /// PERF-14: every promoted epoch of the winning search, in order;
+    /// `v`/`residual` let a caller re-rank under the pre-PERF-14 key.
+    pub epochs: Vec<ParetoPoint>,
+}
+
+/// One promoted epoch's metrics (PERF-14); `Layout` is not `Clone`, so no geometry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParetoPoint {
+    pub outer: u32,
+    pub iteration: u32,
+    pub v: usize,
+    /// Σ normalised spec miss ([`crate::perf::PerfResult::residual`]); `0` without scoring.
+    pub residual: f64,
+    pub min_beta: Option<f64>,
+    pub theta: f64,
+    pub c_tier: f32,
+    pub area_um2: f64,
+}
+
+/// Front size cap [policy].
+pub const PARETO_MAX: usize = 16;
+
+/// Inserts `p` unless dominated in (−min_beta [None = −∞], theta, c_tier, area_um2) or equal there to a kept
+/// point (first kept), removes points it dominates; over [`PARETO_MAX`] drops the largest-area point.
+pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
+    let obj = |q: &ParetoPoint| [-q.min_beta.unwrap_or(f64::NEG_INFINITY), q.theta, f64::from(q.c_tier), q.area_um2];
+    // `a` dominates `b`: no worse anywhere, better somewhere.
+    let dom = |a: &ParetoPoint, b: &ParetoPoint| {
+        let (a, b) = (obj(a), obj(b));
+        a.iter().zip(&b).all(|(x, y)| x <= y) && a.iter().zip(&b).any(|(x, y)| x < y)
+    };
+    if front.iter().any(|q| dom(q, &p) || obj(q) == obj(&p)) {
+        return;
+    }
+    front.retain(|q| !dom(&p, q));
+    front.push(p);
+    if front.len() > PARETO_MAX {
+        let worst = (0..front.len()).max_by(|&i, &j| front[i].area_um2.total_cmp(&front[j].area_um2)).expect("non-empty");
+        front.remove(worst);
+    }
 }
 
 impl MetadataReport {
@@ -175,6 +247,13 @@ pub struct BiasSummary {
     pub hottest: Option<(String, i32)>,
     /// Synthesised mid-rail probe, not a testbench: never a sign-off bias.
     pub probe: bool,
+    /// Conductor temperature EM limits were derated to, K (REL-05): ambient,
+    /// plus θ_JA·P when given, plus the placement-independent on-die bound.
+    pub em_temp_k: f32,
+    /// Where the derating's Black parameters came from: `"deck"` (the rule,
+    /// or a complete sidecar table), `"sidecar+fallback Ea/n"`, `"none"`
+    /// (limits used as rated); `""` before the flow fills it.
+    pub em_derate: &'static str,
 }
 
 /// Collect budget status for one requirement arm. `arm` tags every row, because
@@ -261,6 +340,10 @@ pub fn build(
     p.extend(statuses(&placement.budget, layout, Arm::Budget));
     let mut r = statuses(&routing.hard, routes, Arm::Hard);
     r.extend(statuses(&routing.budget, routes, Arm::Budget));
+    let mut matched = Vec::new();
+    placement.budget.iter().for_each(|b| b.ledger_rows(layout, &mut matched));
+    let mut sizing = Vec::new();
+    placement.budget.iter().for_each(|b| b.sizing_notes(layout, &mut sizing));
     MetadataReport {
         placement: p,
         routing: r,
@@ -268,13 +351,23 @@ pub fn build(
         net_classes: census,
         missing: missing.to_vec(),
         performance: Vec::new(),
+        performance_worst: Vec::new(),
         budget_rows: Vec::new(),
+        sensitivity: Vec::new(),
+        robustness: Vec::new(),
         sim_failures: 0,
+        matched,
+        sizing,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
         binding: Vec::new(),
         coverage: verify::Coverage::default(),
         recognition: Vec::new(),
         unconstrained: Vec::new(),
+        aging: Vec::new(),
+        audit: Vec::new(),
+        voltage_unknown: 0,
+        pareto: Vec::new(),
+        epochs: Vec::new(),
     }
 }
 
@@ -302,6 +395,9 @@ impl std::fmt::Display for MetadataReport {
                         .map(|(n, p)| format!(" · hottest {n} at {p} µW"))
                         .unwrap_or_default()
                 )?;
+                if !b.em_derate.is_empty() {
+                    writeln!(f, "  EM derated at {:.3} K ({})", b.em_temp_k, b.em_derate)?;
+                }
             }
             None => writeln!(
                 f,
@@ -353,10 +449,19 @@ impl std::fmt::Display for MetadataReport {
                 };
                 writeln!(f, "  {m:<22} {:>12} {:>12} {:>12}  {verdict}", num(*v), num(*lo), num(*hi))?;
             }
+            for w in &self.performance_worst {
+                writeln!(f, "  worst {w}")?;
+            }
+            for r in &self.robustness {
+                writeln!(f, "  robust {r}")?;
+            }
             writeln!(f, "  simulations failed: {}", self.sim_failures)?;
         }
         for b in &self.budget_rows {
             writeln!(f, "  budget {b}")?;
+        }
+        for n in &self.sensitivity {
+            writeln!(f, "  sens {n}")?;
         }
         if !self.performance.is_empty() || !self.budget_rows.is_empty() {
             writeln!(f)?;
@@ -371,6 +476,13 @@ impl std::fmt::Display for MetadataReport {
         if !self.unconstrained.is_empty() {
             let u: Vec<String> = self.unconstrained.iter().map(|(d, why)| format!("{d} ({why})")).collect();
             writeln!(f, "  UNCONSTRAINED: {}", u.join(", "))?;
+        }
+        if self.bias.is_some() {
+            let a: Vec<String> = self.aging.iter().map(|(x, y, ds, gs, bs)| format!("{x}/{y} ΔVds {ds:.1} ΔVgs {gs:.1} ΔVbs {bs:.1} mV")).collect();
+            writeln!(f, "  AGING: {}; voltage rating unknown on {} FET(s)", if a.is_empty() { "no matched pair".into() } else { a.join(", ") }, self.voltage_unknown)?;
+        }
+        if !self.audit.is_empty() {
+            writeln!(f, "  AUDIT: {}", self.audit.join("; "))?;
         }
         if !self.assumed.is_empty() {
             writeln!(f, "\n  assumed (UNVERIFIED sidecar values): {}", self.assumed.join(", "))?;
@@ -527,6 +639,14 @@ mod tests {
         );
     }
 
+    /// EXT-29: audit findings print as one AUDIT line, and none without findings.
+    #[test]
+    fn metadata_audit_line() {
+        assert!(!format!("{}", MetadataReport::default()).contains("AUDIT"));
+        let r = MetadataReport { audit: vec!["vgst_low: x".into(), "bjt_ratio: y".into()], ..Default::default() };
+        assert!(format!("{r}").contains("  AUDIT: vgst_low: x; bjt_ratio: y"), "{r}");
+    }
+
     #[test]
     fn unsimulated_bias_is_stated_not_implied() {
         let r = MetadataReport::default();
@@ -610,7 +730,7 @@ mod tests {
     /// sign-off certificate.
     #[test]
     fn a_probe_bias_never_certifies() {
-        let probe = BiasSummary { provenance: String::new(), resolved: 0, devices: 0, total_power_uw: 0, hottest: None, probe: true };
+        let probe = BiasSummary { provenance: String::new(), resolved: 0, devices: 0, total_power_uw: 0, hottest: None, probe: true, em_temp_k: 300.15, em_derate: "" };
         let real = BiasSummary { probe: false, ..probe.clone() };
         assert!(!MetadataReport { bias: Some(probe), ..MetadataReport::default() }.certified());
         assert!(MetadataReport { bias: Some(real), ..MetadataReport::default() }.certified());
@@ -623,5 +743,40 @@ mod tests {
         assert!(!MetadataReport::default().to_string().contains("price at cap"));
         let r = MetadataReport { binding: vec!["WireLength".into()], ..MetadataReport::default() };
         assert!(r.to_string().contains("price at cap on the last epoch (search stopped binding): WireLength"), "{r}");
+    }
+
+    fn point(beta: f64, theta: f64, c_tier: f32, area_um2: f64) -> ParetoPoint {
+        ParetoPoint { outer: 0, iteration: 0, v: 0, residual: 0.0, min_beta: Some(beta), theta, c_tier, area_um2 }
+    }
+
+    #[test]
+    fn pareto_keeps_only_nondominated() {
+        let [a, b, c, d, e] = [point(3.0, 0.0, 10.0, 100.0), point(2.0, 0.0, 10.0, 100.0), point(1.0, 0.0, 5.0, 100.0), point(1.0, 0.0, 6.0, 100.0), point(0.5, 0.0, 20.0, 50.0)];
+        let mut front = Vec::new();
+        for p in [a.clone(), b.clone(), c.clone(), d.clone(), e.clone()] {
+            pareto_insert(&mut front, p);
+        }
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!([&a, &c, &e].iter().all(|p| front.contains(p)), "{front:?}");
+        // Reversed, B and D arrive first and are removed by A and C.
+        let mut front = Vec::new();
+        for p in [e.clone(), d, c.clone(), b, a.clone()] {
+            pareto_insert(&mut front, p);
+        }
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!([&a, &c, &e].iter().all(|p| front.contains(p)), "{front:?}");
+        // Equal objectives from another start: the first is kept, once.
+        let twin = ParetoPoint { outer: 1, iteration: 7, ..a.clone() };
+        pareto_insert(&mut front, twin);
+        assert_eq!(front.len(), 3, "{front:?}");
+        assert!(front.contains(&a), "{front:?}");
+
+        // β up, area up: mutually non-dominated.
+        let mut front = Vec::new();
+        for i in 0..17 {
+            pareto_insert(&mut front, point(f64::from(i), 0.0, 1.0, f64::from(i)));
+        }
+        assert_eq!(front.len(), PARETO_MAX);
+        assert!(front.iter().all(|p| p.area_um2 < 16.0), "{front:?}");
     }
 }
