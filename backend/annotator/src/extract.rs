@@ -9,7 +9,6 @@
 //! | `ParasiticBudget`    | budget | every budgeted net, C budget as drawn length   |
 //! | `CouplingBudget`     | budget | every budgeted net, from its class and load;   |
 //! |                      |        | own shield excluded, quiet rails weigh 0       |
-//!
 //! | `Shield`             | budget | victim nets, to [`quiet_ground`], only against |
 //! |                      |        | an aggressor net                               |
 //!
@@ -26,21 +25,45 @@ use analog::Requirements;
 use pnr_core::ids::DeviceId;
 use pnr_core::{BipartiteHypergraph, NetId, Routes};
 
+/// A coupling victim: Sensitive, Bias or Reference.
 fn victim_net(c: NetClass) -> bool {
     matches!(c, NetClass::Sensitive | NetClass::Bias | NetClass::Reference)
 }
 
+/// A coupling aggressor: Clock, DigitalSwitching or Noisy.
 fn aggressor_net(c: NetClass) -> bool {
     matches!(c, NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy)
 }
 
-fn rail(c: NetClass) -> bool {
+/// A Supply, Ground or Substrate rail: carries no mirror and no differential rule.
+pub(crate) fn rail(c: NetClass) -> bool {
     matches!(c, NetClass::Supply | NetClass::Ground | NetClass::Substrate)
 }
 
+/// Row of a 4-row policy table (`Policy::margin_pct`, `spacing_multiple`):
+/// victims 0, aggressors 1, `third` 2, anything else 3.
+fn policy_row(c: NetClass, third: bool) -> usize {
+    if victim_net(c) {
+        0
+    } else if aggressor_net(c) {
+        1
+    } else if third {
+        2
+    } else {
+        3
+    }
+}
+
 /// Assemble the routing [`Requirements`] from structure (EXT-24) and fill
-/// `intent`'s routing facts. `classes` is indexed by net id; `set_roles` by
-/// `intent.sets`. `ports` and `op` decide star points (EXT-24 step 4).
+/// `intent`'s routing facts (net shield references and RC classes, common
+/// nodes, stars, Kelvin requests, diagnostics). `classes` is indexed by net
+/// id; `gate_um2` (µm²) by device; `set_roles` by `intent.sets`. `ports` and
+/// `op` decide star points (EXT-24 step 4). The `Shield` batch is present only
+/// when a shield return exists (see [`quiet_ground`]).
+///
+/// # Panics
+/// If `classes` is shorter than `hg`'s nets, `gate_um2` than its devices,
+/// `set_roles` than `intent.sets`, or a set is empty.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn routing(
@@ -54,48 +77,10 @@ pub fn routing(
     ports: &[NetId],
     op: Option<&crate::evidence::OpFacts>,
 ) -> Requirements<Routes> {
-    let margin_pct = |c: NetClass| {
-        policy.margin_pct[match c {
-            NetClass::Sensitive | NetClass::Bias | NetClass::Reference => 0,
-            NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy => 1,
-            NetClass::Supply | NetClass::Ground => 2,
-            _ => 3,
-        }]
-    };
-    let spacing_multiple = |c: NetClass| {
-        policy.spacing_multiple[match c {
-            NetClass::Sensitive | NetClass::Bias | NetClass::Reference => 0,
-            NetClass::Clock | NetClass::DigitalSwitching | NetClass::Noisy => 1,
-            NetClass::Signal | NetClass::DigitalStatic => 2,
-            _ => 3,
-        }]
-    };
+    let margin_pct = |c: NetClass| policy.margin_pct[policy_row(c, matches!(c, NetClass::Supply | NetClass::Ground))];
+    let spacing_multiple = |c: NetClass| policy.spacing_multiple[policy_row(c, matches!(c, NetClass::Signal | NetClass::DigitalStatic))];
     let mut r = Requirements::<Routes>::default();
-    // One Antenna per gate net, over the total gate area it drives.
-    let mut gate_nm2 = vec![0i64; hg.net_names.len()];
-    for (d, nets) in hg.device_nets.iter().enumerate() {
-        if gate_um2[d] > 0.0 {
-            if let Some(t) = hg.terminals[d]
-                .iter()
-                .position(|t| crate::terms::term_role(hg.kinds[d], t) == crate::terms::TermRole::FetGate)
-            {
-                gate_nm2[nets[t].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
-            }
-        }
-    }
-    let antenna: Vec<Antenna> = process.antenna_max_ratio
-        .into_iter()
-        .flat_map(|ratio| {
-            gate_nm2.iter().enumerate().filter(|&(_, &a)| a > 0).map(move |(n, &a)| Antenna {
-                net: NetId(n as u16),
-                max_ratio_x100: (ratio * 100.0) as i32,
-                gate_area_nm2: a,
-                margin_pct: policy.antenna_margin_pct,
-                stack: process.stack,
-            })
-        })
-        .collect();
-    r.hard.push(Box::new(antenna));
+    r.hard.push(Box::new(antennas(hg, gate_um2, process, policy)));
 
     let class = |n: NetId| classes[n.0 as usize].class;
     let pin = |d: DeviceId, p: &str| crate::pattern::pin_net(hg, u32::from(d.0), p);
@@ -106,6 +91,8 @@ pub fn routing(
     // Σ coupling per victim: several minimum-spaced aggressors pass every pairwise
     // crosstalk rule and still blow this. The victim's own shield is the remedy,
     // not an aggressor, and the quiet rails weigh nothing.
+    // ponytail: leaked once per call, the rule types take `&'static [f32]`;
+    // an owned or shared weight table on the rule types removes the leak.
     let weights: &'static [f32] =
         Box::leak(CouplingBudget::default_weights(classes, hg.net_names.len()).into_boxed_slice());
     let mut diff: Vec<Differential> = Vec::new();
@@ -207,10 +194,35 @@ pub fn routing(
     r
 }
 
+/// One `Antenna` rule per gate net, over the total FET gate area (nm²) it
+/// drives; none when the process has no antenna ratio.
+fn antennas(hg: &BipartiteHypergraph, gate_um2: &[f32], process: &crate::ProcessNumbers, policy: &crate::policy::Policy) -> Vec<Antenna> {
+    let Some(ratio) = process.antenna_max_ratio else { return Vec::new() };
+    let mut gate_nm2 = vec![0i64; hg.net_names.len()];
+    for (d, nets) in hg.device_nets.iter().enumerate() {
+        if gate_um2[d] <= 0.0 {
+            continue;
+        }
+        if let Some(t) = hg.terminals[d].iter().position(|t| crate::terms::term_role(hg.kinds[d], t) == crate::terms::TermRole::FetGate) {
+            gate_nm2[nets[t].0 as usize] += (f64::from(gate_um2[d]) * 1e6) as i64;
+        }
+    }
+    gate_nm2
+        .iter()
+        .enumerate()
+        .filter(|&(_, &a)| a > 0)
+        .map(|(n, &a)| Antenna { net: NetId(n as u16), max_ratio_x100: (ratio * 100.0) as i32, gate_area_nm2: a, margin_pct: policy.antenna_margin_pct, stack: process.stack })
+        .collect()
+}
+
 /// The shield return (EXT-24, SUB-30): an analog ground by name (`avss`,
 /// `vssa`, `agnd`), else a Ground net no Switching aggressor touches, else the
 /// lowest-id Ground net, `shared` — its noise rides on the shield. Lowest id
-/// within each tier; `None` without a Ground net.
+/// within each tier; `None` without a Ground net. The flag is `true` for the
+/// shared fallback.
+///
+/// # Panics
+/// If a Ground class names a net past `net_names`, or an aggressor a device past `hg`.
 #[must_use]
 pub fn quiet_ground(classes: &[NetClassification], net_names: &[String], aggressors: &[Aggressor], hg: &BipartiteHypergraph) -> Option<(NetId, bool)> {
     let grounds = || classes.iter().filter(|c| c.class == NetClass::Ground).map(|c| c.net);
@@ -229,7 +241,9 @@ const STAR_CURRENT_SHARE: f64 = 0.01;
 /// one feed is the port when it is one (no root), else a drain/collector.
 /// With an op point covering every device on the node, a star needs
 /// `Σ|I_others| > STAR_CURRENT_SHARE·Σ|I_members|`; else any other
-/// S/D/E terminal makes one.
+/// S/D/E/C terminal makes one. Only FET and BJT sets of two or more whose
+/// members all share the node count. Replaces `intent.stars`; appends to
+/// `intent.common_nodes` and `intent.kelvins`.
 fn common_nodes(
     hg: &BipartiteHypergraph,
     classes: &[NetClassification],
@@ -241,8 +255,8 @@ fn common_nodes(
     let pin = |d: DeviceId, t: &str| crate::pattern::pin_net(hg, u32::from(d.0), t);
     let mut stars: Vec<StarReq> = Vec::new();
     for (si, s) in intent.sets.iter().enumerate() {
-        let bjt = matches!(hg.kinds[s.members[0].device.0 as usize], pnr_core::DeviceKind::Npn | pnr_core::DeviceKind::Pnp);
-        let fet = matches!(hg.kinds[s.members[0].device.0 as usize], pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos);
+        let kind = hg.kinds[s.members[0].device.0 as usize];
+        let (bjt, fet) = (crate::sets::bjt(kind), crate::sets::fet(kind));
         let (t, term) = if bjt { ("E", Term::E) } else { ("S", Term::S) };
         let Some(net) = pin(s.members[0].device, t) else { continue };
         if !(fet || bjt) || s.members.len() < 2 || s.members.iter().any(|m| pin(m.device, t) != Some(net)) {
@@ -291,7 +305,14 @@ fn common_nodes(
         }
     }
     intent.stars = stars;
-    // Kelvin: a resistor whose both ends are gates of one Voltage set.
+    kelvins(hg, intent);
+    dac_plates(hg, classes, intent, set_roles);
+}
+
+/// Kelvin requests (EXT-24 step 5): a resistor whose two ends, on distinct
+/// nets, are both gates of one Voltage set senses each end at those gates.
+fn kelvins(hg: &BipartiteHypergraph, intent: &mut Intent) {
+    let pin = |d: DeviceId, t: &str| crate::pattern::pin_net(hg, u32::from(d.0), t);
     for (r, kind) in hg.kinds.iter().enumerate() {
         if *kind != pnr_core::DeviceKind::Resistor {
             continue;
@@ -306,7 +327,11 @@ fn common_nodes(
             }
         }
     }
-    // DAC plates: the shared top plate is capacitive, each bottom plate a driven R.
+}
+
+/// DAC plate RC classes (EXT-24 step 6): per DacBank set, the net every member
+/// shares is the capacitive top plate, each other non-rail member net a driven R.
+fn dac_plates(hg: &BipartiteHypergraph, classes: &[NetClassification], intent: &mut Intent, set_roles: &[crate::class::SetRole]) {
     for (s, _) in intent.sets.iter().zip(set_roles).filter(|(_, &r)| r == crate::class::SetRole::DacBank) {
         let devs: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
         let Some(&plate) = hg.device_nets[devs[0].0 as usize].iter().find(|n| devs.iter().all(|d| hg.device_nets[d.0 as usize].contains(n))) else { continue };

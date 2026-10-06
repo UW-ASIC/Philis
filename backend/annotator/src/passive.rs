@@ -4,73 +4,74 @@
 //! cores, H09-26 emitter degeneration; DACP eq. 1 split DAC).
 
 use analog::intent::{Compound, Diagnostic};
-use analog::metadata::{NetClass, NetClassification};
+use analog::metadata::NetClassification;
 use pnr_core::ids::{DeviceId, NetId};
 use pnr_core::netlist::DeviceKind;
 use pnr_core::BipartiteHypergraph;
 
 use crate::class::SetRole;
+use crate::sets::{bjt, fet, find, net, union};
 use crate::size::Drawn;
 
-/// One procedural set: its devices (reference first where there is one), the
-/// rule that found it (`Origin::PassiveSet { rule }`, the identifier consumers
-/// match on), its role for `class::class_of`, a bank's terminating unit
-/// (`MatchSpec::reference`) and a split DAC's bridge.
+/// One procedural set, found by a rule of this module.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PassiveSet {
+    /// Members, the reference first where there is one; at least two.
     pub devices: Vec<DeviceId>,
+    /// The rule that found the set (`Origin::PassiveSet { rule }`, the
+    /// identifier consumers match on), e.g. `"divider"`, `"split_dac"`.
     pub rule: &'static str,
+    /// The set's role for `class::class_of`.
     pub role: SetRole,
+    /// A bank's terminating unit (`MatchSpec::reference`), one of `devices`.
     pub reference: Option<DeviceId>,
+    /// A split DAC's bridge capacitor, one of `devices`; it is left out of the unit.
     pub bridge: Option<DeviceId>,
 }
 
-fn net(hg: &BipartiteHypergraph, d: usize, t: &str) -> Option<NetId> {
-    hg.terminals[d].iter().position(|p| p == t).map(|i| hg.device_nets[d][i])
-}
-
+/// `n` is a Supply, Ground or Substrate net.
 fn rail(classes: &[NetClassification], n: NetId) -> bool {
-    matches!(classes[n.0 as usize].class, NetClass::Supply | NetClass::Ground | NetClass::Substrate)
+    crate::extract::rail(classes[n.0 as usize].class)
 }
 
 fn set(devices: Vec<usize>, rule: &'static str, role: SetRole) -> PassiveSet {
     PassiveSet { devices: devices.into_iter().map(|d| DeviceId(d as u16)).collect(), rule, role, reference: None, bridge: None }
 }
 
-/// Same model and width (H08-56: another material is not matched).
+/// Same model and width as the first of `g` (H08-56: another material is not matched).
 fn one_material(drawn: &[Drawn], g: &[usize]) -> bool {
     g.iter().all(|&d| (drawn[d].model, drawn[d].w_finger_nm) == (drawn[g[0]].model, drawn[g[0]].w_finger_nm))
+}
+
+/// The one resistor on net `s` and its far end: `None` when `s` carries no
+/// resistor or more than one (a resistor with both ends on `s` counts twice).
+fn lone_resistor(hg: &BipartiteHypergraph, s: NetId) -> Option<(usize, NetId)> {
+    let mut rs = hg.net_devices[s.0 as usize].iter().map(|x| x.0 as usize).filter(|&x| hg.kinds[x] == DeviceKind::Resistor);
+    let (Some(r), None) = (rs.next(), rs.next()) else { return None };
+    hg.device_nets[r].iter().copied().find(|&n| n != s).map(|far| (r, far))
 }
 
 /// Resistor sets of one model and width: (a) dividers and ladders, the
 /// resistors joined through internal nodes that reach only resistors and FET
 /// gates (no rail), role FeedbackRatio, rule `"divider"`; (b) each compound
-/// pair of resistors, role Other, rule `"symmetric_r"`.
+/// pair of resistors, role Other, rule `"symmetric_r"`. Dividers come first,
+/// by lowest member id, members ascending.
 #[must_use]
 pub fn resistor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassification], compounds: &[Compound]) -> Vec<PassiveSet> {
     let res = |d: usize| hg.kinds[d] == DeviceKind::Resistor;
     let mut parent: Vec<usize> = (0..hg.device_count()).collect();
-    fn find(p: &mut [usize], mut x: usize) -> usize {
-        while p[x] != x {
-            p[x] = p[p[x]];
-            x = p[x];
-        }
-        x
-    }
     for (n, devs) in hg.net_devices.iter().enumerate() {
-        if rail(classes, NetId(n as u16)) {
+        let n = NetId(n as u16);
+        if rail(classes, n) {
             continue;
         }
-        let internal = devs.iter().all(|d| {
-            let i = d.0 as usize;
-            res(i) || (matches!(hg.kinds[i], DeviceKind::Nmos | DeviceKind::Pmos) && net(hg, i, "G") == Some(NetId(n as u16)) && [net(hg, i, "D"), net(hg, i, "S")].iter().all(|&x| x != Some(NetId(n as u16))))
-        });
+        let gate_only = |i: usize| fet(hg.kinds[i]) && net(hg, i, "G") == Some(n) && net(hg, i, "D") != Some(n) && net(hg, i, "S") != Some(n);
+        if !devs.iter().all(|d| res(d.0 as usize) || gate_only(d.0 as usize)) {
+            continue;
+        }
         let rs: Vec<usize> = devs.iter().map(|d| d.0 as usize).filter(|&d| res(d)).collect();
-        if internal && rs.len() >= 2 {
-            for w in rs.windows(2) {
-                let (x, y) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
-                parent[x.max(y)] = x.min(y);
-            }
+        for w in rs.windows(2) {
+            union(&mut parent, w[0], w[1]);
         }
     }
     let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
@@ -91,7 +92,8 @@ pub fn resistor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetCl
 }
 
 /// The resistors on a BJT ratioed pair's emitter nets (Brokaw R1/R2), one set
-/// per pair when they share model and width: role BandgapCore, rule `"bandgap_r"`.
+/// per pair when there are two or more and they share model and width: role
+/// BandgapCore, rule `"bandgap_r"`, members ascending.
 #[must_use]
 pub fn bandgap_cores(hg: &BipartiteHypergraph, drawn: &[Drawn], bjt_pairs: &[(DeviceId, DeviceId)]) -> Vec<PassiveSet> {
     bjt_pairs
@@ -106,13 +108,18 @@ pub fn bandgap_cores(hg: &BipartiteHypergraph, drawn: &[Drawn], bjt_pairs: &[(De
         .collect()
 }
 
-/// `true` when `counts`, sorted, are `[1, 1, 2, …, 2^(N-1)]`, N ≥ 2 (card D-h:
-/// `cells::cap_array::bits` is out of the annotator's reach).
+/// `true` when `counts`, sorted, are `[1, 1, 2, …, 2^(N-1)]`, N ≥ 2: a
+/// terminated binary-weighted bank (card D-h: `cells::cap_array::bits` is out
+/// of the annotator's reach).
 fn binary(counts: &[u32]) -> bool {
     let mut c = counts.to_vec();
     c.sort_unstable();
     c.len() >= 3 && c[0] == 1 && c[1..].iter().enumerate().all(|(i, &u)| u == 1 << i)
 }
+
+/// Bridge mismatch tolerance, relative to the drawn bridge area (**Philis
+/// tolerance**).
+const BRIDGE_TOLERANCE: f64 = 0.01;
 
 /// Capacitors sharing a top plate `P` with one W, L and model: one set each,
 /// the one-unit cap whose other plate is a rail first (the bank's termination,
@@ -120,7 +127,8 @@ fn binary(counts: &[u32]) -> bool {
 /// counts are binary, else FeedbackRatio (`"cap_ratio"`). Two banks joined by
 /// exactly one other capacitor are one `"split_dac"` set holding that bridge;
 /// `bridge_cap_value` when its area is off `(C_T^LSB / C_T^MSB)·C_u` by more
-/// than 1 % (Philis tolerance), the LSB bank being the terminated one.
+/// than 1 % of the bridge area, the LSB bank being the terminated one. Split
+/// DACs come first, then the remaining banks in order of their lowest id.
 #[must_use]
 pub fn capacitor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassification], diags: &mut Vec<Diagnostic>) -> Vec<PassiveSet> {
     let cap = |d: usize| hg.kinds[d] == DeviceKind::Capacitor;
@@ -134,66 +142,74 @@ pub fn capacitor_sets(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetC
     for (_, v) in &mut banks {
         v.sort_by_key(|&d| (!terminated(d), d));
     }
-    let units = |v: &[usize]| v.iter().map(|&d| drawn[d].fingers).sum::<u32>();
-    let in_bank = |d: usize, banks: &[(_, Vec<usize>)]| banks.iter().any(|(_, v): &(_, Vec<usize>)| v.contains(&d));
+    let reference = |v: &[usize]| v.first().filter(|&&d| terminated(d)).map(|&d| DeviceId(d as u16));
     let mut out = Vec::new();
     let mut used = vec![false; banks.len()];
     for i in 0..banks.len() {
         for j in i + 1..banks.len() {
-            let (ti, tj) = (banks[i].0 .0, banks[j].0 .0);
-            let bridges: Vec<usize> = (0..hg.device_count())
-                .filter(|&d| cap(d) && !in_bank(d, &banks))
-                .filter(|&d| {
-                    let (p, n) = (net(hg, d, "P"), net(hg, d, "N"));
-                    (p, n) == (Some(ti), Some(tj)) || (p, n) == (Some(tj), Some(ti))
-                })
-                .collect();
-            if used[i] || used[j] || bridges.len() != 1 {
+            if used[i] || used[j] {
                 continue;
             }
+            let Some(ca) = lone_bridge(hg, banks[i].0 .0, banks[j].0 .0, &banks) else { continue };
             (used[i], used[j]) = (true, true);
-            let ca = bridges[0];
-            let (lsb, msb) = if banks[i].1.iter().any(|&d| terminated(d)) { (i, j) } else { (j, i) };
-            let area = |d: usize| (drawn[d].w_finger_nm.unwrap_or(0) * drawn[d].l_nm.unwrap_or(0)) as f64;
-            let want = f64::from(units(&banks[lsb].1)) / f64::from(units(&banks[msb].1)) * area(banks[lsb].1[0]);
-            let got = area(ca) * f64::from(drawn[ca].fingers);
-            if (got - want).abs() > 0.01 * got {
-                diags.push(Diagnostic {
-                    kind: "bridge_cap_value",
-                    devices: vec![DeviceId(ca as u16)],
-                    message: format!("split-DAC bridge area {got} nm², want (C_T^LSB/C_T^MSB)·C_u = {want} nm²"),
-                });
-            }
-            let devices: Vec<usize> = banks[lsb].1.iter().chain(&banks[msb].1).copied().chain([ca]).collect();
-            let reference = banks[lsb].1.first().filter(|&&d| terminated(d)).map(|&d| DeviceId(d as u16));
-            out.push(PassiveSet { bridge: Some(DeviceId(ca as u16)), reference, ..set(devices, "split_dac", SetRole::DacBank) });
+            let (lsb, msb) = if banks[i].1.iter().any(|&d| terminated(d)) { (&banks[i].1, &banks[j].1) } else { (&banks[j].1, &banks[i].1) };
+            check_bridge(drawn, lsb, msb, ca, diags);
+            let devices: Vec<usize> = lsb.iter().chain(msb).copied().chain([ca]).collect();
+            out.push(PassiveSet { bridge: Some(DeviceId(ca as u16)), reference: reference(lsb), ..set(devices, "split_dac", SetRole::DacBank) });
         }
     }
-    for (_, (_, v)) in banks.iter().enumerate().filter(|(k, _)| !used[*k]) {
+    for (_, v) in banks.iter().zip(&used).filter(|(_, &u)| !u).map(|(b, _)| b) {
         let counts: Vec<u32> = v.iter().map(|&d| drawn[d].fingers).collect();
         let (rule, role) = if binary(&counts) { ("dac_bank", SetRole::DacBank) } else { ("cap_ratio", SetRole::FeedbackRatio) };
-        let reference = v.first().filter(|&&d| terminated(d)).map(|&d| DeviceId(d as u16));
-        out.push(PassiveSet { reference, ..set(v.clone(), rule, role) });
+        out.push(PassiveSet { reference: reference(v), ..set(v.clone(), rule, role) });
     }
     out
 }
 
+/// The one capacitor in no bank with its plates on `ti` and `tj` (either way
+/// round), `None` when there is none or several.
+fn lone_bridge<K>(hg: &BipartiteHypergraph, ti: NetId, tj: NetId, banks: &[(K, Vec<usize>)]) -> Option<usize> {
+    let mut bridges = (0..hg.device_count()).filter(|&d| {
+        let (p, n) = (net(hg, d, "P"), net(hg, d, "N"));
+        hg.kinds[d] == DeviceKind::Capacitor
+            && ((p, n) == (Some(ti), Some(tj)) || (p, n) == (Some(tj), Some(ti)))
+            && !banks.iter().any(|(_, v)| v.contains(&d))
+    });
+    match (bridges.next(), bridges.next()) {
+        (Some(ca), None) => Some(ca),
+        _ => None,
+    }
+}
+
+/// Pushes `bridge_cap_value` when bridge `ca`'s area is off
+/// `(C_T^LSB / C_T^MSB)·C_u` by more than [`BRIDGE_TOLERANCE`] of its own area.
+fn check_bridge(drawn: &[Drawn], lsb: &[usize], msb: &[usize], ca: usize, diags: &mut Vec<Diagnostic>) {
+    let units = |v: &[usize]| v.iter().map(|&d| f64::from(drawn[d].fingers)).sum::<f64>();
+    let area = |d: usize| (drawn[d].w_finger_nm.unwrap_or(0) * drawn[d].l_nm.unwrap_or(0)) as f64;
+    let want = units(lsb) / units(msb) * area(lsb[0]);
+    let got = area(ca) * f64::from(drawn[ca].fingers);
+    if (got - want).abs() > BRIDGE_TOLERANCE * got {
+        diags.push(Diagnostic {
+            kind: "bridge_cap_value",
+            devices: vec![DeviceId(ca as u16)],
+            message: format!("split-DAC bridge area {got} nm², want (C_T^LSB/C_T^MSB)·C_u = {want} nm²"),
+        });
+    }
+}
+
 /// Per pair (FET sources or BJT emitters), the two resistors through which the
 /// halves reach one common node, one each: a Ratio set whose ratio is the
-/// inverse of the pair's (H09-26: 1X 4 kΩ / 2X 2 kΩ). `"degeneration_ratio"`
+/// inverse of the pair's (H09-26: 1X 4 kΩ / 2X 2 kΩ), rule `"degeneration"`,
+/// role InputPair, `[resistor of a, resistor of b]`. `"degeneration_ratio"`
 /// when the drawn resistor lengths are not that inverse.
 #[must_use]
 pub fn degeneration(hg: &BipartiteHypergraph, drawn: &[Drawn], pairs: &[(DeviceId, DeviceId)], diags: &mut Vec<Diagnostic>) -> Vec<PassiveSet> {
+    let leg = |d: DeviceId| {
+        let i = d.0 as usize;
+        lone_resistor(hg, net(hg, i, if bjt(hg.kinds[i]) { "E" } else { "S" })?)
+    };
     let mut out = Vec::new();
     for &(a, b) in pairs {
-        let leg = |d: DeviceId| {
-            let i = d.0 as usize;
-            let s = net(hg, i, if matches!(hg.kinds[i], DeviceKind::Npn | DeviceKind::Pnp) { "E" } else { "S" })?;
-            let rs: Vec<usize> = hg.net_devices[s.0 as usize].iter().map(|x| x.0 as usize).filter(|&x| hg.kinds[x] == DeviceKind::Resistor).collect();
-            let [r] = rs[..] else { return None };
-            let far = hg.device_nets[r].iter().copied().find(|&n| n != s)?;
-            Some((r, far))
-        };
         let (Some((ra, ta)), Some((rb, tb))) = (leg(a), leg(b)) else { continue };
         if ta != tb || ra == rb || !one_material(drawn, &[ra, rb]) {
             continue;
@@ -212,31 +228,23 @@ pub fn degeneration(hg: &BipartiteHypergraph, drawn: &[Drawn], pairs: &[(DeviceI
     out
 }
 
-/// FET couples of one signature (kind, model, finger W, L, fingers) with
-/// distinct gates whose sources are distinct non-rail nets each reaching one
-/// common node through exactly one resistor: the degenerated diff pair no
-/// joined-source pattern sees (M1 regression note).
+/// FET couples of one signature (kind, model, finger W, L, fingers; known L)
+/// with distinct gates whose sources are distinct non-rail nets each reaching
+/// one common node through exactly one resistor: the degenerated diff pair no
+/// joined-source pattern sees (M1 regression note). Lower id first, sorted.
 #[must_use]
 pub fn degenerated_pairs(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[crate::NetRole]) -> Vec<(DeviceId, DeviceId)> {
-    let fets: Vec<usize> = (0..hg.device_count()).filter(|&d| matches!(hg.kinds[d], DeviceKind::Nmos | DeviceKind::Pmos)).collect();
     let tail = |d: usize| {
         let s = net(hg, d, "S")?;
         if matches!(roles[s.0 as usize], crate::NetRole::Supply | crate::NetRole::Ground) {
             return None;
         }
-        let rs: Vec<usize> = hg.net_devices[s.0 as usize].iter().map(|x| x.0 as usize).filter(|&x| hg.kinds[x] == DeviceKind::Resistor).collect();
-        let [r] = rs[..] else { return None };
-        hg.device_nets[r].iter().copied().find(|&n| n != s)
+        lone_resistor(hg, s).map(|(_, far)| far)
     };
     let sig = |d: usize| (hg.kinds[d] as u8, drawn[d].model, drawn[d].w_finger_nm, drawn[d].l_nm, drawn[d].fingers);
-    let mut groups: std::collections::HashMap<_, Vec<usize>> = std::collections::HashMap::new();
-    for &d in fets.iter().filter(|&&d| drawn[d].l_nm.is_some()) {
-        if let Some(t) = tail(d) {
-            groups.entry((sig(d), t.0)).or_default().push(d);
-        }
-    }
+    let keyed = (0..hg.device_count()).filter(|&d| fet(hg.kinds[d]) && drawn[d].l_nm.is_some()).filter_map(|d| Some(((sig(d), tail(d)?), d)));
     let mut out = Vec::new();
-    for g in groups.values() {
+    for (_, g) in crate::sets::group(keyed) {
         for (i, &a) in g.iter().enumerate() {
             for &b in &g[i + 1..] {
                 if net(hg, a, "G") != net(hg, b, "G") && net(hg, a, "S") != net(hg, b, "S") {
@@ -250,7 +258,9 @@ pub fn degenerated_pairs(hg: &BipartiteHypergraph, drawn: &[Drawn], roles: &[cra
 }
 
 /// Diodes of one model and area on a shared anode (`P`) or cathode (`N`) net
-/// (H09-43): rule `"diode_set"`, role Other.
+/// (H09-43): rule `"diode_set"`, role Other, members ascending. One set per
+/// shared net; a group already found on the other terminal is not repeated,
+/// and a diode without that terminal joins nothing on it.
 #[must_use]
 pub fn diode_sets(hg: &BipartiteHypergraph, drawn: &[Drawn]) -> Vec<PassiveSet> {
     let keyed = (0..hg.device_count())

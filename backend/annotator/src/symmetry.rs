@@ -5,20 +5,27 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use analog::intent::{AxisDir, Compound, ConstraintId, Diagnostic, SymKind};
-use analog::metadata::{NetClass, NetClassification};
+use analog::metadata::NetClassification;
 use pnr_core::ids::{AxisId, DeviceId, NetId};
 use pnr_core::netlist::DeviceKind;
 use pnr_core::BipartiteHypergraph;
 
 use crate::conflict;
+use crate::sets::{find, union};
 use crate::size::{self, Drawn};
 
-/// A couple symmetry starts from: declared leaf pairs now, sidecar nets and
-/// selfs once EXT-26 (M3) builds them. The first device or net is half A.
+/// A couple symmetry starts from: declared leaf pairs, hierarchy pairs and the
+/// sidecar's `SymmetricBlocks` / `SymmetricNets` (EXT-26). The first device or
+/// net is half A; the [`ConstraintId`] names the seed in conflict diagnostics.
 #[derive(Clone, Copy, Debug)]
 pub enum Seed {
+    /// Two devices that mirror each other; a device seeded against itself is
+    /// self-symmetric.
     Devices(DeviceId, DeviceId, ConstraintId),
+    /// Two nets that mirror each other; a net seeded against itself is
+    /// self-symmetric (rails stay fixed points and take no mate).
     Nets(NetId, NetId, ConstraintId),
+    /// A device on the axis.
     SelfDevice(DeviceId, ConstraintId),
 }
 
@@ -28,10 +35,12 @@ pub(crate) type Sig = (DeviceKind, u16, Option<i64>, Option<i64>, u32);
 /// `(A device, B device, passive flipped, rank)`.
 type Cand = (u32, u32, bool, (usize, usize));
 
+/// Device `s`'s mirror signature as kind `k`.
 pub(crate) fn sig(k: DeviceKind, s: &Drawn) -> Sig {
     (k, s.model, s.w_finger_nm, s.l_nm, s.fingers)
 }
 
+/// Two-terminal kinds whose ends may swap in a mirror (P of one onto N of the other).
 fn passive(k: DeviceKind) -> bool {
     matches!(k, DeviceKind::Resistor | DeviceKind::Capacitor | DeviceKind::Inductor | DeviceKind::Diode)
 }
@@ -41,22 +50,29 @@ fn channel(t: &str) -> bool {
     matches!(t, "D" | "S" | "C" | "E" | "P" | "N")
 }
 
+/// Control terminals: a gate, or a BJT's base.
 fn control(k: DeviceKind, t: &str) -> bool {
     t == "G" || (matches!(k, DeviceKind::Npn | DeviceKind::Pnp) && t == "B")
 }
 
+/// The propagation's working tables: per device (`pair_of` … `by`, device
+/// length) and per net (`rail`, `mate`, `a_side`, `net_by`, net length).
 struct State<'a> {
     hg: &'a BipartiteHypergraph,
+    /// Net is a Supply, Ground or Substrate rail: a fixed point, never mated.
     rail: Vec<bool>,
+    /// The device's mirror partner.
     pair_of: Vec<Option<u32>>,
     /// Half A of its pair, and the passive orientation the pair was taken with.
     half_a: Vec<bool>,
     flip: Vec<bool>,
+    /// Device is on the axis.
     is_self: Vec<bool>,
-    /// `Some(self)` = self-symmetric.
+    /// The net's mirror; `Some(self)` = self-symmetric.
     mate: Vec<Option<u32>>,
     /// Net is on half A of its pair.
     a_side: Vec<bool>,
+    /// Mated net pairs `(a, b)` (or `(x, x)`) whose devices are still to visit.
     queue: VecDeque<(u32, u32)>,
     /// GAP-09 (a): the seed being applied, and the seed that paired or
     /// self-marked each device / mated each net (`cur` stays the last seed's
@@ -66,10 +82,10 @@ struct State<'a> {
     net_by: Vec<Option<ConstraintId>>,
 }
 
-impl State<'_> {
+impl<'a> State<'a> {
+    /// Net on device `d`'s terminal `t`.
     fn net(&self, d: u32, t: &str) -> Option<u32> {
-        let i = d as usize;
-        self.hg.terminals[i].iter().position(|p| p == t).map(|k| self.hg.device_nets[i][k].0 as u32)
+        crate::pattern::pin_net(self.hg, d, t).map(|n| u32::from(n.0))
     }
 
     /// Terminal of `e` that `d`'s terminal `t` maps to: the same name, or the other
@@ -93,6 +109,7 @@ impl State<'_> {
         })
     }
 
+    /// Every terminal of `d` sits on a net that may mirror `e`'s mapped terminal's.
     fn consistent(&self, d: u32, e: u32, flip: bool) -> bool {
         self.hg.terminals[d as usize].iter().all(|t| match (self.net(d, t), self.net(e, Self::mapped(t, flip))) {
             (Some(x), Some(y)) => self.consistent_nets(x, y),
@@ -124,6 +141,7 @@ impl State<'_> {
         self.queue.push_back((x, y));
     }
 
+    /// Pairs `d` (half A) with `e` and [`State::bind`]s their terminal nets.
     fn pair(&mut self, d: u32, e: u32, flip: bool) {
         self.pair_of[d as usize] = Some(e);
         self.pair_of[e as usize] = Some(d);
@@ -131,8 +149,9 @@ impl State<'_> {
         self.half_a[d as usize] = true;
         self.flip[d as usize] = flip;
         self.flip[e as usize] = flip;
-        for t in self.hg.terminals[d as usize].clone() {
-            if let (Some(x), Some(y)) = (self.net(d, &t), self.net(e, Self::mapped(&t, flip))) {
+        let hg = self.hg;
+        for t in &hg.terminals[d as usize] {
+            if let (Some(x), Some(y)) = (self.net(d, t), self.net(e, Self::mapped(t, flip))) {
                 self.bind(x, y);
             }
         }
@@ -149,18 +168,21 @@ impl State<'_> {
         })
     }
 
+    /// Neither paired nor on the axis.
     fn free(&self, d: u32) -> bool {
         self.pair_of[d as usize].is_none() && !self.is_self[d as usize]
     }
 
-    /// Devices on `n` with the terminal names they sit on it by.
-    fn on(&self, n: u32) -> Vec<(u32, String)> {
-        let mut v: Vec<(u32, String)> = Vec::new();
-        for d in &self.hg.net_devices[n as usize] {
+    /// Devices on `n` with the terminal names they sit on it by, each
+    /// `(device, terminal)` once, in `net_devices` order.
+    fn on(&self, n: u32) -> Vec<(u32, &'a str)> {
+        let hg = self.hg;
+        let mut v: Vec<(u32, &'a str)> = Vec::new();
+        for d in &hg.net_devices[n as usize] {
             let i = d.0 as usize;
-            for (t, m) in self.hg.terminals[i].iter().zip(&self.hg.device_nets[i]) {
-                if m.0 as u32 == n && !v.iter().any(|(e, s)| *e == d.0 as u32 && s == t) {
-                    v.push((d.0 as u32, t.clone()));
+            for (t, m) in hg.terminals[i].iter().zip(&hg.device_nets[i]) {
+                if u32::from(m.0) == n && !v.iter().any(|&(e, s)| e == u32::from(d.0) && s == t.as_str()) {
+                    v.push((u32::from(d.0), t.as_str()));
                 }
             }
         }
@@ -177,11 +199,18 @@ impl State<'_> {
 /// compound is a component of pairs and selfs joined through mated nets (any
 /// terminal) and self-symmetric nets (channel terminals only, so a shared bias net
 /// does not join unrelated structures); one without a pair is dropped. Compounds
-/// are ordered by their smallest pair's canonical labels; `axis` is the index.
+/// are ordered by their smallest pair's canonical labels; `axis` and `id` are
+/// the index, `dir` V and `kind` Mirror. A seed that contradicts an earlier one
+/// is dropped with a conflict diagnostic; a tie left unresolved is reported as
+/// `ambiguous_symmetry`.
+///
+/// # Panics
+/// If `drawn` or `canon` is shorter than `hg`'s devices, `classes` than its
+/// nets, or a seed names a device or net past them.
 #[must_use]
 pub fn analyze(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassification], seeds: &[Seed], canon: &[u64]) -> (Vec<Compound>, Vec<Diagnostic>) {
     let (nd, nn) = (hg.device_count(), hg.net_devices.len());
-    let rail: Vec<bool> = classes.iter().map(|c| matches!(c.class, NetClass::Supply | NetClass::Ground | NetClass::Substrate)).collect();
+    let rail: Vec<bool> = classes.iter().map(|c| crate::extract::rail(c.class)).collect();
     let mut s = State { hg, rail, pair_of: vec![None; nd], half_a: vec![false; nd], flip: vec![false; nd], is_self: vec![false; nd], mate: vec![None; nn], a_side: vec![false; nn], queue: VecDeque::new(), cur: ConstraintId(0), by: vec![None; nd], net_by: vec![None; nn] };
     let sigs: Vec<_> = (0..nd).map(|d| sig(hg.kinds[d], &drawn[d])).collect();
     let pairable = |d: u32| !size::unknown_size(hg.kinds[d as usize], &drawn[d as usize]);
@@ -314,21 +343,11 @@ fn propagate(s: &mut State, sigs: &[Sig], pairable: &dyn Fn(u32) -> bool, canon:
     }
 }
 
+/// [`analyze`]'s compounds from the finished pairing.
 fn compounds(s: &State, canon: &[u64]) -> Vec<Compound> {
     let nd = s.pair_of.len();
     let sym = |d: usize| s.pair_of[d].is_some() || s.is_self[d];
     let mut parent: Vec<usize> = (0..nd).collect();
-    fn find(p: &mut [usize], mut x: usize) -> usize {
-        while p[x] != x {
-            p[x] = p[p[x]];
-            x = p[x];
-        }
-        x
-    }
-    let union = |p: &mut Vec<usize>, a: usize, b: usize| {
-        let (x, y) = (find(p, a), find(p, b));
-        p[x.max(y)] = x.min(y);
-    };
     for d in 0..nd {
         if let Some(e) = s.pair_of[d] {
             union(&mut parent, d, e as usize);

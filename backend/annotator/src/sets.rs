@@ -1,9 +1,12 @@
 //! Matched sets (EXT-15): shared-bias groups, ratio inference and unitization
 //! (Hastings MOS rules 1, 11 and eq. 13.49; resistor rule 5; BJT unit
 //! emitters; Lampaert: a ratioed group is built of equal units).
+//!
+//! Also home of the crate's small grouping kernels ([`group`], [`device_index`],
+//! [`inside`], [`find`], [`union`]) that the other set and symmetry passes share.
 
 use analog::intent::{
-    ClassSource, Compound, ConstraintId, Diagnostic, Family, Half, MatchClass, MatchKind, MatchSpec, Member, Origin, ArrayStyle, ReqType,
+    ArrayStyle, ClassSource, Compound, ConstraintId, Diagnostic, Family, Half, MatchClass, MatchKind, MatchSpec, Member, Origin, ReqType,
     UnitGeom,
 };
 use analog::metadata::{NetClass, NetClassification};
@@ -13,49 +16,77 @@ use pnr_core::BipartiteHypergraph;
 
 use crate::block::Block;
 use crate::graph::Req;
+use crate::pattern::pin_net;
+use crate::passive::PassiveSet;
 use crate::size::Drawn;
 
 /// Unitization bounds, nm, from the deck (`library::annotation`; sky130 5, 420,
-/// 10000, 150, 10000): fabrication grid, cell `min_finger_width` and
-/// `max_finger_width`, poly min width, cell `res_min_segment`. `0` = the key is
-/// missing, and [`unitize`] answers `unit_deck_incomplete`.
+/// 10000, 150, 10000). A field of `0` means the deck key is missing, and
+/// [`unitize`] answers `unit_deck_incomplete`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UnitDeck {
+    /// Fabrication grid, nm: every unit width and split length is a multiple.
     pub grid_nm: i64,
+    /// Cell `min_finger_width`, nm: the narrowest unit width.
     pub min_w_nm: i64,
+    /// Cell `max_finger_width`, nm: the widest unit width.
     pub max_w_nm: i64,
+    /// Poly minimum width, nm: the shortest unit length when lengths differ.
     pub min_l_nm: i64,
+    /// Cell `res_min_segment`, nm: the shortest resistor unit segment.
     pub res_min_segment_nm: i64,
 }
 
-fn fet(k: DeviceKind) -> bool {
+/// Unit width and split-length floor, nm, for a Moderate or tighter class
+/// (Hastings MOS rule 11: matched devices at least 1 µm wide and long).
+const MATCHED_MIN_NM: i64 = 1000;
+
+/// NMOS or PMOS.
+pub(crate) fn fet(k: DeviceKind) -> bool {
     matches!(k, DeviceKind::Nmos | DeviceKind::Pmos)
 }
 
-fn bjt(k: DeviceKind) -> bool {
+/// NPN or PNP.
+pub(crate) fn bjt(k: DeviceKind) -> bool {
     matches!(k, DeviceKind::Npn | DeviceKind::Pnp)
 }
 
-fn net(hg: &BipartiteHypergraph, d: usize, t: &str) -> Option<pnr_core::ids::NetId> {
-    hg.terminals[d].iter().position(|p| p == t).map(|i| hg.device_nets[d][i])
+/// Net on device `d`'s terminal `t`, `None` when `d` has no such terminal.
+pub(crate) fn net(hg: &BipartiteHypergraph, d: usize, t: &str) -> Option<pnr_core::ids::NetId> {
+    pin_net(hg, d as u32, t)
 }
 
-/// Diode-connected: a FET with `D == G`, a BJT with `C == B`.
+/// Diode-connected: a FET with `D == G`, a BJT with `C == B` (both terminals present).
 pub(crate) fn diode(hg: &BipartiteHypergraph, d: usize) -> bool {
     let k = hg.kinds[d];
-    (fet(k) && net(hg, d, "D").is_some() && net(hg, d, "D") == net(hg, d, "G"))
-        || (bjt(k) && net(hg, d, "C").is_some() && net(hg, d, "C") == net(hg, d, "B"))
+    let (out, ctl) = if fet(k) {
+        ("D", "G")
+    } else if bjt(k) {
+        ("C", "B")
+    } else {
+        return false;
+    };
+    net(hg, d, out).is_some_and(|n| net(hg, d, ctl) == Some(n))
 }
 
 /// Devices of one kind, model and L sharing gate (FET) or base (BJT) net and
 /// source (emitter) net, with a diode-connected member or a gate (base) net that
 /// is not Signal; groups of two or more on at least two drains (collectors), the
-/// diode reference first, then by id.
+/// diode reference first, then by id. Groups come in order of their lowest id.
+///
+/// # Panics
+/// If `drawn` is longer than `hg`'s devices or `classes` misses a gate net.
 #[must_use]
 pub fn shared_bias_groups(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[NetClassification]) -> Vec<Vec<DeviceId>> {
     let keyed = drawn.iter().enumerate().filter_map(|(d, dr)| {
         let k = hg.kinds[d];
-        let (g, s) = if fet(k) { ("G", "S") } else if bjt(k) { ("B", "E") } else { return None };
+        let (g, s) = if fet(k) {
+            ("G", "S")
+        } else if bjt(k) {
+            ("B", "E")
+        } else {
+            return None;
+        };
         Some(((k as u8, dr.model, dr.l_nm, net(hg, d, g), net(hg, d, s)), d))
     });
     group(keyed)
@@ -64,8 +95,8 @@ pub fn shared_bias_groups(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[
             let bias = key.3.is_some_and(|n| classes[n.0 as usize].class != NetClass::Signal);
             // All on one drain (collector) is one device written as several cards
             // (cellgen's parallel rule), not a ratio.
-            let (dk, d0) = (if fet(hg.kinds[v[0]]) { "D" } else { "C" }, v[0]);
-            let one_drain = v.iter().all(|&d| net(hg, d, dk) == net(hg, d0, dk));
+            let dk = if fet(hg.kinds[v[0]]) { "D" } else { "C" };
+            let one_drain = v.iter().all(|&d| net(hg, d, dk) == net(hg, v[0], dk));
             v.len() > 1 && !one_drain && (bias || v.iter().any(|&d| diode(hg, d)))
         })
         .map(|(_, mut v)| {
@@ -75,8 +106,9 @@ pub fn shared_bias_groups(hg: &BipartiteHypergraph, drawn: &[Drawn], classes: &[
         .collect()
 }
 
-/// `(key, item)` pairs grouped by key, groups in first-seen order. Hashed:
-/// a linear search over thousands of keys (12 k devices) is quadratic.
+/// `(key, item)` pairs grouped by key: groups in first-seen order, items in
+/// input order. O(n) expected (hashed: a linear key search over 12 k devices
+/// is quadratic).
 pub(crate) fn group<K: std::hash::Hash + Eq + Clone, T>(items: impl IntoIterator<Item = (K, T)>) -> Vec<(K, Vec<T>)> {
     let mut at: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
     let mut out: Vec<(K, Vec<T>)> = Vec::new();
@@ -92,7 +124,10 @@ pub(crate) fn group<K: std::hash::Hash + Eq + Clone, T>(items: impl IntoIterator
     out
 }
 
-/// Per device id, the positions of the `items` holding it.
+/// Per device id below `n`, the positions of the `items` holding it, ascending.
+///
+/// # Panics
+/// If an item holds a device id `>= n`.
 pub(crate) fn device_index<'a>(n: usize, items: impl IntoIterator<Item = &'a [DeviceId]>) -> Vec<Vec<usize>> {
     let mut idx = vec![Vec::new(); n];
     for (i, it) in items.into_iter().enumerate() {
@@ -103,8 +138,12 @@ pub(crate) fn device_index<'a>(n: usize, items: impl IntoIterator<Item = &'a [De
     idx
 }
 
-/// Ascending positions (from [`device_index`]) of the items touching `g` that
-/// `all_in` accepts: only those are tested, not every item (12 k-device scale).
+/// Ascending, distinct positions (from [`device_index`]) of the items touching
+/// a device of `g` that `all_in` accepts. Only items touching `g` are tested,
+/// not every item (12 k-device scale).
+///
+/// # Panics
+/// If `g` yields a device past `idx`.
 pub(crate) fn inside(idx: &[Vec<usize>], g: impl IntoIterator<Item = usize>, all_in: impl Fn(usize) -> bool) -> Vec<usize> {
     let mut c: Vec<usize> = g.into_iter().flat_map(|d| idx[d].iter().copied()).collect();
     c.sort_unstable();
@@ -113,99 +152,173 @@ pub(crate) fn inside(idx: &[Vec<usize>], g: impl IntoIterator<Item = usize>, all
     c
 }
 
-fn gcd(a: i64, b: i64) -> i64 {
-    if b == 0 { a.abs() } else { gcd(b, a % b) }
+/// Union-find root of `x`, halving the path on the way.
+pub(crate) fn find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
+/// Joins the sets of `a` and `b`; the lower root id becomes the root, so a
+/// component's root is its smallest member.
+pub(crate) fn union(parent: &mut [usize], a: usize, b: usize) {
+    let (x, y) = (find(parent, a), find(parent, b));
+    parent[x.max(y)] = x.min(y);
+}
+
+/// Greatest common divisor, non-negative; `gcd(0, 0) == 0`.
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a.abs()
+}
+
+/// GCD of every value, `0` for none.
+fn gcd_all(values: impl IntoIterator<Item = i64>) -> i64 {
+    values.into_iter().fold(0, gcd)
 }
 
 fn err(kind: &'static str, members: &[DeviceId], message: String) -> Diagnostic {
     Diagnostic { kind, devices: members.to_vec(), message }
 }
 
+fn ratio(members: &[DeviceId], msg: &str) -> Diagnostic {
+    err("non_integer_ratio", members, msg.into())
+}
+
+/// Unitization result: the shared unit and `(parallel, series)` per member.
+type Units = Result<(UnitGeom, Vec<(u16, u16)>), Diagnostic>;
+
+/// `(parallel, series)` counts narrowed to `u16`, or `non_integer_ratio`
+/// ("too many units") when one does not fit.
+fn unit_counts(members: &[DeviceId], counts: impl Iterator<Item = (i64, i64)>) -> Result<Vec<(u16, u16)>, Diagnostic> {
+    counts
+        .map(|(p, s)| Some((u16::try_from(p).ok()?, u16::try_from(s).ok()?)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| ratio(members, "too many units"))
+}
+
+/// Every member's drawn L, or `unknown_size` when one is unknown.
+fn lengths(members: &[DeviceId], drawn: &[Drawn]) -> Result<Vec<i64>, Diagnostic> {
+    members.iter().map(|m| drawn[m.0 as usize].l_nm).collect::<Option<Vec<i64>>>().ok_or_else(|| err("unknown_size", members, "L unknown".into()))
+}
+
 /// The ratio as identical units: `(unit, (parallel, series) per member)`.
 /// FET (T = finger W × fingers): equal L gives W_u = the largest divisor of
 /// gcd(T) on the grid within `[max(min_w, 1000 nm if ≥ Moderate), max_w]`
 /// (Hastings MOS rule 11), parallel = T / W_u; unequal L adds L_u = gcd(L) ≥
-/// `max(min_l, 1000 nm if ≥ Moderate)` and series = L / L_u. Resistor: equal W
-/// and model, L_u = gcd(L) ≥ `res_min_segment`, series = L / L_u, parallel = `m`.
-/// Capacitor: equal W, L and model gives units = `m`; else integer multiples of
-/// the smallest area at one W. BJT and diode: equal W, L and model gives units = `m`.
+/// `max(min_l, 1000 nm if ≥ Moderate)` on the grid and series = L / L_u.
+/// Resistor: equal W and model, L_u = gcd(L) ≥ `res_min_segment`, series =
+/// L / L_u, parallel = `m`. Capacitor: equal W, L and model gives units = `m`;
+/// else integer multiples of the smallest area at one W. BJT, diode and any
+/// other kind: equal W, L and model gives units = `m`.
 ///
 /// # Errors
-/// `unit_deck_incomplete` (a deck key is 0), `non_integer_ratio`,
+/// `unit_deck_incomplete` (a deck key is 0), `non_integer_ratio` (models
+/// differ, no unit fits, a count passes `u16::MAX`, or `members` is empty),
 /// `resistor_widths_differ` or `unknown_size`; the set then has `unit: None`.
+///
+/// # Panics
+/// If a member id is past `drawn`.
 pub fn unitize(members: &[DeviceId], drawn: &[Drawn], kind: DeviceKind, class: MatchClass, deck: &UnitDeck) -> Result<(UnitGeom, Vec<(u16, u16)>), Diagnostic> {
-    let d = |m: &DeviceId| drawn[m.0 as usize];
     let deck_keys = [deck.grid_nm, deck.min_w_nm, deck.max_w_nm, deck.min_l_nm, deck.res_min_segment_nm];
     if deck_keys.contains(&0) {
         return Err(err("unit_deck_incomplete", members, format!("deck unit bounds {deck:?}")));
     }
-    let model = members.first().map_or(0, |m| d(m).model);
-    if members.iter().any(|m| d(m).model != model) {
-        return Err(err("non_integer_ratio", members, "models differ".into()));
+    let model = members.first().map_or(0, |m| drawn[m.0 as usize].model);
+    if members.iter().any(|m| drawn[m.0 as usize].model != model) {
+        return Err(ratio(members, "models differ"));
     }
-    let n16 = |v: i64| u16::try_from(v).ok();
-    let ratio = |msg: &str| err("non_integer_ratio", members, msg.into());
-    let moderate = class >= MatchClass::Moderate;
+    let floor_nm = if class >= MatchClass::Moderate { MATCHED_MIN_NM } else { 0 };
     match kind {
-        DeviceKind::Nmos | DeviceKind::Pmos => {
-            let (Some(ws), Some(ls)) = (members.iter().map(|m| d(m).w_finger_nm.map(|w| w * i64::from(d(m).fingers))).collect::<Option<Vec<i64>>>(), members.iter().map(|m| d(m).l_nm).collect::<Option<Vec<i64>>>()) else {
-                return Err(err("unknown_size", members, "W/L unknown".into()));
-            };
-            let g = ws.iter().fold(0, |a, &w| gcd(a, w));
-            let floor = deck.min_w_nm.max(if moderate { 1000 } else { 0 });
-            let w_u = (1..=g.min(deck.max_w_nm)).rev().find(|&x| g % x == 0 && x % deck.grid_nm == 0 && x >= floor).ok_or_else(|| ratio("no unit width on the grid"))?;
-            let l_u = if ls.iter().all(|&l| l == ls[0]) {
-                ls[0]
-            } else {
-                let l_u = ls.iter().fold(0, |a, &l| gcd(a, l));
-                if l_u < deck.min_l_nm.max(if moderate { 1000 } else { 0 }) || l_u % deck.grid_nm != 0 {
-                    return Err(ratio("no unit length"));
-                }
-                l_u
-            };
-            let units = ws.iter().zip(&ls).map(|(&w, &l)| Some((n16(w / w_u)?, n16(l / l_u)?))).collect::<Option<Vec<_>>>().ok_or_else(|| ratio("too many units"))?;
-            Ok((UnitGeom { w_nm: w_u as i32, l_nm: l_u as i32, model }, units))
-        }
-        DeviceKind::Resistor => {
-            let w = d(&members[0]).w_finger_nm;
-            if members.iter().any(|m| d(m).w_finger_nm != w) {
-                return Err(err("resistor_widths_differ", members, "matched resistors need one width (Hastings R2)".into()));
-            }
-            let ls = members.iter().map(|m| d(m).l_nm).collect::<Option<Vec<i64>>>().ok_or_else(|| err("unknown_size", members, "L unknown".into()))?;
-            let l_u = ls.iter().fold(0, |a, &l| gcd(a, l));
-            if l_u < deck.res_min_segment_nm {
-                return Err(ratio("segment below res_min_segment"));
-            }
-            let units = members.iter().zip(&ls).map(|(m, &l)| Some((n16(i64::from(d(m).fingers))?, n16(l / l_u)?))).collect::<Option<Vec<_>>>().ok_or_else(|| ratio("too many units"))?;
-            Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l_u as i32, model }, units))
-        }
-        DeviceKind::Capacitor => {
-            let (w, l) = (d(&members[0]).w_finger_nm, d(&members[0]).l_nm);
-            let m = |x: &DeviceId| i64::from(d(x).fingers);
-            if members.iter().all(|x| (d(x).w_finger_nm, d(x).l_nm) == (w, l)) {
-                let units = members.iter().map(|x| Some((n16(m(x))?, 1))).collect::<Option<Vec<_>>>().ok_or_else(|| ratio("too many units"))?;
-                return Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l.unwrap_or(0) as i32, model }, units));
-            }
-            if members.iter().any(|x| d(x).w_finger_nm != w) {
-                return Err(ratio("capacitor widths differ"));
-            }
-            let ls = members.iter().map(|x| d(x).l_nm).collect::<Option<Vec<i64>>>().ok_or_else(|| err("unknown_size", members, "L unknown".into()))?;
-            let l_min = *ls.iter().min().unwrap_or(&0);
-            if l_min <= 0 || ls.iter().any(|&l| l % l_min != 0) {
-                return Err(ratio("areas are not multiples of the smallest"));
-            }
-            let units = members.iter().zip(&ls).map(|(x, &l)| Some((n16(m(x) * (l / l_min))?, 1))).collect::<Option<Vec<_>>>().ok_or_else(|| ratio("too many units"))?;
-            Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l_min as i32, model }, units))
-        }
-        _ => {
-            let (w, l) = (d(&members[0]).w_finger_nm, d(&members[0]).l_nm);
-            if members.iter().any(|x| (d(x).w_finger_nm, d(x).l_nm) != (w, l)) {
-                return Err(ratio("unit emitters differ"));
-            }
-            let units = members.iter().map(|x| Some((n16(i64::from(d(x).fingers))?, 1))).collect::<Option<Vec<_>>>().ok_or_else(|| ratio("too many units"))?;
-            Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l.unwrap_or(0) as i32, model }, units))
-        }
+        DeviceKind::Nmos | DeviceKind::Pmos => unit_fet(members, drawn, deck, floor_nm, model),
+        DeviceKind::Resistor => unit_resistor(members, drawn, deck, model),
+        DeviceKind::Capacitor => unit_capacitor(members, drawn, model),
+        _ => unit_identical(members, drawn, model),
     }
+}
+
+/// [`unitize`]'s FET rule; `floor_nm` is the class's width and split-length floor.
+fn unit_fet(members: &[DeviceId], drawn: &[Drawn], deck: &UnitDeck, floor_nm: i64, model: u16) -> Units {
+    let sizes = members
+        .iter()
+        .map(|m| {
+            let d = drawn[m.0 as usize];
+            Some((d.w_finger_nm? * i64::from(d.fingers), d.l_nm?))
+        })
+        .collect::<Option<Vec<(i64, i64)>>>()
+        .ok_or_else(|| err("unknown_size", members, "W/L unknown".into()))?;
+    let g = gcd_all(sizes.iter().map(|s| s.0));
+    let w_min = deck.min_w_nm.max(floor_nm);
+    let w_u = (1..=g.min(deck.max_w_nm))
+        .rev()
+        .find(|&x| g % x == 0 && x % deck.grid_nm == 0 && x >= w_min)
+        .ok_or_else(|| ratio(members, "no unit width on the grid"))?;
+    // A unit width was found, so `sizes` is not empty.
+    let l0 = sizes[0].1;
+    let l_u = if sizes.iter().all(|s| s.1 == l0) {
+        l0
+    } else {
+        let l_u = gcd_all(sizes.iter().map(|s| s.1));
+        if l_u < deck.min_l_nm.max(floor_nm) || l_u % deck.grid_nm != 0 {
+            return Err(ratio(members, "no unit length"));
+        }
+        l_u
+    };
+    let units = unit_counts(members, sizes.iter().map(|&(w, l)| (w / w_u, l / l_u)))?;
+    Ok((UnitGeom { w_nm: w_u as i32, l_nm: l_u as i32, model }, units))
+}
+
+/// [`unitize`]'s resistor rule (Hastings R2: one width).
+fn unit_resistor(members: &[DeviceId], drawn: &[Drawn], deck: &UnitDeck, model: u16) -> Units {
+    let w = drawn[members[0].0 as usize].w_finger_nm;
+    if members.iter().any(|m| drawn[m.0 as usize].w_finger_nm != w) {
+        return Err(err("resistor_widths_differ", members, "matched resistors need one width (Hastings R2)".into()));
+    }
+    let ls = lengths(members, drawn)?;
+    let l_u = gcd_all(ls.iter().copied());
+    if l_u < deck.res_min_segment_nm {
+        return Err(ratio(members, "segment below res_min_segment"));
+    }
+    let units = unit_counts(members, members.iter().zip(&ls).map(|(m, &l)| (i64::from(drawn[m.0 as usize].fingers), l / l_u)))?;
+    Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l_u as i32, model }, units))
+}
+
+/// [`unitize`]'s capacitor rule: identical units, else multiples of the
+/// smallest length at one width.
+fn unit_capacitor(members: &[DeviceId], drawn: &[Drawn], model: u16) -> Units {
+    let first = drawn[members[0].0 as usize];
+    let (w, l) = (first.w_finger_nm, first.l_nm);
+    let m = |x: &DeviceId| i64::from(drawn[x.0 as usize].fingers);
+    if members.iter().all(|x| (drawn[x.0 as usize].w_finger_nm, drawn[x.0 as usize].l_nm) == (w, l)) {
+        let units = unit_counts(members, members.iter().map(|x| (m(x), 1)))?;
+        return Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l.unwrap_or(0) as i32, model }, units));
+    }
+    if members.iter().any(|x| drawn[x.0 as usize].w_finger_nm != w) {
+        return Err(ratio(members, "capacitor widths differ"));
+    }
+    let ls = lengths(members, drawn)?;
+    let l_min = ls.iter().copied().min().unwrap_or(0);
+    if l_min <= 0 || ls.iter().any(|&l| l % l_min != 0) {
+        return Err(ratio(members, "areas are not multiples of the smallest"));
+    }
+    let units = unit_counts(members, members.iter().zip(&ls).map(|(x, &l)| (m(x) * (l / l_min), 1)))?;
+    Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l_min as i32, model }, units))
+}
+
+/// [`unitize`]'s rule for BJTs, diodes and any other kind: one unit geometry,
+/// `m` units each.
+fn unit_identical(members: &[DeviceId], drawn: &[Drawn], model: u16) -> Units {
+    let first = drawn[members[0].0 as usize];
+    let (w, l) = (first.w_finger_nm, first.l_nm);
+    if members.iter().any(|x| (drawn[x.0 as usize].w_finger_nm, drawn[x.0 as usize].l_nm) != (w, l)) {
+        return Err(ratio(members, "unit emitters differ"));
+    }
+    let units = unit_counts(members, members.iter().map(|x| (i64::from(drawn[x.0 as usize].fingers), 1)))?;
+    Ok((UnitGeom { w_nm: w.unwrap_or(0) as i32, l_nm: l.unwrap_or(0) as i32, model }, units))
 }
 
 /// Matched sets: components of the `MatchSym ∪ MatchBlock` edges (shared-bias and
@@ -215,18 +328,23 @@ pub fn unitize(members: &[DeviceId], drawn: &[Drawn], kind: DeviceKind, class: M
 /// `SharedBias` when the set holds a whole shared group, else `PassiveSet` of
 /// the first passive set inside it (EXT-19), else the first of `leaves`
 /// (`block::leaves`) inside it, else its first compound's seed. A split DAC's
-/// bridge is left out of the unit (it gets `(1, 1)`).
+/// bridge is left out of the unit (it gets `(1, 1)`). A set that cannot be
+/// unitized gets `unit: None`, `(m, 1)` per member and its diagnostic.
 /// `kind` is interim (Ratio for R/C, Current otherwise; EXT-16 infers it), class
 /// Moderate by Role. Card departure: `leaves` and `canon` are extra arguments
 /// (the template and the canonical order need them), and `passive` replaces
 /// nothing (its groups also arrive as `reqs` stars) but names their origin.
+///
+/// # Panics
+/// If `canon` or `drawn` is shorter than `hg`'s devices, or a request or
+/// group names a device past them.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn matched_sets(
     reqs: &[Req],
     compounds: &[Compound],
     shared: &[Vec<DeviceId>],
-    passive: &[crate::passive::PassiveSet],
+    passive: &[PassiveSet],
     leaves: &[&Block],
     canon: &[u64],
     drawn: &[Drawn],
@@ -235,46 +353,7 @@ pub fn matched_sets(
     diags: &mut Vec<Diagnostic>,
 ) -> Vec<MatchSpec> {
     let n = hg.device_count();
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(p: &mut [usize], mut x: usize) -> usize {
-        while p[x] != x {
-            p[x] = p[p[x]];
-            x = p[x];
-        }
-        x
-    }
-    for r in reqs.iter().filter(|r| matches!(r.ty, ReqType::MatchSym | ReqType::MatchBlock)) {
-        let (x, y) = (find(&mut parent, r.a.0 as usize), find(&mut parent, r.b.0 as usize));
-        parent[x.max(y)] = x.min(y);
-    }
-    let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
-    for d in 0..n {
-        let r = find(&mut parent, d);
-        comps.entry(r).or_default().push(d);
-    }
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for c in comps.into_values().filter(|c| c.len() > 1) {
-        let mut split: Vec<((DeviceKind, u16), Vec<usize>)> = Vec::new();
-        for d in c {
-            let k = (hg.kinds[d], drawn[d].model);
-            match split.iter_mut().find(|(x, _)| *x == k) {
-                Some((_, v)) => v.push(d),
-                None => split.push((k, vec![d])),
-            }
-        }
-        if split.len() > 1 {
-            diags.push(Diagnostic {
-                kind: "mixed_kind_set",
-                devices: split.iter().flat_map(|(_, v)| v.iter().map(|&d| DeviceId(d as u16))).collect(),
-                message: "a matched component mixes device kinds or models; split by (kind, model)".into(),
-            });
-        }
-        groups.extend(split.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1 && Family::of(hg.kinds[v[0]]).is_some()));
-    }
-    for g in &mut groups {
-        g.sort_by_key(|&d| (canon[d], d));
-    }
-    groups.sort_by_key(|g| (canon[g[0]], g[0]));
+    let groups = match_groups(reqs, canon, drawn, hg, diags);
 
     let mut half = vec![None; n];
     let mut comp_of = vec![None; n];
@@ -335,11 +414,54 @@ pub fn matched_sets(
         .collect()
 }
 
-/// [`unitize`] over `members` less any split-DAC bridge, which gets `(1, 1)`.
+/// The device groups behind [`matched_sets`]: components of the match edges,
+/// split by `(kind, model)` (pushing `mixed_kind_set`), groups of two or more
+/// devices with a [`Family`]. Members in canonical order; groups by their
+/// first member.
+fn match_groups(reqs: &[Req], canon: &[u64], drawn: &[Drawn], hg: &BipartiteHypergraph, diags: &mut Vec<Diagnostic>) -> Vec<Vec<usize>> {
+    let n = hg.device_count();
+    let mut parent: Vec<usize> = (0..n).collect();
+    for r in reqs.iter().filter(|r| matches!(r.ty, ReqType::MatchSym | ReqType::MatchBlock)) {
+        union(&mut parent, r.a.0 as usize, r.b.0 as usize);
+    }
+    let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    for d in 0..n {
+        let r = find(&mut parent, d);
+        comps.entry(r).or_default().push(d);
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for c in comps.into_values().filter(|c| c.len() > 1) {
+        // ponytail: linear kind search, a component holds a handful of (kind, model)s.
+        let mut split: Vec<((DeviceKind, u16), Vec<usize>)> = Vec::new();
+        for d in c {
+            let k = (hg.kinds[d], drawn[d].model);
+            match split.iter_mut().find(|(x, _)| *x == k) {
+                Some((_, v)) => v.push(d),
+                None => split.push((k, vec![d])),
+            }
+        }
+        if split.len() > 1 {
+            diags.push(Diagnostic {
+                kind: "mixed_kind_set",
+                devices: split.iter().flat_map(|(_, v)| v.iter().map(|&d| DeviceId(d as u16))).collect(),
+                message: "a matched component mixes device kinds or models; split by (kind, model)".into(),
+            });
+        }
+        groups.extend(split.into_iter().map(|(_, v)| v).filter(|v| v.len() > 1 && Family::of(hg.kinds[v[0]]).is_some()));
+    }
+    for g in &mut groups {
+        g.sort_by_key(|&d| (canon[d], d));
+    }
+    groups.sort_by_key(|g| (canon[g[0]], g[0]));
+    groups
+}
+
+/// [`unitize`] over `members` less any split-DAC bridge, which gets `(1, 1)`;
+/// the rest keep their order.
 ///
 /// # Errors
 /// As [`unitize`].
-pub fn unitize_set(members: &[DeviceId], passive: &[crate::passive::PassiveSet], drawn: &[Drawn], kind: DeviceKind, class: MatchClass, deck: &UnitDeck) -> Result<(UnitGeom, Vec<(u16, u16)>), Diagnostic> {
+pub fn unitize_set(members: &[DeviceId], passive: &[PassiveSet], drawn: &[Drawn], kind: DeviceKind, class: MatchClass, deck: &UnitDeck) -> Result<(UnitGeom, Vec<(u16, u16)>), Diagnostic> {
     let bridge = |d: &DeviceId| passive.iter().any(|p| p.bridge == Some(*d));
     let core: Vec<DeviceId> = members.iter().copied().filter(|d| !bridge(d)).collect();
     let (u, units) = unitize(&core, drawn, kind, class, deck)?;
@@ -347,35 +469,35 @@ pub fn unitize_set(members: &[DeviceId], passive: &[crate::passive::PassiveSet],
     Ok((u, members.iter().map(|d| if bridge(d) { (1, 1) } else { it.next().unwrap_or((1, 1)) }).collect()))
 }
 
-/// Nested symmetry (EXT-14 step 8): `(i, j)`, `i < j`, on the compound whose
-/// pairs map set i's members bijectively onto set j's.
+/// Nested symmetry (EXT-14 step 8): sets each compound's `set_pairs` to every
+/// `(i, j)`, `i < j` indices into `sets`, whose members the compound's pairs
+/// map bijectively onto each other. Overwrites any earlier `set_pairs`; a
+/// device in two of a compound's pairs keeps its first mate.
 pub fn set_pairs(compounds: &mut [Compound], sets: &[MatchSpec]) {
     let n = sets.iter().flat_map(|s| s.members.iter().map(|m| m.device.0 as usize + 1)).max().unwrap_or(0);
-    let ids: Vec<Vec<DeviceId>> = sets.iter().map(|s| s.members.iter().map(|m| m.device).collect()).collect();
-    let idx = device_index(n, ids.iter().map(Vec::as_slice));
-    let members = |s: &MatchSpec| {
-        let mut v: Vec<u16> = s.members.iter().map(|m| m.device.0).collect();
-        v.sort_unstable();
-        v
-    };
+    // Each set's members sorted once: every image is compared against these.
+    let sorted: Vec<Vec<DeviceId>> = sets
+        .iter()
+        .map(|s| {
+            let mut v: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
+            v.sort_unstable_by_key(|d| d.0);
+            v
+        })
+        .collect();
+    let idx = device_index(n, sorted.iter().map(Vec::as_slice));
     for c in compounds.iter_mut() {
         let mut mates = std::collections::HashMap::new();
         for &(a, b) in &c.pairs {
             mates.entry(a).or_insert(b);
             mates.entry(b).or_insert(a);
         }
-        let mate = |d: DeviceId| mates.get(&d).copied();
         // Only sets wholly inside the pairs can map onto one another.
-        let near = inside(&idx, mates.keys().map(|d| d.0 as usize).filter(|&d| d < n), |s| sets[s].members.iter().all(|m| mates.contains_key(&m.device)));
+        let near = inside(&idx, mates.keys().map(|d| d.0 as usize).filter(|&d| d < n), |s| sorted[s].iter().all(|d| mates.contains_key(d)));
         let mut found = Vec::new();
         for (k, &i) in near.iter().enumerate() {
-            let Some(mut img) = sets[i].members.iter().map(|m| mate(m.device).map(|d| d.0)).collect::<Option<Vec<u16>>>() else { continue };
-            img.sort_unstable();
-            for &j in &near[k + 1..] {
-                if img == members(&sets[j]) {
-                    found.push((i as u16, j as u16));
-                }
-            }
+            let Some(mut img) = sorted[i].iter().map(|d| mates.get(d).copied()).collect::<Option<Vec<DeviceId>>>() else { continue };
+            img.sort_unstable_by_key(|d| d.0);
+            found.extend(near[k + 1..].iter().filter(|&&j| img == sorted[j]).map(|&j| (i as u16, j as u16)));
         }
         c.set_pairs = found;
     }

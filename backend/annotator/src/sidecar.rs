@@ -31,8 +31,15 @@ use serde_json::Value;
 use crate::symmetry::Seed;
 use crate::AnnotationConfig;
 
-/// Parse `json` against `nl`. `Err` only for text that is not JSON or not a
-/// top-level array; every entry-level problem is a diagnostic.
+/// Parses the sidecar `json` against `nl` into a config (defaults plus every
+/// accepted entry) and the entry-level diagnostics. Entry `i`'s seeds carry
+/// `ConstraintId(u32::MAX - i)`; `GroupBlocks` and `IsolatedTub` groups carry
+/// index `i`. A `GroupBlocks` `instance_name` is an alias later entries may
+/// name in place of an instance (`SymmetricBlocks`, `Order`).
+///
+/// # Errors
+/// Only for text that is not JSON or not a top-level array; every entry-level
+/// problem is a diagnostic and skips that entry (or that name).
 pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnostic>), String> {
     let v: Value = serde_json::from_str(json).map_err(|e| format!("constraints: {e}"))?;
     let Value::Array(entries) = v else { return Err("constraints: top level is not an array".into()) };
@@ -84,11 +91,10 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "SymmetricBlocks" => {
-                cfg.symmetry_dir = Some(if e.get("direction").and_then(Value::as_str) == Some("H") { analog::intent::AxisDir::H } else { analog::intent::AxisDir::V });
+                cfg.symmetry_dir = Some(if e.get("direction").and_then(Value::as_str) == Some("H") { AxisDir::H } else { AxisDir::V });
                 for pair in e.get("pairs").and_then(Value::as_array).into_iter().flatten() {
                     let names: Vec<&str> = pair.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    let resolve = |n: &str| alias.get(&n.to_ascii_lowercase()).cloned().or_else(|| device(n).map(|d| vec![d]));
-                    let got: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| resolve(n)).collect();
+                    let got: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| resolve(&alias, n, &device)).collect();
                     let Some(got) = got else {
                         unknown!(format!("instance in {names:?}"));
                         continue;
@@ -109,21 +115,11 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "Match" => {
-                let class = match e.get("class").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
-                    Some("minimal") => MatchClass::Minimal,
-                    Some("moderate") => MatchClass::Moderate,
-                    Some("exceptional") => MatchClass::Exceptional,
-                    _ => {
-                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Match class") });
-                        continue;
-                    }
+                let Some(class) = e.get("class").and_then(Value::as_str).and_then(match_class) else {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Match class") });
+                    continue;
                 };
-                let mk = match e.get("kind").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
-                    Some("voltage") => Some(MatchKind::Voltage),
-                    Some("current") => Some(MatchKind::Current),
-                    Some("ratio") => Some(MatchKind::Ratio),
-                    _ => None,
-                };
+                let mk = e.get("kind").and_then(Value::as_str).and_then(match_kind);
                 match devices(&strs("instances")) {
                     Ok(ds) => {
                         // GAP-09 (c): kind, model and L must agree (W may differ: a ratioed set).
@@ -144,23 +140,9 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "NetClass" => {
-                let class = match e.get("class").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
-                    Some("signal") => NetClass::Signal,
-                    Some("clock") => NetClass::Clock,
-                    Some("supply") => NetClass::Supply,
-                    Some("ground") => NetClass::Ground,
-                    Some("sensitive") => NetClass::Sensitive,
-                    Some("substrate") => NetClass::Substrate,
-                    Some("bias") => NetClass::Bias,
-                    Some("reference") => NetClass::Reference,
-                    // Conservative: undeclared logic may toggle, so it is an aggressor.
-                    Some("digital") => NetClass::DigitalSwitching,
-                    Some("digital_static") => NetClass::DigitalStatic,
-                    Some("noisy") => NetClass::Noisy,
-                    _ => {
-                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: NetClass class") });
-                        continue;
-                    }
+                let Some(class) = e.get("class").and_then(Value::as_str).and_then(net_class) else {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: NetClass class") });
+                    continue;
                 };
                 for n in strs("nets") {
                     match net(&n) {
@@ -179,18 +161,7 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
             "Kelvin" => {
                 let pin = |s: &str| -> Option<(DeviceId, Term)> {
                     let (d, t) = s.split_once('/')?;
-                    let t = match t.to_ascii_uppercase().as_str() {
-                        "G" => Term::G,
-                        "D" => Term::D,
-                        "S" => Term::S,
-                        "B" => Term::B,
-                        "C" => Term::C,
-                        "E" => Term::E,
-                        "P" => Term::P,
-                        "N" => Term::N,
-                        _ => return None,
-                    };
-                    Some((device(d)?, t))
+                    Some((device(d)?, term(t)?))
                 };
                 let at = e.get("pin").and_then(Value::as_str).unwrap_or("");
                 let sense: Option<Vec<(DeviceId, Term)>> = strs("sense").iter().map(|s| pin(s)).collect();
@@ -208,18 +179,12 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
                 }
             }
             "Order" => {
-                let (dir, flip) = match e.get("direction").and_then(Value::as_str) {
-                    Some("bottom_to_top") => (AxisDir::V, false),
-                    Some("top_to_bottom") => (AxisDir::V, true),
-                    Some("left_to_right") => (AxisDir::H, false),
-                    Some("right_to_left") => (AxisDir::H, true),
-                    _ => {
-                        diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Order direction") });
-                        continue;
-                    }
+                let Some((dir, flip)) = e.get("direction").and_then(Value::as_str).and_then(order_direction) else {
+                    diags.push(Diagnostic { kind: "sidecar_unsupported", devices: vec![], message: format!("entry {i}: Order direction") });
+                    continue;
                 };
                 let names = strs("instances");
-                let steps: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| alias.get(&n.to_ascii_lowercase()).cloned().or_else(|| device(n).map(|d| vec![d]))).collect();
+                let steps: Option<Vec<Vec<DeviceId>>> = names.iter().map(|n| resolve(&alias, n, &device)).collect();
                 match steps {
                     Some(mut steps) => {
                         if flip {
@@ -265,8 +230,81 @@ pub fn parse(json: &str, nl: &Netlist) -> Result<(AnnotationConfig, Vec<Diagnost
     Ok((cfg, diags))
 }
 
+/// A `GroupBlocks` alias's devices (case-insensitive), else the one named device.
+fn resolve(alias: &HashMap<String, Vec<DeviceId>>, name: &str, device: &impl Fn(&str) -> Option<DeviceId>) -> Option<Vec<DeviceId>> {
+    alias.get(&name.to_ascii_lowercase()).cloned().or_else(|| device(name).map(|d| vec![d]))
+}
+
+/// `Match` `class`, case-insensitive.
+fn match_class(s: &str) -> Option<MatchClass> {
+    match s.to_ascii_lowercase().as_str() {
+        "minimal" => Some(MatchClass::Minimal),
+        "moderate" => Some(MatchClass::Moderate),
+        "exceptional" => Some(MatchClass::Exceptional),
+        _ => None,
+    }
+}
+
+/// `Match` `kind`, case-insensitive; anything else leaves the kind to inference.
+fn match_kind(s: &str) -> Option<MatchKind> {
+    match s.to_ascii_lowercase().as_str() {
+        "voltage" => Some(MatchKind::Voltage),
+        "current" => Some(MatchKind::Current),
+        "ratio" => Some(MatchKind::Ratio),
+        _ => None,
+    }
+}
+
+/// `NetClass` `class`, case-insensitive.
+fn net_class(s: &str) -> Option<NetClass> {
+    Some(match s.to_ascii_lowercase().as_str() {
+        "signal" => NetClass::Signal,
+        "clock" => NetClass::Clock,
+        "supply" => NetClass::Supply,
+        "ground" => NetClass::Ground,
+        "sensitive" => NetClass::Sensitive,
+        "substrate" => NetClass::Substrate,
+        "bias" => NetClass::Bias,
+        "reference" => NetClass::Reference,
+        // Conservative: undeclared logic may toggle, so it is an aggressor.
+        "digital" => NetClass::DigitalSwitching,
+        "digital_static" => NetClass::DigitalStatic,
+        "noisy" => NetClass::Noisy,
+        _ => return None,
+    })
+}
+
+/// A `Kelvin` pin's terminal letter, case-insensitive.
+fn term(s: &str) -> Option<Term> {
+    Some(match s.to_ascii_uppercase().as_str() {
+        "G" => Term::G,
+        "D" => Term::D,
+        "S" => Term::S,
+        "B" => Term::B,
+        "C" => Term::C,
+        "E" => Term::E,
+        "P" => Term::P,
+        "N" => Term::N,
+        _ => return None,
+    })
+}
+
+/// `Order` `direction`: the axis and whether the listed order runs against it.
+fn order_direction(s: &str) -> Option<(AxisDir, bool)> {
+    match s {
+        "bottom_to_top" => Some((AxisDir::V, false)),
+        "top_to_bottom" => Some((AxisDir::V, true)),
+        "left_to_right" => Some((AxisDir::H, false)),
+        "right_to_left" => Some((AxisDir::H, true)),
+        _ => None,
+    }
+}
+
 impl AnnotationConfig {
     /// [`parse`]: the sidecar's config and its diagnostics.
+    ///
+    /// # Errors
+    /// As [`parse`].
     pub fn from_json(json: &str, nl: &Netlist) -> Result<(Self, Vec<Diagnostic>), String> {
         parse(json, nl)
     }
