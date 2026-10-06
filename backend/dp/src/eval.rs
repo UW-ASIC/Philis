@@ -14,23 +14,47 @@ use pnr_core::Layout;
 /// `(residual, priced term, 0)`, cost `(criticality·cost, 0, 0)`.
 type Row = (f64, f64, u32);
 
+/// Cached per-net and per-batch terms of the SP anneal's energy, with an
+/// undo log: [`Eval::revert`] restores every value replaced since the last
+/// [`Eval::commit`] (or [`Eval::full`]).
+///
+/// Invariant: after `full`/`update`, every cached value equals what a fresh
+/// evaluation of the current layout would give for it, provided the moved
+/// cells passed to `update` are every cell whose geometry changed.
 pub(crate) struct Eval {
+    /// Weighted HPWL per net row, nm.
     net_hpwl: Vec<f64>,
     /// Batches flattened: hard, then budget, then cost.
     row: Vec<Row>,
+    /// `reqs.hard.len()`: rows `[0, n_hard)` are hard.
     n_hard: usize,
+    /// `reqs.budget.len()`: rows `[n_hard, n_hard + n_budget)` are budget.
     n_budget: usize,
+    /// Cell → net rows it touches.
     cell_nets: Vec<Vec<u32>>,
+    /// Cell → non-global rows whose `touched` ids include it.
     cell_rows: Vec<Vec<u32>>,
+    /// Rows recomputed on every update (no touched ids, or field readers).
     global: Vec<u32>,
+    /// Net row → stamp of the update that last recomputed it (dedup).
     seen_n: Vec<u32>,
+    /// Batch row → stamp of the update that last recomputed it (dedup).
     seen_r: Vec<u32>,
+    /// Current update's stamp; `0` is never live (wraparound clears the marks).
     stamp: u32,
+    /// `(net row, old value)` replaced since the last commit.
     undo_n: Vec<(u32, f64)>,
+    /// `(batch row, old value)` replaced since the last commit.
     undo_r: Vec<(u32, Row)>,
 }
 
 impl Eval {
+    /// Index of every batch of `reqs` and every net of `nets` over `n` cells;
+    /// every cached value starts at zero until [`Eval::full`]. Touched ids
+    /// `>= n` are ignored.
+    ///
+    /// # Panics
+    /// When a net names a device `>= n`.
     pub(crate) fn new(reqs: &Requirements<Layout>, nets: &Nets, n: usize) -> Self {
         let (n_hard, n_budget) = (reqs.hard.len(), reqs.budget.len());
         let mut cell_rows = vec![Vec::new(); n];
@@ -70,6 +94,7 @@ impl Eval {
         }
     }
 
+    /// Weighted HPWL of net row `ni` under `l`, nm.
     fn net(nets: &Nets, l: &Layout, ni: usize) -> f64 {
         let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
         for k in nets.span(ni) {
@@ -79,6 +104,8 @@ impl Eval {
         f64::from(nets.weight(ni)) * f64::from((x1 - x0) + (y1 - y0))
     }
 
+    /// Fresh value of flattened batch row `i` (see [`Row`]); a budget's priced
+    /// term is `λ·r⁺ + ρ/2·r⁺²`.
     fn row_of(&self, i: usize, reqs: &Requirements<Layout>, l: &Layout, prices: &gp::Prices) -> Row {
         if i < self.n_hard {
             let b = &reqs.hard[i];
@@ -107,7 +134,11 @@ impl Eval {
 
     /// Recompute the nets and batches `moved` cells reach, plus the global
     /// batches (`all` = every batch: a branch flip moves no cell), logging old
-    /// values for [`Eval::revert`].
+    /// values for [`Eval::revert`]. Each net and row is recomputed at most once
+    /// per call.
+    ///
+    /// # Panics
+    /// When a moved cell is `>= n`.
     pub(crate) fn update(&mut self, moved: &[usize], all: bool, reqs: &Requirements<Layout>, nets: &Nets, l: &Layout, prices: &gp::Prices) {
         self.stamp = self.stamp.wrapping_add(1);
         if self.stamp == 0 {
@@ -149,7 +180,7 @@ impl Eval {
         }
     }
 
-    /// Restore the values the last [`Eval::update`] replaced.
+    /// Restore every value the [`Eval::update`]s since the last commit replaced.
     pub(crate) fn revert(&mut self) {
         while let Some((i, v)) = self.undo_n.pop() {
             self.net_hpwl[i as usize] = v;
@@ -159,6 +190,7 @@ impl Eval {
         }
     }
 
+    /// Keep the values the last [`Eval::update`] wrote (drop the undo log).
     pub(crate) fn commit(&mut self) {
         self.undo_n.clear();
         self.undo_r.clear();

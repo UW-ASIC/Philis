@@ -22,9 +22,15 @@ pub struct Locks {
     pub rel: Vec<Orient>,
 }
 
-/// Locks of `n` cells. A pair is shape-compatible when both cells' variant
-/// spaces list the same `(w, h)` bboxes in the same order; with `variants`
-/// empty (or too short) every pair is.
+/// Locks of `n` cells from every batch's `matched_pairs` (orient and shape)
+/// and `mirrored_pairs` (`rel`). Pairs naming a cell `>= n` or a cell twice
+/// are dropped. A pair is shape-compatible when both cells' variant spaces
+/// list the same `(w, h)` bboxes in the same order, or neither cell has a
+/// space (`variants` empty or too short); a pair where only one cell has a
+/// space is incompatible.
+///
+/// `n` must fit cell ids in `u16` (`n <= 65_536`, as [`pnr_core::DeviceId`]).
+/// Cost: O((pairs) log pairs + n α(n)) plus the variant comparisons.
 #[must_use]
 pub fn locks(reqs: &Requirements<Layout>, n: usize, variants: &[gp::VariantSpace]) -> Locks {
     let (mut pairs, mut mirrored) = (Vec::new(), Vec::new());
@@ -41,14 +47,19 @@ pub fn locks(reqs: &Requirements<Layout>, n: usize, variants: &[gp::VariantSpace
         v.dedup();
     }
 
-    let dims = |i: u32| {
-        variants.get(i as usize).map(|s| s.alternatives.iter().map(|m| (m.bbox.w, m.bbox.h)).collect::<Vec<_>>())
+    let same_shapes = |a: u32, b: u32| match (variants.get(a as usize), variants.get(b as usize)) {
+        (Some(p), Some(q)) => {
+            p.alternatives.len() == q.alternatives.len()
+                && p.alternatives.iter().zip(&q.alternatives).all(|(m, k)| (m.bbox.w, m.bbox.h) == (k.bbox.w, k.bbox.h))
+        }
+        (None, None) => true,
+        _ => false,
     };
     let (mut orient, mut shape) = (UnionFind::new(n), UnionFind::new(n));
     let mut incompatible = 0;
     for &(a, b) in &pairs {
         orient.union(a, b);
-        if dims(a) == dims(b) {
+        if same_shapes(a, b) {
             shape.union(a, b);
         } else {
             incompatible += 1;
@@ -87,7 +98,8 @@ fn relative(sets: &[Vec<u16>], pairs: &[(u32, u32)], mirrored: &[(u32, u32)], n:
     rel
 }
 
-/// Non-singleton groups, sorted, and the cell → set map.
+/// Non-singleton groups (each sorted, sorted by first member) and the
+/// cell → set map of length `n`.
 fn sets(uf: &mut UnionFind, n: usize) -> (Vec<Vec<u16>>, Vec<Option<u16>>) {
     let mut out: Vec<Vec<u16>> = uf
         .groups()
@@ -110,7 +122,8 @@ fn sets(uf: &mut UnionFind, n: usize) -> (Vec<Vec<u16>>, Vec<Option<u16>>) {
 }
 
 impl Locks {
-    /// Cells sharing `c`'s orient (`shape = false`) or shape set; `[c]` when unlocked.
+    /// Cells sharing `c`'s orient (`shape = false`) or shape set, ascending;
+    /// `[c]` when unlocked or `c` is past the map. Allocates the result.
     #[must_use]
     pub fn members(&self, c: usize, shape: bool) -> Vec<usize> {
         let (sets, of) = if shape { (&self.shape, &self.shape_of) } else { (&self.orient, &self.orient_of) };
@@ -121,7 +134,9 @@ impl Locks {
     }
 
     /// Re-derive every orient set's members from its first member:
-    /// `orient[m] = orient[set[0]].then(rel[m])`.
+    /// `orient[m] = orient[set[0]].then(rel[m])`. Members past `orient` (or
+    /// `rel`) are skipped. Extents are not touched: the caller swaps `hw`/`hh`
+    /// of any member whose orient changed axis parity.
     pub fn align(&self, orient: &mut [Orient]) {
         for set in &self.orient {
             let Some(&o0) = orient.get(usize::from(set[0])) else { continue };
@@ -133,7 +148,8 @@ impl Locks {
         }
     }
 
-    /// Set every shape set's members to its first member's variant.
+    /// Set every shape set's members to its first member's variant; members
+    /// past `assignment` are skipped.
     pub fn unify(&self, assignment: &mut [u16]) {
         for set in &self.shape {
             let Some(&v) = assignment.get(usize::from(set[0])) else { continue };

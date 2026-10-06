@@ -1,6 +1,7 @@
 //! Terminal legalization: push devices apart until every pair is at least
-//! its per-pair gap ([`PlaceRules::gaps`]) apart on some axis. Every overlap is a defect — `cellgen` emits
-//! one self-contained macro per cell, so nothing shares diffusion.
+//! its per-pair gap ([`PlaceRules::gaps`]) apart on some axis. Every overlap
+//! is a defect — `cellgen` emits one self-contained macro per cell, so
+//! nothing shares diffusion.
 
 use analog::Requirements;
 use gp::mechanics::{analog_violations, snap};
@@ -11,7 +12,9 @@ use pnr_core::Layout;
 /// violated hard batches (a pushed symmetry partner is re-mirrored), until
 /// clean, stalled, or `max_sweeps`. Positions stay on `grid`, and a sweep that
 /// still raises hard violations is rolled back.
-/// Returns the residual encroachment area (nonzero when the die cannot fit).
+/// Returns the residual encroachment area, nm² (nonzero when the die cannot
+/// fit). `max_sweeps = 0` only measures. Each sweep is O(n²) pair tests plus
+/// one hard-rule projection.
 ///
 /// ponytail: O(n²) pairwise relaxation; a constraint graph + LP compaction if
 /// blocks reach thousands of devices.
@@ -56,11 +59,7 @@ pub fn separate_overlaps(
                 }
             }
         }
-        for batch in &reqs.hard {
-            if batch.violations(l) > 0 {
-                batch.project(l, g);
-            }
-        }
+        project_violated(reqs, l, g);
         l.refresh_temps();
 
         if analog_violations(reqs, l) > before_hard {
@@ -75,6 +74,18 @@ pub fn separate_overlaps(
         }
     }
     encroachment(l)
+}
+
+/// Project each hard batch that is violated at its turn onto its feasible
+/// set, in batch order, snapping to `grid`. Temperatures are left stale.
+pub(crate) fn project_violated(reqs: &Requirements<Layout>, l: &mut Layout, grid: i32) {
+    for batch in &reqs.hard {
+        // Re-checked per batch: an earlier projection may have fixed it, and a
+        // satisfied SymmetryGroup would still re-average its axis.
+        if batch.violations(l) > 0 {
+            batch.project(l, grid);
+        }
+    }
 }
 
 #[cfg(test)]
