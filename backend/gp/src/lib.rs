@@ -456,15 +456,8 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         }
 
         // (c) density push: overfull bins push toward the emptiest neighbour.
-        util.fill(0.0);
-        let bin_of = |x: i32, y: i32| -> usize {
-            let bx = ((x as f32 / bw) as usize).min(nb - 1);
-            let by = ((y as f32 / bw) as usize).min(nb - 1);
-            by * nb + bx
-        };
-        for i in 0..n {
-            util[bin_of(l.x[i], l.y[i])] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
-        }
+        fill_bins(&mut util, &l, nb, bw);
+        let bin_of = |x: i32, y: i32| bin_of(x, y, nb, bw);
         for i in 0..n {
             let b = bin_of(l.x[i], l.y[i]);
             let over = util[b] - TARGET_UTIL;
@@ -536,6 +529,21 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     (l, rep)
 }
 
+/// Row-major `nb × nb` bin of a point, bins `bw` nm wide from the origin.
+fn bin_of(x: i32, y: i32, nb: usize, bw: f32) -> usize {
+    let bx = ((x as f32 / bw) as usize).min(nb - 1);
+    let by = ((y as f32 / bw) as usize).min(nb - 1);
+    by * nb + bx
+}
+
+/// Each bin's cell area over its own area, cells binned by centre.
+fn fill_bins(util: &mut [f32], l: &Layout, nb: usize, bw: f32) {
+    util.fill(0.0);
+    for i in 0..l.x.len() {
+        util[bin_of(l.x[i], l.y[i], nb, bw)] += 4.0 * l.hw[i] as f32 * l.hh[i] as f32 / (bw * bw);
+    }
+}
+
 /// Σ bin overflow area over total device area.
 fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
     let total: f32 = (0..l.x.len()).map(|i| 4.0 * l.hw[i] as f32 * l.hh[i] as f32).sum();
@@ -549,6 +557,40 @@ fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
 mod price_tests {
     use super::*;
     use analog::Rule;
+
+    /// PLC-11 kept the analytic loop (the flat dp, still the default, starts
+    /// from it): 16 equal cells, no nets, no rules, start as a pile at the
+    /// centre; the loop must spread them to the density target.
+    #[test]
+    fn gp_spreads_a_pile() {
+        let m = Macro { bbox: pnr_core::Rect { x: 0, y: 0, w: 1_000, h: 1_000 }, ..Default::default() };
+        let macros = vec![m; 16];
+        let reqs = Requirements::<Layout>::default();
+        let rules = PlaceRules::uniform(10, 0);
+        let inp = GpInput {
+            macros: &macros,
+            variants: &[],
+            assignment: &[],
+            reqs: &reqs,
+            rules: &rules,
+            net_weight: &[],
+            n_axes: 1,
+            power_uw: &[],
+            units: Default::default(),
+            iterate: true,
+        };
+        let (l, _) = place(&inp, &mut Prices::new(), 1);
+        let side = canvas_side(&l.hw, &l.hh, UTILIZATION, 10);
+        let nb = 4;
+        let bw = side as f32 / nb as f32;
+        let mut util = vec![0.0; nb * nb];
+        fill_bins(&mut util, &l, nb, bw);
+        let overflow = bin_overflow(&util, &l, bw);
+        assert!(overflow <= OVERFLOW_TARGET, "overflow {overflow} at x {:?} y {:?}", l.x, l.y);
+        let (pile, _) = place(&GpInput { iterate: false, ..inp }, &mut Prices::new(), 1);
+        fill_bins(&mut util, &pile, nb, bw);
+        assert!(bin_overflow(&util, &pile, bw) > OVERFLOW_TARGET, "the start was already spread");
+    }
 
     /// A budget rule whose residual is **read out of the layout**, so a test can drive
     /// it epoch by epoch: `x[0] = 1000` ⇒ one full budget past spec, `x[0] = 0` ⇒

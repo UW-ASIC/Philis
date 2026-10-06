@@ -32,20 +32,33 @@ fn metrics_are_populated_on_ota() {
 }
 
 /// Also pins the Config -> Flow -> `gp::place` plumbing: with it broken, Pile
-/// silently runs Analytic and the two final layouts coincide.
+/// silently runs Analytic and the two final layouts coincide. Under
+/// `DpMode::Sp` too (PLC-11), where `Constructive` skips gp altogether.
 #[test]
 fn gp_modes_are_deterministic() {
-    let [analytic, pile] = [GpMode::Analytic, GpMode::Pile].map(|mode| {
-        let (a, b) = (run_ota(&small(mode)).layout, run_ota(&small(mode)).layout);
-        assert_eq!(a.x, b.x, "{mode:?}: x differs between identical runs");
-        assert_eq!(a.y, b.y, "{mode:?}: y differs between identical runs");
-        assert_eq!(a.variant, b.variant, "{mode:?}: variant differs between identical runs");
-        a
-    });
-    assert!(
-        (&analytic.x, &analytic.y) != (&pile.x, &pile.y),
-        "Pile placed ota exactly like Analytic: gp_mode not reaching gp::place"
-    );
+    for dp_mode in [dp::DpMode::Flat, dp::DpMode::Sp] {
+        let modes: Vec<GpMode> = match dp_mode {
+            dp::DpMode::Flat => vec![GpMode::Analytic, GpMode::Pile],
+            dp::DpMode::Sp => vec![GpMode::Analytic, GpMode::Pile, GpMode::Constructive],
+        };
+        let layouts: Vec<_> = modes
+            .iter()
+            .map(|&mode| {
+                let cfg = Config { dp_mode, ..small(mode) };
+                let (a, b) = (run_ota(&cfg).layout, run_ota(&cfg).layout);
+                assert_eq!(a.x, b.x, "{dp_mode:?} {mode:?}: x differs between identical runs");
+                assert_eq!(a.y, b.y, "{dp_mode:?} {mode:?}: y differs between identical runs");
+                assert_eq!(a.variant, b.variant, "{dp_mode:?} {mode:?}: variant differs between identical runs");
+                a
+            })
+            .collect();
+        if dp_mode == dp::DpMode::Flat {
+            assert!(
+                (&layouts[0].x, &layouts[0].y) != (&layouts[1].x, &layouts[1].y),
+                "Pile placed ota exactly like Analytic: gp_mode not reaching gp::place"
+            );
+        }
+    }
 }
 
 /// PLC-02: every cell's placed origin lands on the cut lattice, not just a
