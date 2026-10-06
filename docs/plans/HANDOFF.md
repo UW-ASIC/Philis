@@ -25,5 +25,10 @@
 - RESTART (never resumeFromRunId): launch the script fresh with cleanup-units.json as args, `skipUnits` = units with a "cleanup(<id>): step 3" commit, `skipSeams` = seams with a docs/plans/cleanup/seams/<id>.json. A unit interrupted mid-way resumes from its next step (it checks its own commits).
 - Builds only via tools/qcargo (two flock queues, 4 workers in ../philis-workers, -j 6, 2 test threads, 15 GB/worker budget; `tools/qcargo --gc` when idle).
 
+## Queued: constraint identification (launch when the cleanup workflow has integrated)
+- `docs/plans/workflows-identification.js`: ID-01..ID-18 of docs/plans/research-constraint-identification.md (#75), one agent per item, sequential, then a verify agent.
+- args: {"order":["ID-02","ID-01","ID-07","ID-03","ID-04","ID-06","ID-09","ID-08","ID-05","ID-15","ID-10","ID-12","ID-13","ID-11","ID-14","ID-16","ID-17","ID-18"],"skip":[]}
+- Restart: fresh launch, `skip` = items with an "ID-xx:" commit on main.
+
 ## Tools
 `source <scratchpad>/signoff-investigation/env.sh` (klayout 0.30.4, magic 8.3.573, netgen 1.5.292 from nix store; PDK_ROOT=Philis/.pdk (~/.volare no longer exists)). Independent checks: `python3 ResearchBoutros/analog/common/layout/verify.py drc|lvs <block> <gds>`; netgen vs `<top>_ref.spice`.
