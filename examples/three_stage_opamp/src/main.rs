@@ -86,6 +86,9 @@ fn main() {
 ///
 /// Pins are renamed `d0:G` → `G`: the library binds an injected macro's pins
 /// to the instance's terminals by name.
+///
+/// # Panics
+/// When the deck offers no PMOS variant for a 40/0.5 µm device.
 fn user_output_pmos(pdk: &Pdk) -> Macro {
     use analog::cell::{SeriesParallel, Unitization};
     use cells::{mosfet::Mosfet, Cell};

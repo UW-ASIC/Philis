@@ -1,11 +1,12 @@
 //! Discover and preprocess benchmark circuit fixtures (ALIGN, MAGICAL, TinyTapeout).
 //!
-//! Repos clone on demand into `benchmarks/fixtures/` and are cleaned up after use.
-//! Generic SPICE netlists are preprocessed to PDK-compatible format before parsing.
+//! TinyTapeout repos clone on demand into `benchmarks/fixtures/` at pinned
+//! revisions and are cleaned up after use; ALIGN and MAGICAL are git
+//! submodules under `benchmarks/competition/`. Generic SPICE netlists are
+//! preprocessed to a PDK-compatible format before parsing.
 //!
-//! Ported verbatim from `tools/benchmark/src/fixtures.rs` — this machinery is
-//! PDK/flow-agnostic (it only produces preprocessed `.spice` text + paths), so it
-//! carries over to the new `library`-based flow unchanged.
+//! This machinery is PDK/flow-agnostic: it only produces preprocessed
+//! `.spice` text and paths.
 
 use std::collections::HashMap;
 use std::fs;
@@ -43,28 +44,37 @@ const REPOS: &[(&str, &str, &str)] = &[
 // BenchmarkCircuit
 // ---------------------------------------------------------------------------
 
+/// One discovered fixture netlist.
 #[derive(Debug, Clone)]
 pub struct BenchmarkCircuit {
+    /// Display and artifact name: the file stem (local, MAGICAL), the example
+    /// directory (ALIGN) or the repo directory (TinyTapeout). Unique within a
+    /// suite.
     pub name: String,
+    /// The suite it was discovered in (never [`Suite::All`]).
     pub suite: Suite,
+    /// The raw (unpreprocessed) netlist.
     pub spice_path: PathBuf,
-    #[allow(dead_code)]
-    pub description: String,
-    #[allow(dead_code)]
-    pub ref_gds_path: Option<PathBuf>,
 }
 
+/// A fixture family; [`Suite::All`] selects every one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suite {
     /// Plain .spice/.sp files sitting directly in benchmarks/fixtures/.
     Local,
+    /// `competition/ALIGN/examples/<name>/<name>.sp`.
     Align,
+    /// `competition/MAGICAL-CIRCUITS/benchmark_circuits/<category>/*.sp`.
     Magical,
+    /// The pinned [`REPOS`] under `benchmarks/fixtures/`.
     TinyTapeout,
+    /// Every suite above.
     All,
 }
 
 impl Suite {
+    /// Parses a suite name, case-insensitively. Anything unrecognised is
+    /// [`Suite::All`].
     pub fn from_str(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "local" => Self::Local,
@@ -75,6 +85,7 @@ impl Suite {
         }
     }
 
+    /// Whether selecting `self` runs the fixtures of `target`.
     fn includes(self, target: Suite) -> bool {
         self == Self::All || self == target
     }
@@ -84,6 +95,7 @@ impl Suite {
 // Fixtures root
 // ---------------------------------------------------------------------------
 
+/// `benchmarks/fixtures/`: local netlists and the TinyTapeout clones.
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
 }
@@ -92,7 +104,7 @@ fn fixtures_dir() -> PathBuf {
 /// clone was made without `--recurse-submodules`.
 fn competition_repo(name: &str) -> Option<PathBuf> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("competition").join(name);
-    if p.is_dir() && fs::read_dir(&p).map_or(false, |mut d| d.next().is_some()) {
+    if fs::read_dir(&p).is_ok_and(|mut d| d.next().is_some()) {
         return Some(p);
     }
     eprintln!("competition/{name} is empty — run `git submodule update --init --depth 1`");
@@ -103,183 +115,108 @@ fn competition_repo(name: &str) -> Option<PathBuf> {
 // Discovery
 // ---------------------------------------------------------------------------
 
-/// Loose netlists dropped straight into benchmarks/fixtures/ (survive
-/// `cleanup_fixtures`, which only removes cloned repos).
+/// The entries of `dir` that `keep` accepts, sorted by path. Unreadable
+/// directories and entries are skipped.
+fn sorted_entries(dir: &Path, keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return vec![] };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| keep(p)).collect();
+    paths.sort();
+    paths
+}
+
+/// `p`'s file name, lossily as UTF-8 (empty for a path without one).
+fn file_name(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// Whether `p` is a file with one of the extensions `exts`.
+fn has_extension(p: &Path, exts: &[&str]) -> bool {
+    p.is_file() && p.extension().is_some_and(|e| exts.iter().any(|x| e == *x))
+}
+
+/// Loose `.spice`/`.sp` netlists directly in `root`, sorted by path (they
+/// survive `cleanup_fixtures`, which only removes cloned repos).
 pub fn discover_local(root: &Path) -> Vec<BenchmarkCircuit> {
-    let Ok(entries) = fs::read_dir(root) else { return vec![] };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension()
-                    .map_or(false, |ext| ext == "spice" || ext == "sp")
-        })
-        .collect();
-    files.sort();
-    files
+    sorted_entries(root, |p| has_extension(p, &["spice", "sp"]))
         .into_iter()
         .map(|p| BenchmarkCircuit {
             name: p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
             suite: Suite::Local,
             spice_path: p,
-            description: "local fixture".into(),
-            ref_gds_path: None,
         })
         .collect()
 }
 
+/// ALIGN examples: every `examples/<name>/<name>.sp`, sorted by name. Empty
+/// when the submodule is not checked out.
 pub fn discover_align() -> Vec<BenchmarkCircuit> {
     let Some(root) = competition_repo("ALIGN") else { return vec![] };
-    let align_dir = root.join("examples");
-    let Ok(entries) = fs::read_dir(&align_dir) else { return vec![] };
-    let mut circuits = Vec::new();
-    let mut names: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    for name in names {
-        let sp = align_dir.join(&name).join(format!("{name}.sp"));
-        if sp.is_file() {
-            circuits.push(BenchmarkCircuit {
-                name,
-                suite: Suite::Align,
-                spice_path: sp,
-                description: String::new(),
-                ref_gds_path: None,
-            });
-        }
-    }
-    circuits
+    sorted_entries(&root.join("examples"), Path::is_dir)
+        .into_iter()
+        .filter_map(|dir| {
+            let name = file_name(&dir);
+            let sp = dir.join(format!("{name}.sp"));
+            sp.is_file().then_some(BenchmarkCircuit { name, suite: Suite::Align, spice_path: sp })
+        })
+        .collect()
 }
 
+/// MAGICAL benchmark circuits: every `*.sp` in each category directory,
+/// sorted by category then file. Empty when the submodule is not checked out.
 pub fn discover_magical() -> Vec<BenchmarkCircuit> {
     let Some(root) = competition_repo("MAGICAL-CIRCUITS") else { return vec![] };
-    let magical_dir = root.join("benchmark_circuits");
-    let Ok(categories) = fs::read_dir(&magical_dir) else { return vec![] };
-    let mut circuits = Vec::new();
-    let mut cats: Vec<_> = categories
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    cats.sort();
-    for category in cats {
-        let cat_dir = magical_dir.join(&category);
-        let Ok(files) = fs::read_dir(&cat_dir) else { continue };
-        let mut spice_files: Vec<_> = files
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map_or(false, |ext| ext == "sp")
-            })
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        spice_files.sort();
-        for f in spice_files {
-            let name = f.strip_suffix(".sp").unwrap_or(&f).to_owned();
-            circuits.push(BenchmarkCircuit {
-                name,
-                suite: Suite::Magical,
-                spice_path: cat_dir.join(&f),
-                description: category.clone(),
-                ref_gds_path: None,
-            });
-        }
-    }
-    circuits
-}
-
-pub fn discover_tinytapeout(root: &Path) -> Vec<BenchmarkCircuit> {
-    if !root.is_dir() {
-        return vec![];
-    }
-    let Ok(entries) = fs::read_dir(root) else { return vec![] };
-    let mut circuits = Vec::new();
-    let mut names: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
-            e.path().is_dir() && (n.starts_with("tt") || n.starts_with("TT"))
+    sorted_entries(&root.join("benchmark_circuits"), Path::is_dir)
+        .into_iter()
+        .flat_map(|cat| sorted_entries(&cat, |p| has_extension(p, &["sp"])))
+        .map(|sp| BenchmarkCircuit {
+            name: sp.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+            suite: Suite::Magical,
+            spice_path: sp,
         })
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-
-    let search_patterns: &[(&str, &str)] = &[
-        ("xschem", "*.spice"),
-        ("mag", "*_xschem.spice"),
-        ("mag", "*.spice"),
-        ("spi", "*.spice"),
-    ];
-
-    for name in names {
-        let d = root.join(&name);
-        let mut sp = None;
-        for &(subdir, _ext) in search_patterns {
-            let pattern = format!("{}/**/*.spice", d.display());
-            let candidates = find_spice_recursive(&d, subdir);
-            if let Some(c) = candidates.first() {
-                sp = Some(c.clone());
-                break;
-            }
-            let _ = pattern;
-        }
-        let Some(spice_path) = sp else { continue };
-
-        let gds_dir = d.join("gds");
-        let ref_gds = fs::read_dir(&gds_dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .find(|p| {
-                        p.file_name()
-                            .map_or(false, |n| {
-                                let s = n.to_string_lossy();
-                                s.starts_with("tt_") && s.ends_with(".gds")
-                            })
-                    })
-            });
-
-        circuits.push(BenchmarkCircuit {
-            name,
-            suite: Suite::TinyTapeout,
-            spice_path,
-            description: "TinyTapeout".into(),
-            ref_gds_path: ref_gds,
-        });
-    }
-    circuits
+        .collect()
 }
 
+/// Subdirectories a TinyTapeout repo keeps its schematic netlist in, in
+/// order of preference.
+const TT_NETLIST_DIRS: &[&str] = &["xschem", "mag", "spi"];
+
+/// TinyTapeout repos: every `tt*` directory (case-insensitive) under `root`,
+/// sorted, with its first netlist from the first [`TT_NETLIST_DIRS`] entry
+/// that has one ([`find_spice_recursive`]). A repo with none is skipped.
+pub fn discover_tinytapeout(root: &Path) -> Vec<BenchmarkCircuit> {
+    sorted_entries(root, |p| p.is_dir() && file_name(p).to_ascii_lowercase().starts_with("tt"))
+        .into_iter()
+        .filter_map(|d| {
+            let spice_path = TT_NETLIST_DIRS.iter().find_map(|sub| find_spice_recursive(&d, sub).into_iter().next())?;
+            Some(BenchmarkCircuit { name: file_name(&d), suite: Suite::TinyTapeout, spice_path })
+        })
+        .collect()
+}
+
+/// Every `.spice` file under `base` that sits below a directory named
+/// `subdir`, sorted, excluding extracted (`pex` anywhere in the path),
+/// simulation (`sim` in the name) and LVS (`lvs` in the name) netlists.
 fn find_spice_recursive(base: &Path, subdir: &str) -> Vec<PathBuf> {
+    let marker = format!("/{subdir}/");
     let mut results = Vec::new();
     walk_dir_recursive(base, &mut |path| {
         let path_str = path.to_string_lossy();
-        if !path_str.contains(&format!("/{subdir}/")) {
-            return;
+        let fname = file_name(path);
+        if path_str.contains(&marker)
+            && fname.ends_with(".spice")
+            && !path_str.contains("pex")
+            && !fname.contains("sim")
+            && !fname.contains("lvs")
+        {
+            results.push(path.to_path_buf());
         }
-        let fname = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if !fname.ends_with(".spice") {
-            return;
-        }
-        if path_str.contains("pex") || fname.contains("sim") || fname.contains("lvs") {
-            return;
-        }
-        results.push(path.to_path_buf());
     });
     results.sort();
     results
 }
 
+/// Calls `cb` on every non-directory entry below `dir`, depth first.
+/// Unreadable directories are skipped.
 fn walk_dir_recursive(dir: &Path, cb: &mut impl FnMut(&Path)) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -292,6 +229,8 @@ fn walk_dir_recursive(dir: &Path, cb: &mut impl FnMut(&Path)) {
     }
 }
 
+/// Every circuit of `suite`, in suite order: local, ALIGN, MAGICAL,
+/// TinyTapeout.
 pub fn discover_all(suite: Suite) -> Vec<BenchmarkCircuit> {
     let root = fixtures_dir();
     let mut circuits = Vec::new();
@@ -314,17 +253,24 @@ pub fn discover_all(suite: Suite) -> Vec<BenchmarkCircuit> {
 // Repo management
 // ---------------------------------------------------------------------------
 
+/// Makes every [`REPOS`] fixture present at its pinned revision (only for
+/// suites that include TinyTapeout): a missing one is fetched shallowly, one
+/// at another revision is moved to the pin.
+///
+/// # Errors
+/// `benchmarks/fixtures/` cannot be created, a fixture path exists but is not
+/// a git repository, or git fails or resolves to another revision. A failed
+/// first fetch removes its partial directory.
 pub fn clone_repos_if_needed(suite: Suite) -> std::io::Result<()> {
     let root = fixtures_dir();
     fs::create_dir_all(&root)?;
     // Local fixtures need no clones; ALIGN/MAGICAL come from `competition/` submodules.
-    if matches!(suite, Suite::Local | Suite::Align | Suite::Magical) {
+    if !suite.includes(Suite::TinyTapeout) {
         return Ok(());
     }
     for &(name, url, revision) in REPOS {
         let dest = root.join(name);
-        let created = !dest.exists();
-        if created {
+        if !dest.exists() {
             eprintln!("Fetching pinned fixture {name}@{}...", &revision[..12]);
             fs::create_dir_all(&dest)?;
             if let Err(error) = checkout_revision(&dest, name, url, revision, true) {
@@ -344,12 +290,12 @@ pub fn clone_repos_if_needed(suite: Suite) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `HEAD`'s commit id in `repo`.
+///
+/// # Errors
+/// git cannot run or `rev-parse` fails.
 fn current_revision(repo: &Path) -> std::io::Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "HEAD"])
-        .output()?;
+    let output = Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output()?;
     if !output.status.success() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -359,38 +305,33 @@ fn current_revision(repo: &Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Runs `git -C repo <args>`.
+///
+/// # Errors
+/// git cannot run or exits non-zero (`fixture` names it in the message).
 fn run_git(repo: &Path, fixture: &str, args: &[&str]) -> std::io::Result<()> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .status()?;
+    let status = Command::new("git").arg("-C").arg(repo).args(args).status()?;
     if status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("git {} failed for {fixture}", args.first().copied().unwrap_or("command")),
-        ))
+        Err(std::io::Error::other(format!(
+            "git {} failed for {fixture}",
+            args.first().copied().unwrap_or("command")
+        )))
     }
 }
 
-fn checkout_revision(
-    repo: &Path,
-    fixture: &str,
-    url: &str,
-    revision: &str,
-    initialize: bool,
-) -> std::io::Result<()> {
+/// Fetches `revision` shallowly from `url` into `repo` (first `git init` and
+/// adding the remote when `initialize`) and checks it out detached.
+///
+/// # Errors
+/// A git step fails, or `HEAD` does not end at `revision`.
+fn checkout_revision(repo: &Path, fixture: &str, url: &str, revision: &str, initialize: bool) -> std::io::Result<()> {
     if initialize {
         run_git(repo, fixture, &["init", "--quiet"])?;
         run_git(repo, fixture, &["remote", "add", "origin", url])?;
     }
-    run_git(
-        repo,
-        fixture,
-        &["fetch", "--quiet", "--depth", "1", "origin", revision],
-    )?;
+    run_git(repo, fixture, &["fetch", "--quiet", "--depth", "1", "origin", revision])?;
     run_git(repo, fixture, &["checkout", "--quiet", "--detach", revision])?;
     if current_revision(repo)? != revision {
         return Err(std::io::Error::new(
@@ -401,15 +342,14 @@ fn checkout_revision(
     Ok(())
 }
 
+/// Removes every git checkout directly under `benchmarks/fixtures/` (the
+/// cloned repos); loose netlists stay. Best effort.
 pub fn cleanup_fixtures() {
-    let root = fixtures_dir();
-    let Ok(entries) = fs::read_dir(&root) else { return };
+    let Ok(entries) = fs::read_dir(fixtures_dir()) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() && path.join(".git").is_dir() {
-            if fs::remove_dir_all(&path).is_ok() {
-                eprintln!("Removed {}", entry.file_name().to_string_lossy());
-            }
+        if path.join(".git").is_dir() && fs::remove_dir_all(&path).is_ok() {
+            eprintln!("Removed {}", entry.file_name().to_string_lossy());
         }
     }
 }
@@ -418,9 +358,20 @@ pub fn cleanup_fixtures() {
 // SPICE preprocessing: generic netlists → PDK-compatible format
 // ---------------------------------------------------------------------------
 
-/// FinFET nfin → planar W mapping (µm per fin).
+/// FinFET nfin → planar W mapping (µm per fin), for a deck without a fin
+/// pitch.
 const UM_PER_FIN: f64 = 0.1;
 
+/// Channel length given to a MOS card that states none, µm.
+const DEFAULT_L: &str = "0.15u";
+
+/// Model word a rewritten capacitor card uses. Neither deck defines a
+/// capacitor recogniser — `library::parse` classifies X-instances by model
+/// token (`cap`) and `cells::capacitor` draws them, so a bare "cap" model
+/// word is all a rewrite needs.
+const CAP_MODEL: &str = "cap";
+
+/// SPICE scale suffixes (case-insensitive), `meg` before `m` so it wins.
 const SI_SUFFIXES: &[(&str, f64)] = &[
     ("meg", 1e6),
     ("t", 1e12),
@@ -433,9 +384,11 @@ const SI_SUFFIXES: &[(&str, f64)] = &[
     ("f", 1e-15),
 ];
 
+/// Parses a SPICE number (`10k`, `2.5u`, `1.2e3`, `100meg`). Anything
+/// unparseable is 0.
 fn parse_si(s: &str) -> f64 {
     let s = s.trim().to_ascii_lowercase();
-    if s.contains('e') && s.as_bytes().last().map_or(false, |b| b.is_ascii_digit()) {
+    if s.contains('e') && s.as_bytes().last().is_some_and(u8::is_ascii_digit) {
         if let Ok(v) = s.parse::<f64>() {
             return v;
         }
@@ -450,23 +403,21 @@ fn parse_si(s: &str) -> f64 {
     s.parse().unwrap_or(0.0)
 }
 
+/// Whether `s` is a SPICE number: optional sign, a float, optional
+/// [`SI_SUFFIXES`] scale.
 fn is_numeric(s: &str) -> bool {
     let s = s.trim().to_ascii_lowercase();
     let s = s.strip_prefix('+').or_else(|| s.strip_prefix('-')).unwrap_or(&s);
     if s.is_empty() {
         return false;
     }
-    let base = SI_SUFFIXES
-        .iter()
-        .find_map(|&(suf, _)| s.strip_suffix(suf))
-        .unwrap_or(s);
-    if base.is_empty() {
-        return false;
-    }
-    base.parse::<f64>().is_ok()
+    let base = SI_SUFFIXES.iter().find_map(|&(suf, _)| s.strip_suffix(suf)).unwrap_or(s);
+    !base.is_empty() && base.parse::<f64>().is_ok()
 }
 
-fn resolve_param<'a>(s: &'a str, params: &'a HashMap<String, String>) -> String {
+/// Follows `.param` references from `s` (lowercased) until a word that is
+/// not a parameter, stopping on a cycle. The result is lowercase.
+fn resolve_param(s: &str, params: &HashMap<String, String>) -> String {
     let mut val = s.to_ascii_lowercase();
     let mut seen = std::collections::HashSet::new();
     while let Some(next) = params.get(&val) {
@@ -478,71 +429,66 @@ fn resolve_param<'a>(s: &'a str, params: &'a HashMap<String, String>) -> String 
     val
 }
 
+/// Every `name=value` of every `.param` line, names lowercased, a trailing
+/// comma dropped from values; a later definition wins.
 fn collect_spice_params(text: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim().to_ascii_lowercase();
-        if !trimmed.starts_with(".param") {
-            continue;
-        }
-        for tok in line.split_whitespace().skip(1) {
-            if let Some((k, v)) = tok.split_once('=') {
-                let v = v.trim_end_matches(',');
-                params.insert(
-                    k.trim().to_ascii_lowercase(),
-                    v.trim().to_owned(),
-                );
-            }
+    for line in text.lines().filter(|l| l.trim().to_ascii_lowercase().starts_with(".param")) {
+        for (k, v) in line.split_whitespace().skip(1).filter_map(|t| t.split_once('=')) {
+            params.insert(k.trim().to_ascii_lowercase(), v.trim_end_matches(',').trim().to_owned());
         }
     }
     params
 }
 
+/// Joins each line ending in `\` with the next, the backslash and the
+/// spaces around the join collapsed to one space.
 fn join_backslash(text: &str) -> String {
-    let mut joined = Vec::new();
+    let mut joined: Vec<String> = Vec::new();
     for line in text.split('\n') {
-        if let Some(last) = joined.last_mut() {
-            let s: &mut String = last;
-            if s.ends_with('\\') {
-                s.pop();
-                while s.ends_with(' ') {
-                    s.pop();
-                }
-                s.push(' ');
-                s.push_str(line.trim_start());
-                continue;
-            }
+        if let Some(s) = joined.last_mut().filter(|s| s.ends_with('\\')) {
+            s.pop();
+            s.truncate(s.trim_end_matches(' ').len());
+            s.push(' ');
+            s.push_str(line.trim_start());
+        } else {
+            joined.push(line.to_owned());
         }
-        joined.push(line.to_owned());
     }
     joined.join("\n")
 }
 
+/// Formats µm with at most 4 decimals, trailing zeros dropped, and a `u`
+/// suffix (`2.5` → `2.5u`, `10.0` → `10u`).
 fn fmt_um(val_um: f64) -> String {
-    format!("{:.4}", val_um)
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_owned()
-        + "u"
+    format!("{val_um:.4}").trim_end_matches('0').trim_end_matches('.').to_owned() + "u"
 }
 
-/// PDK data extracted for SPICE preprocessing.
-struct PdkPreprocess {
-    cap_model: Option<String>,
+/// The deck data the R/C and nfin rewrites need.
+struct Rewrite {
+    /// Resistor model word, `None` when the deck cannot size one (no default
+    /// recipe, no body sheet resistance or no min width): R cards stay as
+    /// written.
     res_model: Option<String>,
+    /// Capacitance density, fF/µm² (> 0).
     cap_density: f64,
+    /// Resistor body sheet resistance, Ω/□.
     r_sheet: f64,
+    /// Resistor body minimum width, µm.
     res_w: f64,
+    /// W per fin, µm.
     um_per_fin: f64,
-    /// The deck, for each MOS card's legal channel.
-    pdk: verify::Pdk,
 }
 
-impl PdkPreprocess {
+impl Rewrite {
     /// The resistor is the sidecar's default recipe, sized by its body's
     /// deck sheet resistance and min width; no recipe (or no sheet R), no
     /// rewrite. Cap density is the sidecar's `cap_density_ff_um2`, else 1.
-    fn load(sidecar: &str) -> Result<Self, String> {
+    /// A fin's share of W is the deck's fin pitch, else [`UM_PER_FIN`].
+    ///
+    /// # Errors
+    /// The sidecar does not parse as a deck.
+    fn load(sidecar: &str) -> Result<(Self, verify::Pdk), String> {
         use pnr_core::Process;
         let pdk = verify::Pdk::from_json(sidecar)?;
         let recipe = pdk.recipe("resistor", "");
@@ -550,222 +496,137 @@ impl PdkPreprocess {
         let r_sheet = body.as_ref().and_then(|o| o.sheet_ohm("rpoly")).map_or(0.0, f64::from);
         let res_w = body.as_ref().and_then(|o| o.width("rpoly")).map_or(0.0, |w| f64::from(w) / 1e3);
         let res_model = recipe.map(|r| r.model).filter(|m| !m.is_empty() && r_sheet > 0.0 && res_w > 0.0);
-        // Neither deck defines a capacitor recogniser — `library::parse`
-        // classifies X-instances by model token (`cap`) and `cells::capacitor`
-        // draws them, so a bare "cap" model word is all a rewrite needs.
         let cap_density = pdk.cell.get("cap_density_ff_um2").and_then(Value::as_f64).unwrap_or(1.0);
-        // A fin's share of W is the deck's fin pitch; a planar deck has none.
         let um_per_fin = pdk.width("fin").zip(pdk.space("fin")).map_or(UM_PER_FIN, |(w, s)| f64::from(w + s) / 1e3);
-        Ok(Self { cap_model: Some("cap".to_owned()), res_model, cap_density, r_sheet, res_w, um_per_fin, pdk })
+        drop(body);
+        Ok((Self { res_model, cap_density, r_sheet, res_w, um_per_fin }, pdk))
     }
 }
 
-/// Rewrite generic SPICE into PDK-compatible format.
+/// Rewrites generic SPICE into PDK-compatible format:
 ///
 /// - Backslash continuation joining
 /// - Bare caps/resistors with real W/L from cap density / sheet-R
 /// - Bare R/C with .param value references resolved
 /// - FinFET nfin→W synthesis when W is absent on MOSFET lines
 /// - MOS L and W below the deck's shortest legal channel raised to it
+///
+/// The result ends in a newline.
+///
+/// # Errors
+/// The deck at `pdk_path` cannot be read or parsed.
 pub fn preprocess_spice(text: &str, pdk_path: &Path) -> Result<String, String> {
     let text = join_backslash(text);
-    let pdk = PdkPreprocess::load(&fs::read_to_string(pdk_path).map_err(|e| e.to_string())?)?;
-    let spice_params = collect_spice_params(&text);
-
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let stripped = line.trim();
-        if stripped.is_empty()
-            || stripped.starts_with('*')
-            || stripped.starts_with('.')
-            || stripped.starts_with('+')
-        {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let tokens: Vec<&str> = stripped.split_whitespace().collect();
-        if tokens.len() < 3 {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let first = tokens[0].as_bytes()[0].to_ascii_lowercase();
-
-        // --- nfin→W synthesis for MOSFET lines ---
-        if first == b'm' || first == b'x' {
-            let kv: HashMap<String, &str> = tokens
-                .iter()
-                .filter_map(|t| t.split_once('='))
-                .map(|(k, v)| (k.to_ascii_lowercase(), v))
-                .collect();
-            let mut extra = String::new();
-            if !kv.contains_key("w")
-                && (kv.contains_key("nfin") || kv.contains_key("nf"))
-            {
-                let nfin_raw = kv.get("nfin").or_else(|| kv.get("nf")).unwrap_or(&"1");
-                let resolved = resolve_param(nfin_raw, &spice_params);
-                let nfin_val = parse_si(&resolved).max(1.0);
-                extra.push_str(&format!(" w={}", fmt_um(nfin_val * pdk.um_per_fin)));
-            }
-            if !kv.contains_key("l") {
-                extra.push_str(" l=0.15u");
-            }
-            if !extra.is_empty() {
-                out.push(format!("{stripped}{extra}"));
-                continue;
-            }
-            out.push(line.to_owned());
-            continue;
-        }
-
-        // --- bare C/R rewriting ---
-        if first != b'c' && first != b'r' {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let kv_start = tokens[1..]
-            .iter()
-            .position(|t| t.contains('='))
-            .map(|i| i + 1)
-            .unwrap_or(tokens.len());
-        let positional = &tokens[1..kv_start];
-
-        if positional.len() < 2 {
-            out.push(line.to_owned());
-            continue;
-        }
-
-        let kv: HashMap<String, String> = tokens[kv_start..]
-            .iter()
-            .filter_map(|t| t.split_once('='))
-            .map(|(k, v)| {
-                (
-                    k.to_ascii_lowercase(),
-                    resolve_param(v, &spice_params),
-                )
-            })
-            .collect();
-        let last_pos = positional.last().unwrap();
-        let last_lower = last_pos.to_ascii_lowercase();
-        let generic_model = matches!(
-            last_lower.as_str(),
-            "resistor" | "res" | "capacitor" | "cap"
-        );
-        let resolved = resolve_param(last_pos, &spice_params);
-
-        let (nodes, value) = if is_numeric(&resolved) {
-            (&positional[..positional.len() - 1], parse_si(&resolved))
-        } else if generic_model {
-            if first == b'c' && kv.contains_key("w") && kv.contains_key("l") {
-                if let Some(ref cap_model) = pdk.cap_model {
-                    let inst = tokens[0];
-                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
-                        inst.to_owned()
-                    } else {
-                        format!("X{inst}")
-                    };
-                    let kvs: Vec<String> = tokens[kv_start..]
-                        .iter()
-                        .filter_map(|t| t.split_once('='))
-                        .map(|(k, v)| {
-                            format!(
-                                "{}={}",
-                                k.to_ascii_lowercase(),
-                                resolve_param(v, &spice_params)
-                            )
-                        })
-                        .collect();
-                    out.push(format!(
-                        "{new_inst} {} {cap_model} {}",
-                        positional[..positional.len() - 1].join(" "),
-                        kvs.join(" "),
-                    ));
-                    continue;
-                }
-            }
-            let val_kv = if first == b'r' { kv.get("r") } else { kv.get("c") };
-            match val_kv.filter(|v| is_numeric(v)) {
-                Some(v) => (&positional[..positional.len() - 1], parse_si(v)),
-                None => {
-                    out.push(line.to_owned());
-                    continue;
-                }
-            }
-        } else {
-            out.push(line.to_owned());
-            continue;
-        };
-        let kv_params: Vec<String> = tokens[kv_start..]
-            .iter()
-            .filter_map(|t| t.split_once('='))
-            .filter(|(k, _)| {
-                let k = k.to_ascii_lowercase();
-                k != "r" && k != "c"
-            })
-            .map(|(k, v)| {
-                format!(
-                    "{}={}",
-                    k.to_ascii_lowercase(),
-                    resolve_param(v, &spice_params)
-                )
-            })
-            .collect();
-        let inst = tokens[0];
-
-        if first == b'c' {
-            if let Some(ref cap_model) = pdk.cap_model {
-                if value != 0.0 {
-                    let c_ff = value.abs() * 1e15;
-                    let area_um2 = c_ff / pdk.cap_density;
-                    let side = area_um2.sqrt().max(0.5);
-                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
-                        inst.to_owned()
-                    } else {
-                        format!("X{inst}")
-                    };
-                    let new_line = format!(
-                        "{new_inst} {} {cap_model} W={} L={} {}",
-                        nodes.join(" "),
-                        fmt_um(side),
-                        fmt_um(side),
-                        kv_params.join(" "),
-                    );
-                    out.push(new_line.trim_end().to_owned());
-                    continue;
-                }
-            }
-        } else if first == b'r' {
-            if let Some(ref res_model) = pdk.res_model {
-                if value != 0.0 {
-                    let r_val = value.abs();
-                    let w = pdk.res_w;
-                    let l = (r_val * w / pdk.r_sheet).max(w);
-                    let new_inst = if inst.to_ascii_uppercase().starts_with('X') {
-                        inst.to_owned()
-                    } else {
-                        format!("X{inst}")
-                    };
-                    let new_line = format!(
-                        "{new_inst} {} {res_model} W={} L={} {}",
-                        nodes.join(" "),
-                        fmt_um(w),
-                        fmt_um(l),
-                        kv_params.join(" "),
-                    );
-                    out.push(new_line.trim_end().to_owned());
-                    continue;
-                }
-            }
-        }
-
-        out.push(line.to_owned());
+    let (rw, pdk) = Rewrite::load(&fs::read_to_string(pdk_path).map_err(|e| e.to_string())?)?;
+    let params = collect_spice_params(&text);
+    let mut out: String = text.lines().map(|line| rewrite_line(line, &rw, &params) + "\n").collect();
+    if out.is_empty() {
+        out.push('\n');
     }
+    Ok(raise_channels(out, library::model_table(&pdk), |d| pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model)))
+}
 
-    let mut result = out.join("\n");
-    result.push('\n');
-    Ok(raise_channels(result, library::model_table(&pdk.pdk), |d| pdk.pdk.min_channel(d.kind == pnr_core::DeviceKind::Pmos, &d.model)))
+/// One card rewritten ([`rewrite_mos`], [`rewrite_rc`]), or `line` as is:
+/// blank lines, comments, dot-cards, continuations, cards of fewer than
+/// three tokens and other element kinds pass through.
+fn rewrite_line(line: &str, rw: &Rewrite, params: &HashMap<String, String>) -> String {
+    let stripped = line.trim();
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    if tokens.len() < 3 || matches!(stripped.as_bytes()[0], b'*' | b'.' | b'+') {
+        return line.to_owned();
+    }
+    let rewritten = match stripped.as_bytes()[0].to_ascii_lowercase() {
+        b'm' | b'x' => rewrite_mos(stripped, &tokens, rw, params),
+        kind @ (b'c' | b'r') => rewrite_rc(kind, &tokens, rw, params),
+        _ => None,
+    };
+    rewritten.unwrap_or_else(|| line.to_owned())
+}
+
+/// An `M`/`X` card with the size it lacks appended: `w` from `nfin` (else
+/// `nf`) fins when it has no `w`, [`DEFAULT_L`] when it has no `l`. `None`
+/// when it states both.
+fn rewrite_mos(stripped: &str, tokens: &[&str], rw: &Rewrite, params: &HashMap<String, String>) -> Option<String> {
+    let kv: HashMap<String, &str> =
+        tokens.iter().filter_map(|t| t.split_once('=')).map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+    let mut extra = String::new();
+    if !kv.contains_key("w") {
+        if let Some(nfin) = kv.get("nfin").or_else(|| kv.get("nf")) {
+            let fins = parse_si(&resolve_param(nfin, params)).max(1.0);
+            extra.push_str(&format!(" w={}", fmt_um(fins * rw.um_per_fin)));
+        }
+    }
+    if !kv.contains_key("l") {
+        extra.push_str(&format!(" l={DEFAULT_L}"));
+    }
+    (!extra.is_empty()).then(|| format!("{stripped}{extra}"))
+}
+
+/// The last value of parameter `key` in `kvs`.
+fn kv_get<'a>(kvs: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    kvs.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// `k=v` pairs, space-separated.
+fn join_kv<'a>(kvs: impl Iterator<Item = &'a (String, String)>) -> String {
+    kvs.map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")
+}
+
+/// `inst` as a subcircuit instance: `X`-prefixed unless it already is.
+fn x_instance(inst: &str) -> String {
+    if matches!(inst.as_bytes().first(), Some(b'x' | b'X')) { inst.to_owned() } else { format!("X{inst}") }
+}
+
+/// A bare `C`/`R` card (`kind` is `b'c'` or `b'r'`) as a sized deck
+/// instance, or `None` to keep it:
+///
+/// - a generic-model capacitor with `w` and `l` keeps them, model [`CAP_MODEL`];
+/// - a capacitor of value C becomes a square of side √(C / density), at
+///   least 0.5 µm;
+/// - a resistor of value R, when the deck has a resistor model, becomes
+///   min width W and length max(R·W / R_sheet, W).
+///
+/// The value is the last positional token (`.param`s resolved) when numeric,
+/// else, for a generic model word (`resistor`, `res`, `capacitor`, `cap`),
+/// its `r=`/`c=` parameter. A zero value keeps the card.
+fn rewrite_rc(kind: u8, tokens: &[&str], rw: &Rewrite, params: &HashMap<String, String>) -> Option<String> {
+    let kv_start = tokens[1..].iter().position(|t| t.contains('=')).map_or(tokens.len(), |i| i + 1);
+    let positional = &tokens[1..kv_start];
+    if positional.len() < 2 {
+        return None;
+    }
+    // `k=v` parameters, keys lowercased, values resolved, in card order.
+    let kvs: Vec<(String, String)> = tokens[kv_start..]
+        .iter()
+        .filter_map(|t| t.split_once('='))
+        .map(|(k, v)| (k.to_ascii_lowercase(), resolve_param(v, params)))
+        .collect();
+    let (last, nodes) = positional.split_last()?;
+    let nodes = nodes.join(" ");
+    let inst = x_instance(tokens[0]);
+    let resolved = resolve_param(last, params);
+    let value = if is_numeric(&resolved) {
+        parse_si(&resolved)
+    } else if matches!(last.to_ascii_lowercase().as_str(), "resistor" | "res" | "capacitor" | "cap") {
+        if kind == b'c' && kv_get(&kvs, "w").is_some() && kv_get(&kvs, "l").is_some() {
+            return Some(format!("{inst} {nodes} {CAP_MODEL} {}", join_kv(kvs.iter())));
+        }
+        parse_si(kv_get(&kvs, if kind == b'r' { "r" } else { "c" }).filter(|v| is_numeric(v))?)
+    } else {
+        return None;
+    };
+    if value == 0.0 {
+        return None;
+    }
+    let rest = join_kv(kvs.iter().filter(|(k, _)| k != "r" && k != "c"));
+    let (model, w, l) = if kind == b'c' {
+        let side = (value.abs() * 1e15 / rw.cap_density).sqrt().max(0.5);
+        (CAP_MODEL, side, side)
+    } else {
+        let model = rw.res_model.as_deref()?;
+        (model, rw.res_w, (value.abs() * rw.res_w / rw.r_sheet).max(rw.res_w))
+    };
+    Some(format!("{inst} {nodes} {model} W={} L={} {rest}", fmt_um(w), fmt_um(l)).trim_end().to_owned())
 }
 
 /// A generic fixture's MOS cards retargeted to the deck's shortest legal
