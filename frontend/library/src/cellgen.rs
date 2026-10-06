@@ -738,7 +738,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
 /// Share of the deck's point-to-point R limit one finger's poly may take:
 /// between the farthest attach points of a drawn row (fingers, end dummies,
 /// their stubs and straps) the checker sees up to ~1.6× a finger (measured on
-/// generic_finfet's 1 kΩ rule: rows fail from `R□·W_f/L` ≈ 0.63·limit).
+/// asap7's 1 kΩ rule: rows fail from `R□·W_f/L` ≈ 0.63·limit).
 const P2P_SHARE: f32 = 0.55;
 
 /// Per device, `(k, W_f/k)`: its schematic fingers (`nf·m`, each

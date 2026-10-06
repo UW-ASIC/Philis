@@ -785,7 +785,7 @@ mod tests {
     /// `routing_pitch_clears_every_layer_of_its_stack`).
     #[test]
     fn every_layer_pitch_clears_its_spacing() {
-        for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+        for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "asap7"] {
             let pdk = Pdk::builtin(deck).unwrap();
             let RoutingStack { p0, specs, .. } = routing_stack(&pdk, None).unwrap();
             for s in &specs {

@@ -90,7 +90,7 @@ impl Pdk {
     }
 
     /// A PDK compiled into the binary (`sky130`, `gf180mcu`, `ihp_sg13g2`,
-    /// `generic_finfet`): its sidecar and vendored deck, no filesystem read.
+    /// `asap7`): its sidecar and vendored deck, no filesystem read.
     ///
     /// # Errors
     /// An unknown name, or anything [`Pdk::load`] rejects.

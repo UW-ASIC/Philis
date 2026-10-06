@@ -43,9 +43,9 @@ fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
-/// Deck per suite: the finfet-flavoured suites default to `generic_finfet`, the
+/// Deck per suite: the finfet-flavoured suites default to `asap7`, the
 /// rest to `sky130`. `PNR_BENCH_PDK` overrides for every suite — either a deck
-/// name under `pdks/` (`sky130`, `generic_finfet`) or a path — so the same
+/// name under `pdks/` (`sky130`, `asap7`) or a path — so the same
 /// fixtures can be run against both decks and compared.
 fn pdk_path(suite: Suite) -> PathBuf {
     let root = repo_root();
@@ -54,7 +54,7 @@ fn pdk_path(suite: Suite) -> PathBuf {
         return if p.is_file() { p } else { root.join(format!("pdks/{o}.json")) };
     }
     match suite {
-        Suite::Align | Suite::Magical => root.join("pdks/generic_finfet.json"),
+        Suite::Align | Suite::Magical => root.join("pdks/asap7.json"),
         _ => root.join("pdks/sky130.json"),
     }
 }
@@ -543,7 +543,7 @@ fn main() {
         .unwrap_or(1);
     println!("Discovered {} circuits (seed {seed})", circuits.len());
 
-    // Cache loaded PDKs + render tables by path (sky130 vs generic_finfet).
+    // Cache loaded PDKs + render tables by path (sky130 vs asap7).
     let mut pdk_cache: HashMap<PathBuf, (Pdk, visualizer::LayerMap)> =
         HashMap::new();
 

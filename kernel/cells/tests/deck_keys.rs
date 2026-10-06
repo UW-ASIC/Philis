@@ -221,7 +221,7 @@ fn mos_env_follows_the_table() {
         resistor_env(MatchClass::Exceptional, &rec),
         PassiveEnv { min_dummies: 1, dummy_span_nm: 10000, width_floor_permille: 4000, length_floor_x: 10 }
     );
-    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "asap7"] {
         let p = verify::Pdk::builtin(deck).unwrap_or_else(|e| panic!("{deck}: {e}"));
         assert_eq!(missing_tiers(&p).count(), 0, "{deck}");
     }

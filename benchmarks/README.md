@@ -26,14 +26,14 @@ cargo run --release -p benchmark --bin bench magical 5          # first 5
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `PNR_BENCH_SEED` | `1` | SA seed. Results are seed-noisy — vary it before quoting numbers. |
-| `PNR_BENCH_PDK` | per-suite | Deck override: a name under `pdks/` (`sky130`, `generic_finfet`) or a path. |
+| `PNR_BENCH_PDK` | per-suite | Deck override: a name under `pdks/` (`sky130`, `asap7`) or a path. |
 
-Without the override, ALIGN and MAGICAL run on `generic_finfet` and everything
+Without the override, ALIGN and MAGICAL run on `asap7` and everything
 else on `sky130`. Set `PNR_BENCH_PDK` to run the same fixtures against both:
 
 ```sh
 PNR_BENCH_PDK=sky130         cargo run --release -p benchmark --bin bench align
-PNR_BENCH_PDK=generic_finfet cargo run --release -p benchmark --bin bench align
+PNR_BENCH_PDK=asap7 cargo run --release -p benchmark --bin bench align
 ```
 
 Each row is tagged `[Suite/deck]` so the two runs are distinguishable.

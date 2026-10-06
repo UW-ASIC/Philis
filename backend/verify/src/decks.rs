@@ -10,7 +10,7 @@ pub(crate) const DECKS: &[(&str, &str)] = &[
     ("sky130.deck", include_str!("../../../pdks/decks/sky130.deck")),
     ("gf180mcu.deck", include_str!("../../../pdks/decks/gf180mcu.deck")),
     ("ihp_sg13g2.deck", include_str!("../../../pdks/decks/ihp_sg13g2.deck")),
-    ("generic_finfet.deck", include_str!("../../../pdks/decks/generic_finfet.deck")),
+    ("asap7.deck", include_str!("../../../pdks/decks/asap7.deck")),
 ];
 
 /// `(PDK name, sidecar JSON)`, what [`crate::Pdk::builtin`] loads.
@@ -18,5 +18,15 @@ pub(crate) const SIDECARS: &[(&str, &str)] = &[
     ("sky130", include_str!("../../../pdks/sky130.json")),
     ("gf180mcu", include_str!("../../../pdks/gf180mcu.json")),
     ("ihp_sg13g2", include_str!("../../../pdks/ihp_sg13g2.json")),
-    ("generic_finfet", include_str!("../../../pdks/generic_finfet.json")),
+    ("asap7", include_str!("../../../pdks/asap7.json")),
 ];
+
+#[cfg(test)]
+mod tests {
+    /// The FinFET deck is ASAP7 and is named so; the old name is gone.
+    #[test]
+    fn asap7_is_built_in_under_its_own_name() {
+        assert!(crate::Pdk::builtin("asap7").is_ok());
+        assert!(crate::Pdk::builtin("generic_finfet").is_err());
+    }
+}

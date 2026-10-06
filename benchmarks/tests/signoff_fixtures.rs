@@ -308,7 +308,7 @@ fn fixtures_parse_to_a_non_empty_circuit() {
 /// resistor) is one `cell/undrawable` finding, not a silent gap.
 #[test]
 fn an_undrawable_device_is_one_finding() {
-    let deck = root().join("pdks/generic_finfet.json");
+    let deck = root().join("pdks/asap7.json");
     let pdk = verify::Pdk::from_json(&std::fs::read_to_string(&deck).expect("read deck")).expect("deck loads");
     for name in ["bjt_mirror", "rc_filter"] {
         let raw = std::fs::read_to_string(root().join(format!("benchmarks/fixtures/{name}.spice"))).expect("read fixture");

@@ -301,8 +301,8 @@ mod tests {
 
     fn deck() -> verify::Pdk {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let json = std::fs::read_to_string(root.join("pdks/generic_finfet.json")).expect("pdks/generic_finfet.json");
-        verify::Pdk::from_json(&json).expect("generic_finfet loads")
+        let json = std::fs::read_to_string(root.join("pdks/asap7.json")).expect("pdks/asap7.json");
+        verify::Pdk::from_json(&json).expect("asap7 loads")
     }
 
     /// `kind` group with per-member finger counts `nf` (ratio = counts).
@@ -390,7 +390,7 @@ mod tests {
 
     /// T1: separate and shared rows, Nmos and Pmos, DRC and ERC clean, with
     /// drains and gates private per member (a cross-member short is an ERC
-    /// finding). Release only: generic_finfet's ERC trips an engine debug
+    /// finding). Release only: asap7's ERC trips an engine debug
     /// assertion (`tests/cell_selfcheck.rs`, `the_mosfet_is_clean_on_every_deck`).
     #[cfg(not(debug_assertions))]
     #[test]

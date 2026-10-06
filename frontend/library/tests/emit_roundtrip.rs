@@ -182,9 +182,9 @@ fn chain2_roundtrips_through_ir() {
     // ── P4: the same IR retargets to a second deck ──
     let deck2 = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../pdks/generic_finfet.json"
+        "/../../pdks/asap7.json"
     ))
-    .expect("generic_finfet deck present");
+    .expect("asap7 deck present");
     let pdk2 = verify::Pdk::from_json(&deck2).expect("deck2 parses");
     let re2 = elaborate_ir(&ir, &pdk2, &ElabConfig::default()).expect("IR retargets");
     assert_eq!(re2.macros.len(), 2);

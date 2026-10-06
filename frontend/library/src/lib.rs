@@ -3416,7 +3416,7 @@ mod start_tests {
     #[test]
     fn substrate_kind_is_read_from_the_deck() {
         use pnr_core::SubstrateKind::{Bulk, Unknown};
-        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("generic_finfet", Unknown)] {
+        for (name, kind) in [("sky130", Bulk), ("gf180mcu", Unknown), ("ihp_sg13g2", Unknown), ("asap7", Unknown)] {
             let pdk = verify::Pdk::builtin(name).expect("deck loads");
             assert_eq!(crate::annotation(&pdk, &Default::default()).process.substrate, kind, "{name}");
         }
@@ -4077,7 +4077,7 @@ mod spacing_tests {
 
     #[test]
     fn shipped_cells_draw_no_unmapped_layer() {
-        for deck in ["gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+        for deck in ["gf180mcu", "ihp_sg13g2", "asap7"] {
             // Print only: those decks keep `fallback` for unmapped layers.
             match std::panic::catch_unwind(|| unmapped(deck)) {
                 Ok(m) => eprintln!("{deck}: shapes on unmapped layers {m:?}"),

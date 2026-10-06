@@ -347,15 +347,15 @@ fn ota5t_clean_on_sky130() {
 }
 
 #[test]
-fn ota5t_clean_on_generic_finfet() {
+fn ota5t_clean_on_asap7() {
     let deck = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../pdks/generic_finfet.json"
+        "/../../pdks/asap7.json"
     ))
-    .expect("generic_finfet deck present");
+    .expect("asap7 deck present");
     // The synthetic deck names no real foundry models, so only the structure is
     // gated here; sky130 is where the model-name claim is checkable.
-    elaborate_on(&deck, "generic_finfet", None);
+    elaborate_on(&deck, "asap7", None);
 }
 
 /// The deck's MOS device kind (via `verify`'s re-export of the engine).

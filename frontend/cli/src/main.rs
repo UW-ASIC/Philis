@@ -7,7 +7,7 @@
 //! ```
 //!
 //! `<pdk>` (or `--pdk`) is a sidecar `*.json`, or the name of one compiled in
-//! (`sky130`, `gf180mcu`, `ihp_sg13g2`, `generic_finfet`).
+//! (`sky130`, `gf180mcu`, `ihp_sg13g2`, `asap7`).
 //!
 //! Flags: `-o/--out DIR` (default `./philis_out/<netlist stem>/`), `--seed N`,
 //! `--iters/--max-iters N` (epochs per assignment), `--outer N` (assignments),
@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: philis [run|emit] <netlist.sp> [<pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet>] [out.rs] \
+const USAGE: &str = "usage: philis [run|emit] <netlist.sp> [<pdk.json | sky130 | gf180mcu | ihp_sg13g2 | asap7>] [out.rs] \
                      [--pdk P] [-o|--out DIR] [--seed N] [--iters N] [--outer N] [--starts N] [--size spice|per-finger] [--top NAME] \
                      [--op-lib PATH [--corner C] [--vdd V] [--temp C] [--testbench FILE]] [--perf SPECS.json] [--interface FILE] [--constraints FILE] [--hierarchy flat|auto|bottom-up:N] [--out-rs FILE]";
 

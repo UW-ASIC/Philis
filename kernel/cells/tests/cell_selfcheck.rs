@@ -327,14 +327,14 @@ fn a_bipolar_draws_its_well_only_as_its_construction() {
 /// so no variant may be clean only on the one it was written against.
 ///
 /// The other generators: [`every_generator_is_clean_on_every_deck`].
-/// `generic_finfet` runs in release only: its ERC trips an engine debug
+/// `asap7` runs in release only: its ERC trips an engine debug
 /// assertion (GPurify `electrical.rs`) unrelated to the geometry.
 #[cfg(not(debug_assertions))]
 #[test]
 fn the_mosfet_is_clean_on_every_deck() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut dirty = Vec::new();
-    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "asap7"] {
         let Ok(json) = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))) else { continue };
         let pdk = verify::Pdk::from_json(&json).expect("deck loads");
         // A fin deck draws its MOS with the FinFET generator (`cellgen`).
@@ -400,8 +400,8 @@ fn every_generator_is_clean_on_every_deck() {
 const UNDRAWABLE: &[(&str, DeviceKind, &str)] = &[
     ("gf180mcu", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
     ("ihp_sg13g2", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
-    ("generic_finfet", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
-    ("generic_finfet", DeviceKind::Resistor, "no rpoly role (resistor.rs:23)"),
+    ("asap7", DeviceKind::Npn, "no npn_isolation (bjt.rs:34)"),
+    ("asap7", DeviceKind::Resistor, "no rpoly role (resistor.rs:23)"),
     ("*", DeviceKind::Inductor, "no recogniser (inductor.rs)"),
 ];
 
@@ -456,7 +456,7 @@ fn every_generator_enumerates_on_every_deck() {
         }
     };
     let mut wrong = Vec::new();
-    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+    for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "asap7"] {
         let json = std::fs::read_to_string(root.join(format!("pdks/{deck}.json"))).unwrap_or_else(|e| panic!("pdks/{deck}.json: {e}"));
         let pdk = verify::Pdk::from_json(&json).expect("deck loads");
         let lmin = pnr_core::Process::rule(&pdk, "min_gate_l", 150);
