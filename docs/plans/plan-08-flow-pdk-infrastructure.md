@@ -102,7 +102,7 @@ Placement internals and representation (PLC), router internals and the routing s
 
 | # | Fact | Where |
 |---|---|---|
-| I1 | Layout and LVS draw `max(nf, m)` fingers of the written `w`; the op/perf card passes `W={w} L={l} nf={nf}` (BSIM4 reads W as the instance total [UNVERIFIED in ref/: no BSIM4 manual among the sources; standard BSIM4 NF semantics, as AF-01 states]) and drops `m`. ota.spice XM1 (`W=10u nf=2`) is drawn with 20 µm of channel and simulated with 10 µm; XM5 (`W=40u m=4`) is drawn with 160 µm and simulated with 40 µm. | backend/annotator/src/constraints.rs:21–24; backend/annotator/src/lib.rs:155–161; frontend/library/src/cellgen.rs:565, 712, 879–884; frontend/library/src/oppoint.rs:270–286; frontend/library/src/lib.rs:792; benchmarks/fixtures/ota.spice:3–7 (AF-01, AR-46) |
+| I1 | Layout and LVS draw `max(nf, m)` fingers of the written `w`; the op/perf card passes `W={w} L={l} nf={nf}` (BSIM4 reads W as the instance total [UNVERIFIED in docs/ref/: no BSIM4 manual among the sources; standard BSIM4 NF semantics, as AF-01 states]) and drops `m`. ota.spice XM1 (`W=10u nf=2`) is drawn with 20 µm of channel and simulated with 10 µm; XM5 (`W=40u m=4`) is drawn with 160 µm and simulated with 40 µm. | backend/annotator/src/constraints.rs:21–24; backend/annotator/src/lib.rs:155–161; frontend/library/src/cellgen.rs:565, 712, 879–884; frontend/library/src/oppoint.rs:270–286; frontend/library/src/lib.rs:792; benchmarks/fixtures/ota.spice:3–7 (AF-01, AR-46) |
 | I2 | The parser skips every `.`-directive (so `.subckt` ports are lost and several sub-circuits merge into one namespace), keeps only `w l nf nfin stack m multi`, reads `.param` names and expressions as 0, drops R/C/L values, rejects V/I/E/F/G/H/B/K cards, treats the title line as a card, and interns net names case-sensitively. | frontend/library/src/parse.rs:35–39, 61–62, 95–104, 17–31, 253 (AF-02, AF-17) |
 | I3 | `X` calls are classified by model-name substrings: `reset_logic` → resistor, `window_cmp` → inductor, gf180 `ppolyf_u` and IHP `rsil`/`rppd` → NMOS; an unknown user sub-circuit becomes an NMOS. | parse.rs:157–161, 189–206; pdks/gf180mcu.json:86–89; pdks/ihp_sg13g2.json:81–97 (AF-10) |
 | I4 | A 4-node BJT silently drops its substrate node. | parse.rs:88–92, 211–218 |
@@ -1212,7 +1212,7 @@ EXT-26 → FLOW-12 `--constraints` only; MAT-07 / MAT-09 / MAT-10 / REL-05 / REL
 
 1. **Input size convention of the competition suites.** ALIGN and MAGICAL netlists may state `w` per finger (the
    `five_transistor_ota` test deck, parse.rs:274–279, has `w=10.5e-7 nf=10`, i.e. 105 nm per finger under SPICE
-   semantics, below sky130's 420 nm minimum — which suggests a per-finger source). Not given in ref/. **Default:**
+   semantics, below sky130's 420 nm minimum — which suggests a per-finger source). Not given in docs/ref/. **Default:**
    `SizeConvention::Spice` for local fixtures and user netlists; `PerFinger` for the ALIGN/MAGICAL suites after one
    manual check of each suite's convention.
 2. **Deck ownership.** Vendoring decouples Philis from GPurify releases (same org, UW-ASIC). **Default:** vendor
@@ -1263,7 +1263,7 @@ figures (331/1/2, 539.5 s).
 **Corrections (before → after):**
 1. §1.1 L2: "PLAN.md:178 grounds PathFinder convergence on a fixed resource graph" → PLAN.md:178 states only the
    history-term argument; the fixed-graph premise is marked as this plan's inference (same fix in FLOW-08 Why).
-2. §1.2 I1: "BSIM4 reads W as the instance total" → kept, tagged [UNVERIFIED in ref/].
+2. §1.2 I1: "BSIM4 reads W as the instance total" → kept, tagged [UNVERIFIED in docs/ref/].
 3. §1.2 I6: "`l=0.15u` appended to every `m`/`x` card" → "…that states no `l`" (benchmarks/src/fixtures.rs:611–613).
 4. §1.3 D3: `pdk.rs:1225–1276` → `pdk.rs:1225–1269` (`parse_roles` ends at 1269; 1271+ is `deck_grid`).
 5. §1.3 D4 and FLOW-04 step 5: unread-demand lists omitted `p_epi_thickness` (and step 5 omitted `tie_max_dist_nm`) →
@@ -1291,7 +1291,7 @@ figures (331/1/2, 539.5 s).
     Hastings' "5–10 µm" → tagged [policy: lower end].
 18. FLOW-06 step 3: Eq 15.25 "PDF pp.821–822" → "PDF p.821" (L48776–48791 lie between the 819 and 820 footers).
 19. FLOW-06 step 4: `pdk.rs:1078–1147` → `Recipe` pdk.rs:1077–1085, `Pdk::recipe` pdk.rs:1129–1144.
-20. FLOW-06 step 7: "not given in ref/" → no deck-specific value; Charbon gives generic classes (SUB-01).
+20. FLOW-06 step 7: "not given in docs/ref/" → no deck-specific value; Charbon gives generic classes (SUB-01).
 21. FLOW-07 Why: quote "Netlist + Spec" (perf_driven_survey.txt L56–72; not found verbatim) → "Given a netlist and
     design specifications" (L59–60).
 22. FLOW-07 step 1: "~20 struct literals in tests" → 20 `Netlist { … }` literals, in tests and in library code
@@ -1326,11 +1326,11 @@ figures (331/1/2, 539.5 s).
 37. FLOW-15 step 4: `polys_from_shapes (lib.rs:1188–1201)` → `kernel/visualizer/src/lib.rs:1188–1201`.
 
 **Unresolved (left as stated or tagged inline):**
-- BSIM4 "W is the instance total, NF splits it": no BSIM4 manual in `ref/`; tagged [UNVERIFIED in ref/] in §1.2 I1.
+- BSIM4 "W is the instance total, NF splits it": no BSIM4 manual in `docs/ref/`; tagged [UNVERIFIED in docs/ref/] in §1.2 I1.
 - PLAN.md:178's fixed-resource-graph premise: an inference, marked as such in L2 and FLOW-08.
 - D7's "`licon_po` if layer ids follow declaration order": GPurify's id assignment order was not traced.
 - OQ-1 (ALIGN/MAGICAL size convention): the competition submodules' netlists were not read; the plan already says
-  "not given in ref/".
+  "not given in docs/ref/".
 - §1.6 #4 (AP-05, origins off-lattice by 5 nm) and R3 (331/1/2 tests, 539.5 s bench) are taken from audit-04/audit-06;
   not re-run (no cargo, per task rules).
 - Proposed constants tagged [policy]/[measure] (COLD_EVERY, warm schedule, dp seed constant, 5 % antenna tolerance)
@@ -1353,7 +1353,7 @@ figures (331/1/2, 539.5 s).
 | FLOW-09 step 2 (previous): `performance_rows` reuses the first topology's classes | Replaced | Circular: `perf_rows` are an input of the topology (lib.rs:267–269). Replaced by one up-front `annotate` in `run`. |
 | FLOW-03 acceptance: rewrite `drift_decreases_as_prices_settle` | Dropped | With slack measured as `worst_usage` else `1 − criticality`, the existing test rule has `g = 0` at residual 0; the test passes unchanged. |
 | AR-29: `Process::rule(name) -> Option<i32>` | Deferred | Touches every generator call site; FLOW-04's `required` rows already make a missing key a load error on shipped decks. Revisit when a deck without a compiled default is added. |
-| AF-15 third point: re-measure `P2P_SHARE` (cellgen.rs:593–597) on a second deck | Deferred | Needs a measurement on gf180/ihp p2p rules; no data in the repo or ref/. |
+| AF-15 third point: re-measure `P2P_SHARE` (cellgen.rs:593–597) on a second deck | Deferred | Needs a measurement on gf180/ihp p2p rules; no data in the repo or docs/ref/. |
 | REL-06 steps 1–2 (LU rules, `tie_max_dist_nm`) and REL-02 step 6 (`ar.met3.1` 845 nm) | Landed here, not duplicated | Same deck/sidecar edits as FLOW-05 steps 1, 2, 6; FLOW owns the deck files (M0). REL-06 keeps its CELL contract and fixture tally. |
 
 ---

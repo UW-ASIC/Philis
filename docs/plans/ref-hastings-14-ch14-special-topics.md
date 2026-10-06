@@ -2,7 +2,7 @@
 
 Source: R. A. Hastings, *The Art of Analog Layout*, 3rd ed. (Pearson 2023), Chapter 14 "Special Topics", printed pp. 721–779.
 Reftext file: `scratchpad/reftext/hastings.txt`, lines **42876–46303** (all read).
-PDF: `ref/The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings ...pdf`. PDF page index = 1 + count of `\f` before the line; the printed page number is PDF page − 1. Because `pdftotext` drops inline math, I read PDF pages 723–725, 728–730, 735–736, 739–741, 745–746, 748–755, 758–775 as images to recover the equations and numbers. Every number below that the reftext leaves blank comes from those page images. Where a value is not legible in either source, the entry says "not given".
+PDF: `docs/ref/The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings ...pdf`. PDF page index = 1 + count of `\f` before the line; the printed page number is PDF page − 1. Because `pdftotext` drops inline math, I read PDF pages 723–725, 728–730, 735–736, 739–741, 745–746, 748–755, 758–775 as images to recover the equations and numbers. Every number below that the reftext leaves blank comes from those page images. Where a value is not legible in either source, the entry says "not given".
 
 Glossary used below: NMoat/PMoat = N+/P+ active (NSD/PSD). ECGR/HCGR = electron-/hole-collecting guard ring. EBGR/HBGR = electron-/hole-blocking guard ring. NBL = N buried layer. Deep-N+ = sinker. DNW = deep N-well (the sky130 `dnwell`). HBM/CDM = human-body/charged-device model.
 

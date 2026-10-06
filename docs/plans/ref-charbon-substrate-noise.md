@@ -1,6 +1,6 @@
 # Charbon, Gharpurey, Miliozzi, Meyer, Sangiovanni-Vincentelli — *Substrate Noise: Analysis and Optimization for IC Design* (Kluwer 2001)
 
-- Source PDF: `ref/Substrate Noise : Analysis and Optimization for IC Design -- Edoardo Charbon; ... .pdf`
+- Source PDF: `docs/ref/Substrate Noise : Analysis and Optimization for IC Design -- Edoardo Charbon; ... .pdf`
 - Reftext: `scratchpad/reftext/charbon_substrate.txt` (5063 lines, `pdftotext -layout`, pages split by form feed).
 - Range read: **lines 1–5063 (entire file)**.
 - Page convention: "p.N" is the printed book page; "PDF M" is the PDF page (M = N + 23 for the body; checked against the form-feed count, e.g. L3209 → PDF 122 = p.99).

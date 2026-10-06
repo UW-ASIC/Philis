@@ -50,7 +50,7 @@ task prompt to PATH.
   (`if $x … else default`). This also removes the PDK_ROOT trap (run_lvs.py:116–123).
 - Files to delete exist: benchmarks/xcheck.py, xcheck_pex.py, xcheck_lvs.py, xcheck_selftest.py,
   benchmarks/examples/drc_gds.rs. Other references: benchmarks/README.md:80 `## Cross-checking GPurify (xcheck)`,
-  docs/CRATES.md (open issue 1); ref/Notes/*.html|js are reference notes, leave them.
+  docs/CRATES.md (open issue 1); docs/ref/Notes/*.html|js are reference notes, leave them.
 
 ### Edits
 1. `flake.nix` devShell `buildInputs` (after `pkgs.klayout`, :85): `pkgs.magic-vlsi` `pkgs.netgen-vlsi`.

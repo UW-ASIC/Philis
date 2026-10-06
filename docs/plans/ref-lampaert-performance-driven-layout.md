@@ -1,6 +1,6 @@
 # Lampaert, Gielen, Sansen: Analog Layout Generation for Performance and Manufacturability (1999), study for Philis
 
-Source: K. Lampaert, G. Gielen, W. Sansen, *Analog Layout Generation for Performance and Manufacturability*, Kluwer/Springer 1999 (LAYLA). The PDF is `ref/Analog Layout Generation for Performance and -- Koen Lampaert ... .pdf`.
+Source: K. Lampaert, G. Gielen, W. Sansen, *Analog Layout Generation for Performance and Manufacturability*, Kluwer/Springer 1999 (LAYLA). The PDF is `docs/ref/Analog Layout Generation for Performance and -- Koen Lampaert ... .pdf`.
 Reftext: `scratchpad/reftext/lampaert.txt`, **lines 1–7750 (whole file)**. PDF page numbers follow the task rule `1 + count(\f)` and were checked against the page images; book page = PDF page − 12 or − 13.
 Entry prefix: `LAMP-NN`. "Philis status" gives file:line evidence from a short grep of the tree as of 2026-09-28. It is not a code audit.
 

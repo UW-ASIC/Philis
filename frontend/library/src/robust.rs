@@ -190,7 +190,7 @@ pub fn linear_joint_yield(tables: &[SensTable], sigma_v: &[Option<f64>], post: &
 
 /// Standard normal cdf, `0.5·erfc(−x/√2)`; erfc by Abramowitz–Stegun 7.1.26
 /// (|error| ≤ 1.5e-7) for `z ≥ 0`, `2 − erfc(−z)` below, so `Φ(x) + Φ(−x) =
-/// 1` exactly. An implementation choice, not from ref/.
+/// 1` exactly. An implementation choice, not from docs/ref/.
 #[must_use]
 pub fn phi(x: f64) -> f64 {
     fn erfc(z: f64) -> f64 {

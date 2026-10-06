@@ -1,6 +1,6 @@
 # Lienig & Thiele, *Fundamentals of Electromigration-Aware Integrated Circuit Design* (Springer 2018): study for Philis
 
-- Source: J. Lienig, M. Thiele, *Fundamentals of Electromigration-Aware Integrated Circuit Design*, Springer 2018, ISBN 978-3-319-73557-3. PDF: `ref/Fundamentals of Electromigration-Aware Integrated Circuit -- Jens Lienig,Matthias Thiele ... .pdf`.
+- Source: J. Lienig, M. Thiele, *Fundamentals of Electromigration-Aware Integrated Circuit Design*, Springer 2018, ISBN 978-3-319-73557-3. PDF: `docs/ref/Fundamentals of Electromigration-Aware Integrated Circuit -- Jens Lienig,Matthias Thiele ... .pdf`.
 - Reftext: `scratchpad/reftext/lienig_em.txt` (7770 lines).
 - Range read: lines 1–7770, the whole file (front matter, Chapters 1–5, all reference lists, index).
 - Page convention: "PDF p." = 1 + number of form feeds before the line. Book page = PDF page − 12 (book p.1 = PDF p.13).

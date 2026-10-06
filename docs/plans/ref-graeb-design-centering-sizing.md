@@ -1,6 +1,6 @@
 # Graeb — Analog Design Centering and Sizing (Springer 2007): study for Philis
 
-Source: Helmut E. Graeb, *Analog Design Centering and Sizing*, Springer, 2007 (ISBN 978-1-4020-6003-8). PDF: `ref/Analog Design Centering and Sizing -- Helmut E_ Graeb -- 2007 ... .pdf`.
+Source: Helmut E. Graeb, *Analog Design Centering and Sizing*, Springer, 2007 (ISBN 978-1-4020-6003-8). PDF: `docs/ref/Analog Design Centering and Sizing -- Helmut E_ Graeb -- 2007 ... .pdf`.
 Reftext file: `scratchpad/reftext/graeb_centering.txt` (pdftotext -layout), **lines 1–8560 (entire file) read**.
 Page convention: "PDF p.N" = 1 + number of form feeds before the cited line (the book's printed page is roughly PDF p. − 18…20; printed numbers appear in the running heads quoted in the reftext).
 

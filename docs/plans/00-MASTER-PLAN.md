@@ -763,7 +763,7 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | `rotate_90_allowed`, `placement_space` | bool / table | deck rules | PLC-03, PLC-07 |
 | `em_front_row_cuts`, `res_tox_nm`, `res_self_heat_dt_k`, `metal_family`, `ecgr_min_width_nm` | numbers / string | per REL items | REL-12, REL-13, REL-17, REL-07 |
 | `latent_merge_nm` | optional integer | layer minimum spacing | GAP-13 |
-| `v_max_mv` per capacitor recipe | number or null (null on every shipped deck) | not given in ref/ for sky130 MIM | GAP-17 |
+| `v_max_mv` per capacitor recipe | number or null (null on every shipped deck) | not given in docs/ref/ for sky130 MIM | GAP-17 |
 | Deck edits (vendored `pdks/decks/*.deck`, `# PHILIS:` markers): LU.2/LU.2.1/LU.3, `ar.met3.1` 845 nm, `pex rbody_po/high/xhigh`, MOS 4-terminal bulk, n-well net, BJT recognisers | deck lines | foundry files cited in FLOW-05, PERF-18 | FLOW-05 (numbers), PERF-18 (recognisers) |
 
 ### 6.4 Open questions that need the owner (defaults in force until answered)
@@ -814,7 +814,7 @@ should patch their text when they pick up an item. Master decisions beyond the c
 | `plan-06-reliability-and-substrate.md` | REL-01…REL-18: EM current inputs, antenna agreement with signoff, per-shape EM, IR, junction temperature, ring policy by role, op-point voltage checks, refinements; deferred waveform EM and substrate macromodel |
 | `plan-07-performance-loop-signoff-benchmarks.md` | PERF-01…PERF-30: honest signoff, faithful simulation, scenarios, sensitivity engine, σ_f/β, β epoch key, PEX fidelity, complete LVS, foundry judge, bench v2, hand-layout comparison, Monte Carlo, ALRC, A/B |
 | `plan-08-flow-pdk-infrastructure.md` | FLOW-01…FLOW-17: size convention, epoch key, one dual step, vendored decks and key registry, deck fixes, parser, warm/cold loop, runtime, fill in the certificate, hierarchy, CLI and labelled GDS, emit round trip, CI |
-| `ref-00-prior-notes-handbook.md` | Bridge from the earlier `ref/Notes` HTML handbook: 84-family catalog, roadmap R1–R24 re-checked against the tree, stale claims, NOTES-01…60 |
+| `ref-00-prior-notes-handbook.md` | Bridge from the earlier `docs/ref/Notes` HTML handbook: 84-family catalog, roadmap R1–R24 re-checked against the tree, stale claims, NOTES-01…60 |
 | `ref-hastings-01-ch01-04-physics-fab-layout-process.md` | Hastings ch. 1–4 (physics, fabrication, rules, processes): voltage-dependent spacing, taps, marker layers, orientation; H01-01…48 |
 | `ref-hastings-05-ch05-failure-mechanisms.md` | Hastings ch. 5 (EOS, EM, TDDB, ESD, antenna, HCI/BTI, latch-up, guard rings) with equations recovered from the PDF; H05-01…58 |
 | `ref-hastings-06-ch06-07-resistors-capacitors-inductors.md` | Hastings ch. 6–7: resistor segmentation value, capacitor orientation and types, inductor rules; H06-01…56 |

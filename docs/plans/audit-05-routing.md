@@ -157,7 +157,7 @@ A **two-stage router**. The first stage is a **coarse 2-D gcell negotiator whose
    - `dr` knows placed geometry goes negative and shifts for it (dr:209–219). `price_group` handles its own offset (gr:113–124). `GlobalRoute::route` does neither.
 2. **Capacity 6 is a constant**, unrelated to gcell size, pitch or layer count (gr:31–35, 466–469). On a 16×16 grid over a 50 µm die a gcell is ≈3.1 µm, about 6–7 sky130 tracks per layer across 2 layers. Over a 200 µm die a gcell is 12.5 µm and holds ~27 tracks per layer. Overflow is therefore not a routability measure.
 3. **The global graph is single-layer** (gr:106–108, 190–192, 504–507). There is no layer assignment, no via cost and no per-layer capacity. The output segments are all on `layers[0]`, which also makes the discarded analog scores wrong: `Differential`, `ParasiticBudget` and `Antenna` all see one layer.
-4. **PathFinder p_fac is constant across iterations** (gr:1019–1043). McMurchie–Ebeling PathFinder raises the present-congestion factor each iteration to force convergence (external knowledge, not in ref/). Here convergence relies on history growth alone, so the ≤40-iteration cap is the real terminator.
+4. **PathFinder p_fac is constant across iterations** (gr:1019–1043). McMurchie–Ebeling PathFinder raises the present-congestion factor each iteration to force convergence (external knowledge, not in docs/ref/). Here convergence relies on history growth alone, so the ≤40-iteration cap is the real terminator.
    - History is added (`hist + p_fac·over`), where PathFinder multiplies (`(b+h)·p`).
    - `moved` is true whenever any dirty net was rerouted, even onto an identical path (gr:1032–1035), so the "no-move" stop rarely fires.
 5. **Negotiation history never decays and is keyed by absolute 500 nm buckets across placements** (gr:37–92). The comment's "anti-oscillation guarantee" holds for a fixed routing problem. Here the placement changes every epoch, so stale congestion prices from earlier placements accumulate monotonically (`max` fold, no decay). Two further effects:
@@ -344,7 +344,7 @@ Rule-level defects are audit-02's (AR-05 EM best-segment, AR-06 shield min-of-si
 
 ## 3. Gap analysis against "best constraint-aware analog P&R that beats hand layout"
 
-Each row is what an expert or the state of the art does, then what Philis does. Items marked *external* are not in `ref/` and are general knowledge about the named tools.
+Each row is what an expert or the state of the art does, then what Philis does. Items marked *external* are not in `docs/ref/` and are general knowledge about the named tools.
 
 1. **Use every useful layer, with per-layer width and pitch.**
    - *Expert / SotA:* Lampaert §5.2 requires n-layer routing ("an analog routing algorithm has to take advantage of all available routing layers", lampaert.txt:5472–5476, p132). ROAD routes on a 3-D non-uniform grid (survey §4.5.3.2, balasa_graeb_survey.txt:9407–9431, pp. 187–188).

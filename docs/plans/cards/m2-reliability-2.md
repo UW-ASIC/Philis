@@ -161,7 +161,7 @@ fn drop_uv(self, r: &Routes) -> Option<f32> {
    pub fn rise_bound_mc(p_uw: &[i32], footprint_nm: &[(i32, i32)], k_w_per_m_k: f32) -> f32
    ```
 2. `oppoint.rs` `OpConfig`: `pub theta_ja_c_per_w: Option<f64>` after `temp_c` (doc: package θ_JA, Hastings eq. 5.1;
-   `None` = no package rise, since no ref/ source or deck gives one). Default `None`.
+   `None` = no package rise, since no docs/ref/ source or deck gives one). Default `None`.
 3. `lib.rs:428`: replace the temperature argument with `t_em_k`:
    ```rust
    // Per cell, the variant whose eq. 5.6 self term is largest: it bounds every variant's mutual term too.

@@ -2,7 +2,7 @@
 
 Source: R. A. Hastings, *The Art of Analog Layout*, 3rd ed. (Pearson, 2023), chapter 5 (book pp. 210–273).
 Reftext file: `/tmp/claude-1000/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/scratchpad/reftext/hastings.txt`, lines **11865–15989** (read in full).
-PDF: `ref/The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings ....pdf`. PDF page = printed book page + 1 in this chapter (the printed page number line `NNN` in the reftext closes book page NNN). The `pdftotext -layout` output drops almost every inline number, unit and equation (they are MathML images), so the PDF pages were read to recover them (see §1).
+PDF: `docs/ref/The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings ....pdf`. PDF page = printed book page + 1 in this chapter (the printed page number line `NNN` in the reftext closes book page NNN). The `pdftotext -layout` output drops almost every inline number, unit and equation (they are MathML images), so the PDF pages were read to recover them (see §1).
 
 Entry ID prefix: **H05-NN**. Stage keys: annotator | cells | gp | dp | gr | dr | verify | flow | deck.
 

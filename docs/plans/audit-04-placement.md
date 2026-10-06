@@ -520,8 +520,8 @@ Hastings puts well edges 3–5 µm from matched gates (L41265–41322, p.695–6
 **G11. Warm start and incremental improvement.** PLAN §1 wants the topological representation carried between iterations (`PLAN.md` line 52). Philis re-piles every epoch (AP-09). A feasible incumbent is never refined further in placement; only prices move.
 
 **G12. ALIGN / MAGICAL.**
-- **In ref/:** they are "two representative open-source analog PNR software tools" (`perf_driven_survey.txt` L56–57, p.1). The same survey cites "Are analytical techniques worthwhile for analog IC placement?" ([46], L504–505, p.7), "Device layer-aware analytical placement" ([47], L506–507) and "LDE-aware analytical analog placement" ([56], L537–538).
-- **Not in ref/ (unverified here):** their published placers run analytical global placement with symmetry as penalty, then an LP/ILP detailed placement in which symmetry axes are linear equalities and spacing is linear constraints.
+- **In docs/ref/:** they are "two representative open-source analog PNR software tools" (`perf_driven_survey.txt` L56–57, p.1). The same survey cites "Are analytical techniques worthwhile for analog IC placement?" ([46], L504–505, p.7), "Device layer-aware analytical placement" ([47], L506–507) and "LDE-aware analytical analog placement" ([56], L537–538).
+- **Not in docs/ref/ (unverified here):** their published placers run analytical global placement with symmetry as penalty, then an LP/ILP detailed placement in which symmetry axes are linear equalities and spacing is linear constraints.
 - **Relevance:** the defensible, citable conclusion is the same as G1. Exactness belongs in the representation or in the LP, not in a count-residual gate.
 
 ---

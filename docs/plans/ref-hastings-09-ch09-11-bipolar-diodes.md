@@ -1,7 +1,7 @@
 # Hastings ch. 9–11: bipolar transistors, bipolar applications, diodes — study for Philis
 
 Source: R. A. Hastings, *The Art of Analog Layout*, 3rd ed. (Pearson, 2023), Chapter 9 "Bipolar Transistors", Chapter 10 "Applications of Bipolar Transistors", Chapter 11 "Diodes".
-Reftext file: `/tmp/claude-1000/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/scratchpad/reftext/hastings.txt`, lines **25761–34124** (read in full). PDF: `ref/The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings ...pdf`, PDF pages 429–574 (book pages 428–573; PDF page ≈ book page + 1).
+Reftext file: `/tmp/claude-1000/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/scratchpad/reftext/hastings.txt`, lines **25761–34124** (read in full). PDF: `docs/ref/The Art of Analog Layout 3ed 2023 -- Ray Alan Hastings ...pdf`, PDF pages 429–574 (book pages 428–573; PDF page ≈ book page + 1).
 
 Many equations, symbols and numeric values are blank in the `pdftotext` output. Every number below that is not visible in the reftext was read from the PDF page image (PDF pages opened across both passes: 433, 437–438, 450–459, 485–488, 491–495, 506–521, 524–529, 536–537, 541–542, 556, 564–571). Values still missing are marked "not recovered". Numbers marked *derived* are arithmetic on source numbers, not source statements. Page convention: PDF page of reftext line L = 1 + (form feeds in lines 1..L); book page = PDF page − 1 (checked on PDF 524 = book 523, "10.3 Rules").
 

@@ -176,7 +176,7 @@ pub struct OpConfig {
     pub temp_c: f64,
     /// Package junction-to-ambient resistance θ_JA, °C/W (Hastings eq. 5.1):
     /// EM is derated at `temp_c + θ_JA·P_total` plus the on-die rise. `None`
-    /// = no package rise (no ref/ source or deck gives one).
+    /// = no package rise (no docs/ref/ source or deck gives one).
     pub theta_ja_c_per_w: Option<f64>,
 }
 

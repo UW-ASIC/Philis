@@ -2,7 +2,7 @@
 
 Source: R. A. Hastings, *The Art of Analog Layout*, 3rd ed. (Pearson, 2023), Chapter 13 (13.1 Power MOS Transistors, 13.2 Matching MOS Transistors, 13.3 Rules for MOS Transistor Matching, 13.4 Summary, 13.5 Exercises).
 Reftext file: `scratchpad/reftext/hastings.txt`, lines **38173–42876** (all read).
-PDF: `ref/The Art of Analog Layout 3ed 2023 ... .pdf`. Page convention used below: **PDF p.N = printed book page N−1** (checked: PDF p.644 shows printed 643). The reftext drops most inline math and numeric symbols, so every garbled equation/threshold that matters was re-read from the PDF (pages listed in §1).
+PDF: `docs/ref/The Art of Analog Layout 3ed 2023 ... .pdf`. Page convention used below: **PDF p.N = printed book page N−1** (checked: PDF p.644 shows printed 643). The reftext drops most inline math and numeric symbols, so every garbled equation/threshold that matters was re-read from the PDF (pages listed in §1).
 
 ---
 

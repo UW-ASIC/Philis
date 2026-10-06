@@ -4,7 +4,7 @@ Source: H. E. Graeb (ed.), *Analog Layout Synthesis: A Survey of Topological App
 Chapter 4 "Routing Analog Circuits" (G. Dündar, A. Unutulmaz), Chapter 5 "Analog Layout Retargeting" (H. Said, M. Dessouky, R. El-Adawi, H. Abbas, H. Shahein), Chapter 6 "Closing the Gap Between Electrical and Physical Design: The Layout-Aware Solution" (R. Castro-López, E. Roca, F. V. Fernández), Chapter 7 "Constraint-Driven Design Methodology: A Path to Analog Design Automation" (G. Jerke, J. Lienig, J. B. Freuer), plus the book's index.
 
 Reftext file: `/tmp/claude-1000/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/scratchpad/reftext/balasa_graeb_survey.txt`, lines **8167–14994** (end of file), read in full.
-PDF: `ref/Analog Layout Synthesis : A Survey of Topological Approaches -- ... .pdf`. PDF page = 1 + number of form feeds up to the line. Offsets: chapter 4 PDF = book + 13 (book p.149 = PDF p.162); chapters 5–7 and index PDF = book + 10 (book p.205 = PDF p.215).
+PDF: `docs/ref/Analog Layout Synthesis : A Survey of Topological Approaches -- ... .pdf`. PDF page = 1 + number of form feeds up to the line. Offsets: chapter 4 PDF = book + 13 (book p.149 = PDF p.162); chapters 5–7 and index PDF = book + 10 (book p.205 = PDF p.215).
 
 Entry ID prefix: **BAL2-NN**. Stage keys: annotator | cells | gp | dp | gr | dr | verify | flow | deck.
 

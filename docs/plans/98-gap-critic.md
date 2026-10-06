@@ -320,7 +320,7 @@ Status: steps 1–2 done in M1a (`c3d4668`, review `69b515a`; annotator merge `a
 - Current: `emit::isolation` (`backend/annotator/src/emit.rs:263-288`) pairs every clocked non-sensitive device with every sensitive device, with no group exemption. Distance = `4·epi_nm.unwrap_or(2500)` (`:250, :256, :274`). It pushes to the budget arm only when `epi_nm` is `Some` (`:283-285`); no deck supplies it, and the source comment at `:251-255` notes that sky130 is bulk.
 - Change:
   1. Sidecar keys (FLOW-06 registry rows, sourced): `substrate_kind` ∈ `"bulk" | "epi_on_pplus" | null` and `epi_thickness_nm` (integer or null).
-     - sky130 gets `"bulk"`, `_source` = "Philis note backend/annotator/src/emit.rs:252-255; not stated in ref/ — [UNVERIFIED]".
+     - sky130 gets `"bulk"`, `_source` = "Philis note backend/annotator/src/emit.rs:252-255; not stated in docs/ref/ — [UNVERIFIED]".
      - gf180mcu, ihp_sg13g2 and generic_finfet get `null`.
      - `p_epi_thickness` becomes `required: false` (FLOW-04 step 5) and is not read here.
      - `pnr_core::process` gains `#[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum SubstrateKind { Bulk, EpiOnLowRes, Unknown }`, and `ProcessNumbers.substrate: SubstrateKind` replaces `epi_nm` in `emit::isolation`.
@@ -503,7 +503,7 @@ Status: steps 1–2 done in M1a (`c3d4668`, review `69b515a`; annotator merge `a
 - Change:
   1. PERF-09 step 7: after `op`, the control block adds `print all` (every node voltage). `OpPoint` gains `pub net_v: Vec<Option<f64>>` indexed by `NetId`, and ground nets read 0.0. EXT-17's `OpFacts.net_mv` is filled from it.
   2. REL-10 step 4: `PairAging` gains `dvbs_mv`. For a pair whose bulk nets differ, or whose |ΔV_BS| > 1 mV (numerical tolerance, **[policy]**), and whose class is ≥ Moderate, emit `rel/vsb_mismatch:{a}/{b}` as a hard violation (H01-06: a hard constraint for matching).
-  3. REL-10 step 5: the per capacitor recipe key `v_max_mv` (sourced; null on every shipped deck because no ref/ source gives the sky130 MIM rating) is checked as |V_P − V_N| ≤ v_max. Null → counted in `voltage_unknown`.
+  3. REL-10 step 5: the per capacitor recipe key `v_max_mv` (sourced; null on every shipped deck because no docs/ref/ source gives the sky130 MIM rating) is checked as |V_P − V_N| ≤ v_max. Null → counted in `voltage_unknown`.
 - Tests: (`oppoint.rs`) `print_all_reads_node_voltages` (canned block); (`reliability.rs`) `unequal_vsb_in_a_moderate_pair_is_a_violation`; `a_cap_without_rating_is_unknown`.
 - Acceptance: `ota` with an op testbench → `net_v` resolved for every net; EXT-17 regions unchanged; REL T9 reports V_SB per matched pair.
 

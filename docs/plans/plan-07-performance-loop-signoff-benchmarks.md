@@ -760,7 +760,7 @@ Status: done in M1 (`680b08c`; input merge `5a21f2b`).
                      sys: &[f64], grad: &[(u16, u16, f64)]) -> Vec<BoundStat>;
   pub fn linear_joint_yield(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfResult, specs: &[Spec],
                             sys: &[f64], samples: usize, seed: u64) -> Option<f64>;
-  /// Standard normal cdf via erfc (Abramowitz–Stegun 7.1.26); implementation choice, not from ref/.
+  /// Standard normal cdf via erfc (Abramowitz–Stegun 7.1.26); implementation choice, not from docs/ref/.
   pub fn phi(x: f64) -> f64;
   ```
   Formulas (per bound b of spec j, s_bi = ∂f/∂δ_i from `GateOffset` rows):

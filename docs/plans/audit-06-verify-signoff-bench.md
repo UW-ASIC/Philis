@@ -445,7 +445,7 @@ Tests: indirect.
   (`licon_nd/pd/nt/pt/po`, sky130.deck:583–587, 185–585 Ω/cut) and `max_by_key` (pdk.rs:672) returns the last of
   equals — an arbitrary pick. The deck has no `pex` row for any `rbody_*` layer, so no correct value exists to
   return. CRATES.md open issue 6 (docs/CRATES.md:101–104) states the high-po body "should be about 319 Ω/sq, not
-  48.2" (source not given; no text in `ref/` states it).
+  48.2" (source not given; no text in `docs/ref/` states it).
 - **Antenna.** `antenna_max_ratio` (pdk.rs:575–577) takes `min` over routing metals of `antenna_rule(l).0`,
   mixing areal and sidewall ratios and dropping the thickness; on sky130 that yields 75 (li sidewall,
   sky130.deck:453). It is only the fallback of `routing::Antenna` when no per-stage stack is present

@@ -355,7 +355,7 @@ Status: done in M0 (`76e7232`, `ab947a2`); the via grouping is transitive (amend
      ```
      - Formula: `ln(4L/W)·P_µW·1e6 / (π·k·L_nm)` mK, with L = max side and W = min side.
      - Proof of the bound: each mutual term `P_j/(2πk·r)` with `r ≥ max(hw_j, hh_j) = L_j/2` is ≤ `P_j/(πk·L_j)` < `ln(4)·P_j/(πk·L_j)` ≤ eq. 5.6's self term (since L ≥ W gives ln(4L/W) ≥ ln 4).
-  2. `frontend/library/src/oppoint.rs:103-121`: add `pub theta_ja_c_per_w: Option<f64>` to `OpConfig` (default `None` = 0 K rise; no package θ_JA is given anywhere in ref/ or the decks). `oppoint.rs` is PERF's file (PERF-09); this one field is added here for REL, next to `temp_c`.
+  2. `frontend/library/src/oppoint.rs:103-121`: add `pub theta_ja_c_per_w: Option<f64>` to `OpConfig` (default `None` = 0 K rise; no package θ_JA is given anywhere in docs/ref/ or the decks). `oppoint.rs` is PERF's file (PERF-09); this one field is added here for REL, next to `temp_c`.
   3. `lib.rs:280`: compute
      `t_em_k = temp_c + 273.15 + θ_JA·(total_power_uw·1e-6) + rise_bound_mc(cell power, smallest-variant bbox per cell, 148.0)/1e3`,
      using `CellSpace` built at `lib.rs:275`. Pass it to `em_limits`.
@@ -546,7 +546,7 @@ Status: done in M0 (`76e7232`, `ab947a2`); the via grouping is transitive (amend
 - **Why:** H05-04, AR-24 (the self-term part only). Eq. 5.6 is the book's closed form for a device's own rise (L12021–12038).
 - **Current:** `thermal.rs:38-45` uses `r = max(hw, hh)`.
 - **Change:** in `rise_at` (kernel/core/src/thermal.rs; M1 replaced the per-device `rise_at_mc` with this point form, shared by `rises_mc` and `Layout::rise_at_point_mc`), when the point is source `j`'s own centre, replace the self term `P/(2πk·r_floor)` with `self_rise_mc(p, 2·min(hw,hh), 2·max(hw,hh), K_SI_W_PER_M_K)` (adding it would double-count, and the acceptance value below is eq. 5.6 alone). Mutual terms are unchanged.
-  - Finite die thickness and image sources (AR-24) are not planned: derived, not in ref/.
+  - Finite die thickness and image sources (AR-24) are not planned: derived, not in docs/ref/.
 - **Tests:** `thermal.rs` `the_self_term_is_eq_5_6`. The existing isotherm tests (`thermal.rs:144-170`) must still pass.
 - **Acceptance:** a powered 25 µm square device reads ≈ 11.9 K at 100 mW with k = 148 (*computed*).
 - **Risks / notes:** `MatchedSet`'s thermal term is MAT's; only the self-heating contribution of a powered matched device changes.
@@ -613,9 +613,9 @@ Dependency order inside REL (acyclic): REL-01 → REL-03 → {REL-04, REL-12, RE
 
 ## 5. Open questions (each with a proposed default)
 
-1. **Metal family and Black's parameters per deck.** Neither the decks nor ref/ state Ea and n for sky130, gf180 or ihp (`GP/pdks/ihp_sg13g2.deck:789-790`). *Default:* the conservative fallback of Lienig Cu, 0.9 eV and n 1.1 (REL-05), flagged `derating_assumed`. If the owner confirms aluminium (for example, "sky130 BEOL is Al-Cu"), set FLOW-06's `em_derating.ea_ev` = 0.7 and `n` = 2 (Lienig L1241–1245) and `metal_family: "al"` (REL-17).
+1. **Metal family and Black's parameters per deck.** Neither the decks nor docs/ref/ state Ea and n for sky130, gf180 or ihp (`GP/pdks/ihp_sg13g2.deck:789-790`). *Default:* the conservative fallback of Lienig Cu, 0.9 eV and n 1.1 (REL-05), flagged `derating_assumed`. If the owner confirms aluminium (for example, "sky130 BEOL is Al-Cu"), set FLOW-06's `em_derating.ea_ev` = 0.7 and `n` = 2 (Lienig L1241–1245) and `metal_family: "al"` (REL-17).
 2. **Dedicated quiet ring return.** Charbon says a ring on a shared node can be worse than none (SUB-30). *Default:* victim rings only on a user-declared `quiet_ring_net` or an analog-root ground no aggressor touches (REL-07 step 4). Philis does not invent a new port.
-3. **Substrate kind and ρ stack.** sky130 "bulk" rests on the code note at `emit.rs:252-255`, not on a ref/ document. gf180 and ihp are unknown. *Default:* FLOW-06 step 7 sets sky130 = bulk; others null (EXT-23 treats them as `Unknown`, cost-only); REL-18 stays deferred.
+3. **Substrate kind and ρ stack.** sky130 "bulk" rests on the code note at `emit.rs:252-255`, not on a docs/ref/ document. gf180 and ihp are unknown. *Default:* FLOW-06 step 7 sets sky130 = bulk; others null (EXT-23 treats them as `Unknown`, cost-only); REL-18 stays deferred.
 4. **Deck edits.** Owned by FLOW-04/FLOW-05 (vendored decks under `pdks/decks/`). REL has no deck edit left.
 5. **Antenna diode credit on sky130.** The magic tech file carries diode PWL terms (AV-17, `VOL/libs.tech/magic/sky130A.tech:4912`), but GPurify refuses `diode_credit ≠ 0`. *Default:* no credit and no diode insertion on sky130 (REL-02). Revisit when the deck states a credit GPurify accepts.
 6. **Hard EM before width planning.** REL-03 may produce V > 0 on fixtures until RTE reserves width (AT-03) and sizes access jogs (AT-06, RTE-14). *Default:* keep it hard; report per net; do not hide the check in Θ.
@@ -677,7 +677,7 @@ Dependency order inside REL (acyclic): REL-01 → REL-03 → {REL-04, REL-12, RE
   4. Add the per-pair isolation (dB) to the signoff report (SUB-56).
 - **Tests:** an FD solver unit test against eq. 5.26 of Hastings for two contacts in a uniform thick substrate (L15159–15241, PDF 261), `R_SP = ρ/(2r)·[1 − (2/π)·sin⁻¹(r/d)]`. Assert the formula, not the book's quoted numbers: the book says 10 µm-diameter contacts on 10 Ω·cm give 1 kΩ far apart and 840 Ω at 20 µm c-c, but the formula with ρ = 10 Ω·cm, r = 5 µm gives 10 kΩ and 8.39 kΩ (*computed*); the quoted values match ρ = 1 Ω·cm. The ratio 0.839 at d = 4r is consistent either way.
 - **Acceptance:** per-pair isolation reported; the fit meets the 15 % criterion for voltage ratios > 0.5.
-- **Risks / notes:** ρ stacks and package inductance are "not given" in ref/ for any shipped deck (§5 Q3). Until then REL-09's cost-only pull stands.
+- **Risks / notes:** ρ stacks and package inductance are "not given" in docs/ref/ for any shipped deck (§5 Q3). Until then REL-09's cost-only pull stands.
 
 ---
 
@@ -728,7 +728,7 @@ Adversarial fact-check of this plan against the working tree of 2026-09-28, the 
 
 **Unresolved:**
 - REL-03 Blech domain per shape (UNVERIFIED; dormant until a deck carries `blech_limit`).
-- REL-07/REL-08 Ecgr width = `n_well_depth` has no source in ref/ (UNVERIFIED; §5 Q10).
+- REL-07/REL-08 Ecgr width = `n_well_depth` has no source in docs/ref/ (UNVERIFIED; §5 Q10).
 - REL-18 calibration sweep ranges (UNVERIFIED; from the SUB-57 recipe).
 - Hastings's eq. 5.26 example disagrees with its own formula by 10× (book-internal; the test now asserts the formula).
 - dac4's red `erc/ar.met2.1` (AV-15) and all runtime claims are taken from audit-06, not re-run (no cargo in this task).

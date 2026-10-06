@@ -13,4 +13,4 @@ suite_result.txt
 benchmarks/fixtures/*/
 # ngspice scratch output
 bsim4v5.out
-ref/
+docs/ref/

@@ -1,6 +1,6 @@
 # Layout fundamentals an analog P&R engine must honor — and where Philis stands
 
-Scope: the device-, array-, placement-, routing-, substrate- and reliability-level techniques a hand-layout expert applies, each checked against the Philis tree at `dad330c` plus the working-tree changes. This file adds to `ref/Notes/constraints.html` (84 abstract requirement families) and `ref/Notes/roadmap.html`. Those files state the *contracts*. This file states the *concrete geometric techniques* and what the code actually does. It does not repeat the handbook's evidence or verification semantics.
+Scope: the device-, array-, placement-, routing-, substrate- and reliability-level techniques a hand-layout expert applies, each checked against the Philis tree at `dad330c` plus the working-tree changes. This file adds to `docs/ref/Notes/constraints.html` (84 abstract requirement families) and `docs/ref/Notes/roadmap.html`. Those files state the *contracts*. This file states the *concrete geometric techniques* and what the code actually does. It does not repeat the handbook's evidence or verification semantics.
 
 **Status legend.**
 - **BC**: by construction; the generator or router draws it.

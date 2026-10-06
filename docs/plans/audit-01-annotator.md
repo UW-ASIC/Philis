@@ -173,7 +173,7 @@ These become merged, interleaved cells, but they emit **no placement or routing 
 | improved_wilson_mirror_4 | 823 | 25 | 4 | same links as wide_swing_cascode_mirror, slot 0 not required to be a diode | C | |
 | cross_coupled_complementary | 929 | 25 | 4 | 0G=1D 0D=1G 0S=1S 2G=3D 2D=3G 2S=3S 0D=2D 1D=3D | C | **dead**: its links imply cross_coupled_inverters (26) |
 | cascode_mirror | 731 | 24 | 4 | 0G=1G 0S=1S 0D=2S 1D=3S 2G=3G | C | children are 2 CurrentMirror; no bottom–top proximity (survey Fig.3.11 has one, L5217–5222) |
-| wilson_mirror_4 | 802 | 24 | 4 | 0S=1S 0D=2S 1D=3S 0G=3D 1G=2D | C | cross-coupled gate feedback; not a standard 4T Wilson (unverified against a source; not in ref/) |
+| wilson_mirror_4 | 802 | 24 | 4 | 0S=1S 0D=2S 1D=3S 0G=3D 1G=2D | C | cross-coupled gate feedback; not a standard 4T Wilson (unverified against a source; not in docs/ref/) |
 | regulated_cascode_mirror | 1700 | 24 | 4 | 0G=1G 0S=1S 1D=2S 1D=3G 3D=2G | C | |
 | low_voltage_cascode_mirror | 779 | 23 | 4 | 0G=1G 0S=1S 0D=2S 1D=3S 2G=3G | C | |
 | diff_pair_with_mirror_load | 872 | 23 | 4 | 0S=1S 0G≠1G 0D=2D 1D=3D 2G=3G 2S=3S | C | |
@@ -441,7 +441,7 @@ Stale references: tests.rs:144 cites `backend/TODO.md` (does not exist) and test
 
 ## 3. Gap analysis against a constraint-aware analog P&R that beats hand layout
 
-Each item gives what the references (or, where marked, general knowledge not in ref/) describe, what Philis does, and what has to exist.
+Each item gives what the references (or, where marked, general knowledge not in docs/ref/) describe, what Philis does, and what has to exist.
 
 **G1. The requirement graph is overlapping, typed and ordered, not a disjoint partition.** Strasser et al. build an SMP multigraph of matching (M_S from symmetry, M_B from building blocks), proximity (P_B, P_N) and symmetry (S) edges. A device may carry several (balasa_graeb_survey.txt 5136–5160, p.122). They then cluster it agglomeratively by importance order M_S ≻ M_B ≻ P_B ≻ S ≻ P_N (eq.(3.19), 5096–5132, p.121; Algorithm 3.1, 5325–5420, pp.125–126). The rationale for the order is at 5100–5125: symmetric pairs matter more than intra-block matching because they drive offset.
 
@@ -481,7 +481,7 @@ Voltage- and current-matched devices are optimised differently (42326–42328; r
 
 **G9. Performance-driven importance.** Lampaert's placer runs sensitivity and operating-point simulations before placement (lampaert.txt 3446–3456, p.86). The survey suggests setting constraint importance "by simulation" (balasa_graeb_survey.txt 5426–5431, 5608–5610, pp.127–128). Graeb's sizing constraints c(x_d) ≥ 0 come from structure (graeb_centering.txt 2831–2834, p.76). Philis computes sensitivities in `library::perf` only to build routing rows (lib.rs:196–231), and the op point only for IR/EM. Needed: pass `OpPoint` (region, gm, Id, headroom) and the per-net sensitivities into `annotate`. Use them to separate switches (triode, gate on Clock/Digital) from current sources and amplifiers. Scale each pair's η and precision from its contribution to the spec. Order the requirement graph by sensitivity.
 
-**G10. User constraints as input.** ALIGN accepts user constraint files (symmetry, matching, grouping, SameTemplate, DoNotIdentify). This is general knowledge, not in ref/; the code's own comments cite these ALIGN names at catalog.rs:4–5 and netrole.rs:57–58. Philis accepts only suppression, and nothing sets even that (AA-11). Needed: a sidecar format read by the CLI and `library::Config` that adds or overrides requirements, precision classes and rail/clock roles, and resolves device names to ids.
+**G10. User constraints as input.** ALIGN accepts user constraint files (symmetry, matching, grouping, SameTemplate, DoNotIdentify). This is general knowledge, not in docs/ref/; the code's own comments cite these ALIGN names at catalog.rs:4–5 and netrole.rs:57–58. Philis accepts only suppression, and nothing sets even that (AA-11). Needed: a sidecar format read by the CLI and `library::Config` that adds or overrides requirements, precision classes and rail/clock roles, and resolves device names to ids.
 
 **G11. Consistency and provenance.** An automated tool can check what a person forgets: contradictory max/min distances, symmetry against fixed macros, empty variant domains (NOTES-06), and traceable constraint IDs (NOTES-04). Philis emits Proximity ≤5 µm and Isolation ≥10 µm on the same device pair (AA-13), and blocks forget their template (AA-27). Needed: a pre-search conflict pass with a precedence table, and a stable ID plus source template per rule.
 
