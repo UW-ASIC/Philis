@@ -20,6 +20,8 @@ use mechanics::{
 /// One placeable cell's pre-drawn alternatives; `layout.variant[i]` indexes
 /// `alternatives`.
 pub struct VariantSpace {
+    /// Drawn alternatives, each with the same pin nets (a reshape patches
+    /// offsets only); empty = the cell's base macro is its only shape.
     pub alternatives: Vec<Macro>,
 }
 
@@ -51,17 +53,22 @@ enum PriceKey {
     Ord(&'static str, u32),
 }
 
+/// One batch's carried dual state.
 #[derive(Clone, Copy)]
 struct Price {
     /// Multiplier in `[−LAMBDA_MAX, 0]` (`λ ← λ − ρ·g`); `−λ` is the price.
     lambda: f32,
+    /// Penalty / dual step size in `[RHO_FLOOR, RHO_MAX]`.
     rho: f32,
     /// Constraint value `g` at the previous dual step, for the did-it-shrink test.
     residual: f32,
 }
 
+/// Smallest `ρ`: a fresh batch's step size, and where slack relaxes it to.
 const RHO_FLOOR: f32 = 0.25;
+/// Factor `ρ` grows by on a stuck residual and shrinks by on slack.
 const RHO_GAIN: f32 = 2.0;
+/// Largest `ρ`.
 const RHO_MAX: f32 = 64.0;
 // ponytail: flat cap so a physically unsatisfiable budget cannot swamp the
 // objective; a saturated λ reads as settled in `drift`, so it is reported in
@@ -75,6 +82,7 @@ impl Default for Prices {
 }
 
 impl Prices {
+    /// No batch priced, no dual step taken, `drift() == INFINITY`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -86,7 +94,10 @@ impl Prices {
         self.drift
     }
 
-    /// Bind carried prices to this epoch's batch order (no dual step).
+    /// Bind carried prices to this epoch's batch order (no dual step): batch
+    /// `bi` reads its key's price, or 0 when the key was never settled.
+    /// O(b²) in budget batches (ordinal keys). A kind registered in both
+    /// `hard` and `budget` is a debug assertion.
     pub fn bind(&mut self, reqs: &Requirements<Layout>) {
         debug_assert!(
             reqs.budget.iter().all(|b| reqs.hard.iter().all(|h| h.kind() != b.kind())),
@@ -102,7 +113,10 @@ impl Prices {
     /// `g` is dimensionless, a fraction of the batch's own budget: the residual
     /// when violated, else minus the slack, so the price relaxes on slack
     /// (PLAN.md:124). ρ doubles for a residual that did not shrink and halves
-    /// on slack, within `[RHO_FLOOR, RHO_MAX]`.
+    /// on slack, within `[RHO_FLOOR, RHO_MAX]`. Rebinds afterwards, sets
+    /// [`Self::drift`] and [`Self::saturated`], and bumps [`Self::steps`]
+    /// (saturating). A NaN residual, usage or criticality never poisons λ: it
+    /// reads as `g = 0` (price held).
     pub fn settle(&mut self, reqs: &Requirements<Layout>, l: &Layout) {
         let mut drift_sq = 0.0f64;
         self.saturated.clear();
@@ -148,7 +162,7 @@ impl Prices {
         &self.saturated
     }
 
-    /// Dual steps taken so far.
+    /// Dual steps taken so far (saturating at `u32::MAX`).
     #[must_use]
     pub fn steps(&self) -> u32 {
         self.steps
@@ -169,6 +183,7 @@ impl Prices {
     }
 }
 
+/// [`PriceKey`] of every budget batch, positionally.
 fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
     (0..reqs.budget.len())
         .map(|bi| {
@@ -191,12 +206,15 @@ pub const RAIL_UNKNOWN: f32 = 0.25;
 /// Floor of a rail's current weight. Policy: a near-idle rail still stays short.
 pub const RAIL_MIN: f32 = 0.1;
 
-/// Per-net HPWL weight, indexed by `NetId`, mean `1` over the weighted nets
+/// Per-net HPWL weight, indexed by `NetId` (`classes[i]` describes net `i`;
+/// output length `classes.len()`), mean `1` over the weighted nets
 /// (unweighted = `1`). A net's weight is the fraction of a budget one aF of it
 /// spends (Lampaert 1999 eq.2.12–2.13, `ΔP = Σ S·Δx`; CRATES #3): the positive
-/// performance sensitivities `sens` (`(net, 1/aF)`, summed over specs) where a
-/// spec sees the net, else `1/c_budget` of its class. A tighter budget pulls
-/// harder; an unbudgeted signal net keeps `1`.
+/// performance sensitivities `sens` (`(net, 1/aF)`, summed over specs; negative
+/// or NaN terms and nets past `classes` ignored) where a spec sees the net,
+/// else `1/c_budget` of its class (a budget ≤ 0 is none). A tighter budget
+/// pulls harder; an unbudgeted signal net keeps `1`. Every weight is finite
+/// and ≥ 0.
 ///
 /// Rails (`Supply` / `Ground`) are left out of that mean and weighted by their
 /// op current instead (PLC-17, AP-18: each source normalised separately):
@@ -242,10 +260,10 @@ pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr
 }
 
 /// Process numbers placement needs, from the deck (shared with `dp`), built
-/// once per run.
+/// once per run. Cheap to clone: the tables are shared.
 #[derive(Clone, Debug)]
 pub struct PlaceRules {
-    /// Every cell origin snaps to it, nm.
+    /// Every cell origin snaps to it, nm (`≤ 0` reads as 1 where snapped).
     pub grid: i32,
     /// Role × role spacing; its `fallback` is the old scalar clearance.
     pub spacing: Arc<spacing::SpacingTable>,
@@ -260,18 +278,21 @@ pub struct PlaceRules {
 }
 
 impl PlaceRules {
-    /// One scalar `clearance` between every pair (no profiles).
+    /// One scalar `clearance` between every pair (no profiles), on the
+    /// `grid` lattice.
     #[must_use]
     pub fn uniform(grid: i32, clearance: i32) -> Self {
         Self::new(grid, spacing::SpacingTable::uniform(clearance, grid), spacing::Profiles::default())
     }
 
-    /// `profiles.of[cell]` indexes like the layout's cells.
+    /// Rules from a role table and per-cell profiles; `profiles.of[cell]`
+    /// indexes like the layout's cells. No symmetry-axis grid.
     #[must_use]
     pub fn new(grid: i32, spacing: spacing::SpacingTable, profiles: spacing::Profiles) -> Self {
         PlaceRules { grid, far: spacing.max_gap(), spacing: Arc::new(spacing), profiles: Arc::new(profiles), axis_grid: None }
     }
 
+    /// Cell `c`'s profile as currently drawn in `l` (missing orient = `R0`).
     fn profile(&self, l: &Layout, c: usize) -> Option<&spacing::Profile> {
         self.profile_of(c, *l.variant.get(c)?, l.orient.get(c).copied().unwrap_or_default())
     }
@@ -320,11 +341,10 @@ impl PlaceRules {
         }
     }
 
-    /// [`Self::encroach`] over all pairs; `+0.0` with fewer than two cells.
+    /// [`Self::encroach`] over all pairs; `+0.0` with fewer than two cells. O(n²).
     #[must_use]
     pub fn encroachment(&self, l: &Layout) -> f64 {
-        let n = l.x.len();
-        (0..n).flat_map(|a| (a + 1..n).map(move |b| (a, b))).fold(0.0, |t, (a, b)| t + self.encroach(l, a, b))
+        mechanics::pair_sum(l.x.len(), |a, b| self.encroach(l, a, b))
     }
 
     /// Room cell `c` can owe past its bbox ([`spacing::SpacingTable::halo`]);
@@ -335,31 +355,48 @@ impl PlaceRules {
     }
 }
 
+/// Iteration cap of the analytic loop.
 const MAX_ITERS: u32 = 500;
+/// Iterations always run before the overflow test may stop the loop.
 const MIN_ITERS: u32 = 60;
+/// Stop once bin overflow (fraction of device area) is at most this.
 const OVERFLOW_TARGET: f32 = 0.15;
+/// Device area / die area the canvas is sized for.
 const UTILIZATION: f32 = 0.4;
+/// Initial step, as a fraction of the die side the largest gradient moves.
 const STEP0: f32 = 0.04;
+/// Step floor.
 const STEP_MIN: f32 = 0.002;
+/// Per-iteration step cooling.
 const STEP_DECAY: f32 = 0.995;
+/// Heavy-ball momentum on the velocity.
 const MOMENTUM: f32 = 0.85;
+/// Initial density weight; ramps ×1.05 per iteration with overflow above 5%, capped at 1e3.
 const LAMBDA0: f32 = 0.5;
+/// Bin fill above which a bin pushes its cells out.
 const TARGET_UTIL: f32 = 0.7;
 /// Finite-difference probe (nm) for the analog-cost gradient.
 const ANALOG_PROBE: i32 = 64;
 
 /// Everything [`place`] reads.
 pub struct GpInput<'a> {
+    /// Base macro per cell; its length is the cell count.
     pub macros: &'a [Macro],
+    /// Alternatives per cell; a short table leaves later cells at their base macro.
     pub variants: &'a [VariantSpace],
+    /// Chosen alternative per cell (missing = 0); gp keeps it, dp reshapes.
     pub assignment: &'a [u16],
+    /// Hard rules (the step gate), priced budgets and costs.
     pub reqs: &'a Requirements<Layout>,
+    /// Grid and spacing, for snapping axes and the report's encroachment.
     pub rules: &'a PlaceRules,
+    /// HPWL weight by `NetId` ([`net_weights`]); empty = unweighted.
     pub net_weight: &'a [f32],
     /// Symmetry axes, one per block (`Problem::blocks`).
     pub n_axes: usize,
-    /// Per cell, µW; empty = unpowered.
+    /// Per cell, µW; empty (or any length other than the cell count) = unpowered.
     pub power_uw: &'a [i32],
+    /// Physical units every matched-set term reads; copied into the layout.
     pub units: std::sync::Arc<pnr_core::UnitLib>,
     /// `false`: return the initial pile (`GpMode::Pile`).
     pub iterate: bool,
@@ -373,7 +410,12 @@ pub struct GpInput<'a> {
 /// are refreshed once, on return. `iterate = false` returns the seeded pile
 /// from `initial_layout` unrefined, still reported: the baseline that measures
 /// what the analytic loop adds (neither mode moves prices; the epoch's one dual
-/// step is the caller's, after dp).
+/// step is the caller's, after dp). `prices` is rebound to `reqs`.
+///
+/// Every iteration costs `4n` analog-cost evaluations (the finite-difference
+/// gradient) plus two Φ evaluations; at most `MAX_ITERS` iterations. No step
+/// ever raises hard-rule Φ, so Φ of the result is at most Φ of the pile.
+/// Every cell ends inside `[0, side]²` of the returned canvas.
 pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) {
     let &GpInput { macros, variants, assignment, reqs, rules, net_weight, n_axes, power_uw, iterate, .. } = inp;
     let n = macros.len();
@@ -425,11 +467,7 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
         // (a) weighted pin-HPWL subgradient: the cells owning a net's
         // bbox-extreme pins are pulled inward.
         for ni in 0..nets.count() {
-            let (mut x0, mut x1, mut y0, mut y1) = (i32::MAX, i32::MIN, i32::MAX, i32::MIN);
-            for k in nets.span(ni) {
-                let (px, py) = nets.pin(k, &l);
-                (x0, x1, y0, y1) = (x0.min(px), x1.max(px), y0.min(py), y1.max(py));
-            }
+            let (x0, x1, y0, y1) = nets.pin_bbox(ni, &l);
             let w = nets.weight(ni);
             for (k, &c) in nets.span(ni).zip(nets.row(ni)) {
                 let (px, py) = nets.pin(k, &l);
@@ -533,7 +571,8 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     (l, rep)
 }
 
-/// Row-major `nb × nb` bin of a point, bins `bw` nm wide from the origin.
+/// Row-major `nb × nb` bin of a point, bins `bw` nm wide from the origin;
+/// points outside the grid clamp to the edge bins. `nb ≥ 1`.
 fn bin_of(x: i32, y: i32, nb: usize, bw: f32) -> usize {
     let bx = ((x as f32 / bw) as usize).min(nb - 1);
     let by = ((y as f32 / bw) as usize).min(nb - 1);
@@ -548,7 +587,8 @@ fn fill_bins(util: &mut [f32], l: &Layout, nb: usize, bw: f32) {
     }
 }
 
-/// Σ bin overflow area over total device area.
+/// Σ bin overflow area (fill above `TARGET_UTIL`) over total device area;
+/// 0 with no device area.
 fn bin_overflow(util: &[f32], l: &Layout, bw: f32) -> f32 {
     let total: f32 = (0..l.x.len()).map(|i| 4.0 * l.hw[i] as f32 * l.hh[i] as f32).sum();
     if total <= 0.0 {
