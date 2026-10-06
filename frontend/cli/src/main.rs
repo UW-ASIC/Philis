@@ -17,8 +17,9 @@
 //! "max"}]}`, the testbench relative to the JSON), `--interface FILE`
 //! (die and boundary pins, checked against the ports), `--out-rs FILE` (emit),
 //! `--constraints FILE` (ALIGN-style JSON sidecar, `annotator::sidecar`).
-//! `--hierarchy` other than `flat` and `--max-wall` are refused (exit 2)
-//! until FLOW-11 / FLOW-08.
+//! `--max-wall SECONDS` (wall budget: the search stops before its next epoch
+//! once spent, keeping its incumbent). `--hierarchy` other than `flat` is
+//! refused (exit 2) until FLOW-11.
 //!
 //! Every run writes `<top>.gds` (the `.subckt` ports as labels on the
 //! deck's text layers), `<top>_ref.spice` (the LVS reference signoff used,
@@ -91,7 +92,7 @@ fn cli() -> Result<bool, String> {
             "--interface" => cfg.interface = Some(library::Interface::from_json(&read(&val()?)?)?),
             "--out-rs" => out_rs = Some(val()?),
             "--constraints" => cfg.constraints = Some(read(&val()?).map_err(|e| format!("--constraints: {e}"))?),
-            "--max-wall" => return Err("`--max-wall` needs FLOW-08 (wall-clock stop)".into()),
+            "--max-wall" => cfg.max_wall = Some(std::time::Duration::from_secs_f64(num(&a, &val()?)?)),
             "--hierarchy" => {
                 let h = val()?;
                 if h != "flat" {
@@ -271,11 +272,13 @@ fn write_outputs(
     let st = &sol.stats;
     let stages: String = library::STAGES.iter().zip(st.stage_ms).map(|(n, ms)| format!(" {n}={ms:.0}")).collect();
     let rep = format!(
-        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
+        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\nstop {:?}\nwarm {}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
         sol.metadata,
         report.hard_violations.len(),
         lines(&report.hard_violations),
         st.converged,
+        st.stop,
+        st.warm_epochs,
         st.iterations,
         st.outer_iterations,
         st.sim_failures,

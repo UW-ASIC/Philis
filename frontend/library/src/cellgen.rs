@@ -515,6 +515,40 @@ pub fn escalate(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[
     None
 }
 
+/// Next assignment on an infeasible stall: the most-blamed cell with an
+/// untried higher `allowed` entry moves first (ties: larger pin spread, then
+/// lower index); else the first untried assignment in [`escalate`] order,
+/// walked from the odometer's origin (so a blamed jump strands nothing
+/// behind it). Never returns `current` or an assignment in `tried`; `None`
+/// when the space is exhausted.
+#[must_use]
+pub fn escalate_blamed(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[u16], blame: &[u32], tried: &std::collections::BTreeSet<Vec<u16>>) -> Option<Vec<u16>> {
+    use std::cmp::Reverse;
+    let n = variants.len();
+    let cur: Vec<u16> = (0..n).map(|i| current.get(i).copied().unwrap_or(0)).collect();
+    let fresh = |a: &Vec<u16>| *a != cur && !tried.contains(a);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (Reverse(blame.get(i).copied().unwrap_or(0)), Reverse(pin_spread(&variants[i])), i));
+    for &i in &order {
+        for &a in allowed.get(i).map_or(&[][..], Vec::as_slice).iter().filter(|&&a| a > cur[i]) {
+            let mut next = cur.clone();
+            next[i] = a;
+            if fresh(&next) {
+                return Some(next);
+            }
+        }
+    }
+    // ponytail: a linear odometer walk per call, O(space); the space is the
+    // pruned product of `allowed`, small after GAP-16.
+    let mut a: Vec<u16> = (0..n).map(|i| allowed.get(i).and_then(|r| r.first()).copied().unwrap_or(cur[i])).collect();
+    loop {
+        if fresh(&a) {
+            return Some(a);
+        }
+        a = escalate(variants, allowed, &a)?;
+    }
+}
+
 /// Distinct pin arrangements (bbox-relative, order-free) among a cell's
 /// alternatives.
 fn pin_spread(space: &gp::VariantSpace) -> usize {
@@ -1483,6 +1517,32 @@ mod tests {
         );
         // Nothing to escalate is exhaustion, not a panic.
         assert!(escalate(&[], &[], &[]).is_none());
+    }
+
+    /// FLOW-08: blame picks the cell; equal pin spread, so blame alone decides.
+    #[test]
+    fn escalate_blamed_moves_the_most_blamed_cell_first() {
+        let spaces = vec![space(2), space(2), space(2)];
+        let all = full(&spaces);
+        let tried = std::collections::BTreeSet::from([vec![0u16, 0, 0]]);
+        assert_eq!(escalate_blamed(&spaces, &all, &[0, 0, 0], &[0, 5, 1], &tried), Some(vec![0, 1, 0]));
+    }
+
+    /// FLOW-08: from the origin, every other assignment once, then `None`.
+    #[test]
+    fn escalate_blamed_never_repeats() {
+        let spaces = vec![space(2), space(2), space(2)];
+        let all = full(&spaces);
+        let mut tried = std::collections::BTreeSet::from([vec![0u16, 0, 0]]);
+        let (mut cur, mut out) = (vec![0u16, 0, 0], Vec::new());
+        while let Some(next) = escalate_blamed(&spaces, &all, &cur, &[0, 0, 0], &tried) {
+            assert!(tried.insert(next.clone()), "repeated {next:?}");
+            out.push(next.clone());
+            cur = next;
+            assert!(out.len() <= 7, "exceeded the space");
+        }
+        assert_eq!(out.len(), 7);
+        assert!(!out.contains(&vec![0, 0, 0]));
     }
 
     /// Every alternative allowed: the unpruned odometer.

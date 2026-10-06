@@ -117,3 +117,23 @@ fn constraint_diagnostics_reach_the_report() {
     assert!(report.lines().any(|l| l.starts_with("sidecar_unknown_name\t")), "{report}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// FLOW-08: `--max-wall` is accepted (no longer exit 2) and a spent budget
+/// stops the search with its reason in `report.txt`. Exit 1 is a signoff
+/// verdict on pair, as in the sibling runs, not a refusal.
+#[test]
+fn max_wall_is_accepted() {
+    let dir = std::env::temp_dir().join(format!("philis_cli_wall_{}", std::process::id()));
+    let out = Command::new(env!("CARGO_BIN_EXE_philis"))
+        .arg(fixture("pair.spice"))
+        .args(["--pdk", "sky130", "--starts", "1", "--iters", "4", "--outer", "1", "--max-wall", "0", "--out"])
+        .arg(&dir)
+        .env("PDK_ROOT", std::env::var_os("PDK_ROOT").unwrap_or_default())
+        .output()
+        .expect("philis runs");
+    let code = out.status.code();
+    assert!(matches!(code, Some(0 | 1)), "exit {code:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let report = std::fs::read_to_string(dir.join("report.txt")).expect("report.txt written");
+    assert!(report.contains("stop WallBudget"), "{report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

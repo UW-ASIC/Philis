@@ -124,6 +124,17 @@ pub struct Config {
     pub constraints: Option<String>,
     /// ESD pad nets (REL-17); `None` = no ESD width floor.
     pub esd: Option<EsdSpec>,
+    /// FLOW-08: with an incumbent, every `cold_every`-th epoch (counted over
+    /// the whole search) is cold (gp + [`dp::Schedule::cold`], fresh routing
+    /// history); the rest anneal the incumbent warm ([`epoch_kind`]). `1` =
+    /// every epoch cold, the pre-FLOW-08 loop.
+    pub cold_every: u32,
+    /// A warm epoch's dp schedule.
+    pub warm: dp::Schedule,
+    /// Wall budget over the whole run, starts included: once it is spent, a
+    /// search that has an incumbent stops before its next epoch
+    /// ([`StopReason::WallBudget`]). `None` = unbounded.
+    pub max_wall: Option<std::time::Duration>,
 }
 
 /// A die edge.
@@ -217,6 +228,11 @@ impl Default for Config {
             top: None,
             constraints: None,
             esd: None,
+            // ponytail: T10 (`bench local` over cold_every ∈ {1,2,4,8,∞}) has
+            // not been measured, so the default stays the pre-FLOW-08 loop.
+            cold_every: 1,
+            warm: dp::Schedule::warm(),
+            max_wall: None,
         }
     }
 }
@@ -322,6 +338,55 @@ pub struct RunStats {
     /// ngspice decks run: sensitivities plus every scored epoch, over every
     /// start and cell topology.
     pub sims: u32,
+    /// Warm epochs ([`epoch_kind`]) over the winning start's search.
+    pub warm_epochs: u32,
+    /// Why the winning start's search ended.
+    pub stop: StopReason,
+}
+
+/// Why a search ended (FLOW-08).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StopReason {
+    /// Feasible with stationary, unsaturated prices.
+    Converged,
+    /// Feasible, prices still moving or saturated: a feasible incumbent is
+    /// never escalated, so the search ends here.
+    FeasibleNotStationary,
+    /// Infeasible when the last variant assignment stalled.
+    #[default]
+    OuterBudget,
+    /// Infeasible and every allowed assignment tried.
+    EscalationExhausted,
+    /// [`Config::max_wall`] spent.
+    WallBudget,
+}
+
+/// An epoch's start: gp + cold dp, or a warm dp from the incumbent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Cold,
+    Warm,
+}
+
+/// Epoch `k` (counted over the whole search) is cold without an incumbent,
+/// right after an escalation, or every `cold_every`-th epoch; else warm.
+fn epoch_kind(k: u32, has_incumbent: bool, escalated: bool, cold_every: u32) -> Kind {
+    if !has_incumbent || escalated || k % cold_every.max(1) == 0 {
+        Kind::Cold
+    } else {
+        Kind::Warm
+    }
+}
+
+/// After a middle loop: the search's stop, or `None` = escalate. A feasible
+/// incumbent is never escalated.
+fn next_action(feasible: bool, stationary: bool, last_outer: bool) -> Option<StopReason> {
+    match (feasible, stationary, last_outer) {
+        (true, true, _) => Some(StopReason::Converged),
+        (true, false, _) => Some(StopReason::FeasibleNotStationary),
+        (false, _, true) => Some(StopReason::OuterBudget),
+        (false, _, false) => None,
+    }
 }
 
 /// [`RunStats::stage_ms`]'s stages: `route` is gr+dr, `reroute` dr again
@@ -459,12 +524,13 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
+    let deadline = cfg.max_wall.map(|d| std::time::Instant::now() + d);
     let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..cfg.starts.max(1))
             .map(|j| {
                 s.spawn(move || {
                     let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                    tops.iter().map(|t| search(t, cfg, seed)).collect()
+                    tops.iter().map(|t| search(t, cfg, seed, deadline)).collect()
                 })
             })
             .collect();
@@ -851,6 +917,7 @@ fn topology<'a>(
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens, &net_ua);
     let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
+    let weights = Weights { route: route_weights(&net_weight, &problem.net_classes, &sens), place: net_weight };
     let flow = Flow {
         pdk,
         netlist,
@@ -872,11 +939,6 @@ fn topology<'a>(
                 .map(|members| members.iter().enumerate().map(|(k, d)| (format!("d{k}:G"), u32::from(d.0), (netlist.devices[d.0 as usize].gate_area_um2() * 1e6) as i64)).collect())
                 .collect();
             r.cfg.em = em;
-            // Routing prices parasitics only on nets something budgets, on [0, 1].
-            let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
-            let w: Vec<f32> = net_weight.iter().enumerate().map(|(n, &w)| if budgeted(n) { w } else { 0.0 }).collect();
-            let top = w.iter().copied().fold(0.0f32, f32::max);
-            r.cfg.net_weight = w.iter().map(|&x| if top > 0.0 { x / top } else { 0.0 }).collect();
             r
         },
         layers,
@@ -890,7 +952,8 @@ fn topology<'a>(
         perf_active,
         perf_plan: perf,
         intent,
-        net_weight,
+        weights,
+        warm: cfg.warm,
         fold,
         stack: ann.process.stack.expect("`annotation` always carries the stack"),
         id_ua: currents
@@ -934,28 +997,52 @@ struct Searched {
 
 /// 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
 ///    keeping the best [`LexKey`], whose V includes the epoch's own signoff
-///    errors. Prices and routing history persist across epochs and are this
-///    start's own.
-fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
+///    errors. Prices persist across epochs; routing history is reset at every
+///    cold epoch and kept across warm ones ([`epoch_kind`]); both are this
+///    start's own. A feasible incumbent stops the search; an infeasible stall
+///    escalates by blame ([`cellgen::escalate_blamed`]), never revisiting an
+///    assignment. [`RunStats::stop`] says which way it ended.
+fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Instant>) -> Searched {
     let flow = &t.flow;
     let mut assignment = t.assignment0.clone();
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
+    let weights = flow.weights.clone();
     let mut best: Option<Epoch> = None;
     let mut stats = RunStats::default();
     let (mut pareto, mut epochs) = (Vec::new(), Vec::new());
+    // Every unified assignment an epoch ran: escalation never revisits one.
+    let mut tried: std::collections::BTreeSet<Vec<u16>> = std::collections::BTreeSet::new();
+    let (mut k, mut escalated) = (0u32, false);
 
     let n_outer = cfg.outer_iters.max(1);
-    for outer in 0..n_outer {
+    'search: for outer in 0..n_outer {
         stats.outer_iterations += 1;
         let mut stall = 0;
         for iter in 0..cfg.feedback_iters.max(1) {
+            if best.is_some() && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                stats.stop = StopReason::WallBudget;
+                break 'search;
+            }
             stats.iterations += 1;
             let seed = seed ^ u64::from(iter) ^ (u64::from(outer) << 32);
+            let kind = epoch_kind(k, best.is_some(), escalated, cfg.cold_every);
+            (k, escalated) = (k + 1, false);
+            let start = match kind {
+                Kind::Warm => best.as_ref().map(|b| &b.layout),
+                Kind::Cold => {
+                    neg = gr::Negotiation::new();
+                    None
+                }
+            };
+            let mut ran = start.map_or_else(|| assignment.clone(), |l| l.variant.clone());
+            flow.locks.unify(&mut ran);
+            tried.insert(ran);
             // Alternate: dp's reshape trades a squarer variant for HPWL, which
             // the utilization floor cannot see mid-anneal (a 1-row tail cost
             // ota 40% area); the epoch key picks between the two.
-            let mut epoch = flow.epoch(&assignment, iter % 2 == 1, &mut prices, &mut neg, seed);
+            let mut epoch = flow.epoch(&assignment, iter % 2 == 1, start, &weights, &mut prices, &mut neg, seed);
+            stats.warm_epochs += epoch.stats.warm_epochs;
             // Promotion: simulate only a candidate whose hard count can still
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
@@ -993,30 +1080,42 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
             }
         }
 
-        // Feasible with settled prices: done. A price held at its cap reads as
-        // settled in `drift` but is still binding, so it blocks convergence.
+        // Feasible: stop, converged or not (a feasible incumbent is never
+        // escalated). A price held at its cap reads as settled in `drift` but
+        // is still binding, so it blocks convergence.
         let feasible = best
             .as_ref()
             .is_some_and(|b| b.key.0 == 0 && b.key.1 == 0 && b.key.3 <= 0.0);
-        if feasible && prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty() {
-            stats.converged = true;
+        let stationary = prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty();
+        if let Some(stop) = next_action(feasible, stationary, outer + 1 == n_outer) {
+            stats.stop = stop;
+            stats.converged = stop == StopReason::Converged;
             break;
         }
-        // Not converged: infeasible, or feasible with prices still moving or
-        // saturated. Try the next variant assignment, unless the budget or the
-        // variant space is exhausted. ponytail: a feasible run that once
-        // saturated a λ relaxes it by ρ·slack per epoch, ρ ≥ RHO_FLOOR = 0.25:
-        // −64 at slack 0.5 with ρ at the floor is 512 epochs of drift above
-        // PRICE_STATIONARY, so it escalates rather than converges; FLOW-08's
-        // `RunStats.stop` will show it.
-        if outer + 1 == n_outer {
-            break;
-        }
-        let Some(next) = cellgen::escalate(&flow.cells.variants, &t.allowed, &assignment) else {
+        // Infeasible stall: move the most-blamed cells first.
+        let b = best.as_ref().expect("an epoch ran");
+        let blame = flow.blame(b);
+        let next = loop {
+            let Some(raw) = cellgen::escalate_blamed(&flow.cells.variants, &t.allowed, &assignment, &blame, &tried) else {
+                break None;
+            };
+            let mut next = raw.clone();
+            flow.locks.unify(&mut next);
+            let fresh = !tried.contains(&next);
+            // The raw pick is spent either way, so the loop terminates.
+            tried.insert(raw.clone());
+            assignment = raw;
+            if fresh {
+                break Some(next);
+            }
+        };
+        let Some(next) = next else {
+            stats.stop = StopReason::EscalationExhausted;
             break;
         };
         stats.variant_escalations += 1;
         assignment = next;
+        escalated = true;
     }
 
     let best = best.expect("at least one epoch ran");
@@ -1200,8 +1299,10 @@ struct Flow<'a> {
     perf_active: &'a [usize],
     /// Sensitivity tables and V_T σ the winner's robustness reads (PERF-13).
     perf_plan: &'a PerfPlan,
-    /// Placement HPWL weight per net ([`gp::net_weights`]).
-    net_weight: Vec<f32>,
+    /// Net weights; [`search`] clones them per start.
+    weights: Weights,
+    /// A warm epoch's dp schedule ([`Config::warm`]).
+    warm: dp::Schedule,
     layers: Vec<LayerId>,
     cuts: Vec<elaborate::Cut>,
     d_router: dr::DetailedRoute,
@@ -1342,6 +1443,25 @@ fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
         .collect()
 }
 
+/// Per-net weights an epoch places and routes with (FLOW-08 plumbing: a
+/// search owns its copy; PERF-15/GAP-08 will update it between epochs).
+#[derive(Clone)]
+pub(crate) struct Weights {
+    /// Placement HPWL weight ([`gp::net_weights`]).
+    place: Vec<f32>,
+    /// dr's parasitic weight ([`route_weights`]).
+    route: Vec<f32>,
+}
+
+/// dr prices parasitics only on nets something budgets (a C budget or a
+/// sensitivity row), `place` scaled to [0, 1]; every other net 0.
+fn route_weights(place: &[f32], classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)]) -> Vec<f32> {
+    let budgeted = |n: usize| classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
+    let w: Vec<f32> = place.iter().enumerate().map(|(n, &w)| if budgeted(n) { w } else { 0.0 }).collect();
+    let top = w.iter().copied().fold(0.0f32, f32::max);
+    w.iter().map(|&x| if top > 0.0 { x / top } else { 0.0 }).collect()
+}
+
 /// One scored epoch.
 struct Epoch {
     key: LexKey,
@@ -1370,17 +1490,23 @@ struct Epoch {
 
 impl Flow<'_> {
     /// Place → route → signoff at `assignment`, scored. `reshape` lets dp
-    /// swap variants; without it the assignment is kept as drawn.
+    /// swap variants; without it the assignment is kept as drawn. `start`
+    /// `None` = cold (gp, then [`dp::Schedule::cold`]); `Some(incumbent)` =
+    /// warm: the incumbent's variants and positions annealed at
+    /// [`Flow::warm`], no gp. Routing history accumulates once per epoch.
+    #[allow(clippy::too_many_arguments)]
     fn epoch(
         &self,
         assignment: &[u16],
         reshape: bool,
+        start: Option<&Layout>,
+        w: &Weights,
         prices: &mut gp::Prices,
         neg: &mut gr::Negotiation,
         seed: u64,
     ) -> Epoch {
         let unified = {
-            let mut a = assignment.to_vec();
+            let mut a = start.map_or(assignment, |l| &l.variant[..]).to_vec();
             self.locks.unify(&mut a);
             a
         };
@@ -1397,7 +1523,7 @@ impl Flow<'_> {
             assignment,
             reqs: placement,
             rules: &self.rules,
-            net_weight: &self.net_weight,
+            net_weight: &w.place,
             n_axes: self.problem.axis_count,
             power_uw: &cells.power,
             units: cells.units.clone(),
@@ -1409,11 +1535,18 @@ impl Flow<'_> {
             ms[i] += clock.elapsed().as_secs_f64() * 1e3;
             clock = std::time::Instant::now();
         };
-        let (coarse, _) = gp::place(&inp, prices, seed);
+        let cold;
+        let (coarse, schedule) = match start {
+            Some(inc) => (inc, self.warm),
+            None => {
+                cold = gp::place(&inp, prices, seed).0;
+                cold.debug_check("gp::place");
+                (&cold, dp::Schedule::cold())
+            }
+        };
         lap(0);
-        coarse.debug_check("gp::place");
         let (mut layout, place_report, dp_stats) = dp::place(
-            &coarse,
+            coarse,
             &macros,
             if reshape { &cells.variants } else { &[] },
             placement,
@@ -1421,10 +1554,10 @@ impl Flow<'_> {
             &self.locks,
             prices,
             &self.rules,
-            &self.net_weight,
+            &w.place,
             // Its own stream (AP-19): gp and dp drawing the same sequence correlate their moves.
             seed ^ 0xD1B5_4A32_D192_ED03,
-            dp::Schedule::cold(),
+            schedule,
         );
         layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
@@ -1480,9 +1613,12 @@ impl Flow<'_> {
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
                 n_nets: self.netlist.nets.len(),
+                net_weight: w.route.clone(),
                 ..self.d_router.cfg.clone()
             },
         };
+        // AT-34: a diode reroute replays from here, so history counts once.
+        let before = neg.clone();
         let (mut routes, mut route_report, mut route_stats) =
             router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         lap(3);
@@ -1502,6 +1638,7 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
+            *neg = before;
             (routes, route_report, route_stats) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             lap(4);
             let marked = !marks.is_empty();
@@ -1555,7 +1692,7 @@ impl Flow<'_> {
         let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
         lap(7);
-        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, ..stats };
+        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, warm_epochs: u32::from(start.is_some()), ..stats };
         Epoch {
             key,
             min_beta: None,
@@ -1571,6 +1708,38 @@ impl Flow<'_> {
             route: route_report,
             route_stats,
         }
+    }
+
+    /// Per cell, how much an epoch's failures point at it: +1 per id a
+    /// violated placement hard or budget rule touches ([`analog::RuleBatch::violating_ids`],
+    /// cell ids), +1 per DRC finding (label-free, cells + routes + rings)
+    /// inside the cell's placed bbox. [`cellgen::escalate_blamed`] moves the
+    /// most-blamed cell first.
+    fn blame(&self, e: &Epoch) -> Vec<u32> {
+        let n = e.layout.x.len();
+        let mut blame = vec![0u32; n];
+        let mut ids = Vec::new();
+        for b in self.problem.placement.hard.iter().chain(&self.problem.placement.budget) {
+            b.violating_ids(&e.layout, &mut ids);
+        }
+        for i in ids {
+            if let Some(c) = blame.get_mut(i as usize) {
+                *c += 1;
+            }
+        }
+        let macros = cellgen::realize(&self.cells.variants, &e.layout.variant);
+        let mut shapes = geometry::collect(&macros, &e.layout, &e.routes);
+        shapes.extend(e.rings.iter().flat_map(|r| r.shapes.iter().copied()));
+        let placed = pnr_core::place_macros(&macros, &e.layout);
+        for f in verify::drc(&shapes, &[], self.pdk) {
+            let inside = |r: &pnr_core::Rect| (i64::from(r.x)..=i64::from(r.x) + i64::from(r.w)).contains(&f.x) && (i64::from(r.y)..=i64::from(r.y) + i64::from(r.h)).contains(&f.y);
+            for (c, m) in blame.iter_mut().zip(&placed) {
+                if inside(&m.bbox) {
+                    *c += 1;
+                }
+            }
+        }
+        blame
     }
 }
 
@@ -2603,6 +2772,61 @@ pub(crate) fn labeled_pins(
 
 #[cfg(test)]
 mod start_tests {
+    use crate::{Kind, StopReason};
+
+    const ONE_FET: &str = ".subckt one d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends one\n";
+
+    /// FLOW-08: cold first, after an escalation and every `cold_every`-th
+    /// epoch; `1` is all cold, `u32::MAX` warm after the first.
+    #[test]
+    fn schedule_is_cold_first_then_periodic() {
+        use crate::epoch_kind;
+        assert_eq!(epoch_kind(0, false, false, 4), Kind::Cold);
+        assert_eq!(epoch_kind(1, true, false, 4), Kind::Warm);
+        assert_eq!(epoch_kind(4, true, false, 4), Kind::Cold);
+        assert_eq!(epoch_kind(5, true, true, 4), Kind::Cold);
+        assert!((0..8).all(|k| epoch_kind(k, true, false, 1) == Kind::Cold));
+        assert_eq!(epoch_kind(7, true, false, u32::MAX), Kind::Warm);
+    }
+
+    /// FLOW-08: feasible stops (converged or not); infeasible escalates
+    /// until the outer budget.
+    #[test]
+    fn feasible_incumbent_is_never_escalated() {
+        use crate::next_action;
+        assert_eq!(next_action(true, false, false), Some(StopReason::FeasibleNotStationary));
+        assert_eq!(next_action(true, true, false), Some(StopReason::Converged));
+        assert_eq!(next_action(true, true, true), Some(StopReason::Converged));
+        assert_eq!(next_action(false, false, true), Some(StopReason::OuterBudget));
+        assert_eq!(next_action(false, true, true), Some(StopReason::OuterBudget));
+        assert_eq!(next_action(false, false, false), None);
+    }
+
+    /// FLOW-08: a spent wall budget stops after the first epoch (one
+    /// incumbent is always kept).
+    #[test]
+    fn wall_budget_stops_with_its_reason() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let cfg = crate::Config { max_wall: Some(std::time::Duration::ZERO), feedback_iters: 5, outer_iters: 2, starts: 1, ..Default::default() };
+        let sol = crate::run(ONE_FET, &pdk, &Default::default(), &cfg).expect("flow");
+        assert_eq!((sol.stats.iterations, sol.stats.stop), (1, StopReason::WallBudget));
+    }
+
+    /// FLOW-08: a warm epoch with a no-op schedule reproduces its incumbent;
+    /// `cold_every: 1` never runs warm.
+    #[test]
+    fn warm_epoch_starts_from_the_incumbent() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let cfg = |cold_every| crate::Config { cold_every, feedback_iters: 2, outer_iters: 1, starts: 1, warm: dp::Schedule { range0: 0.0, max_temps: 0, t0_scale: 0.0 }, ..Default::default() };
+        let sol = crate::run(ONE_FET, &pdk, &Default::default(), &cfg(u32::MAX)).expect("flow");
+        assert_eq!(sol.stats.warm_epochs, 1);
+        let e = &sol.metadata.epochs;
+        assert_eq!(e.len(), 2, "both epochs promoted");
+        assert_eq!((e[0].v, e[0].theta, e[0].area_um2), (e[1].v, e[1].theta, e[1].area_um2));
+        let cold = crate::run(ONE_FET, &pdk, &Default::default(), &cfg(1)).expect("flow");
+        assert_eq!(cold.stats.warm_epochs, 0);
+    }
+
     /// FLOW-10 (T7): the shipped `drc_hard` is the signoff of the shipped
     /// geometry. Without a covered density rule nothing is filled; with a
     /// 10 µm metal1 floor fill is kept and the stats are re-measured on it.
