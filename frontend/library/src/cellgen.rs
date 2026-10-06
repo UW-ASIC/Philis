@@ -14,13 +14,18 @@ use cells::mosfet::Mosfet;
 use cells::resistor::Resistor;
 use cells::Cell;
 use macro_master::Macros;
-use pnr_core::{Device, DeviceGroup, DeviceId, DeviceKind, Macro, NetId, Netlist, Rect};
+use pnr_core::{Device, DeviceGroup, DeviceId, DeviceKind, Macro, NetId, Netlist};
 use verify::{Checker, Checks, Pdk, RefDeviceIn, RefInput, RefKind};
 
 /// The cell table `gp`/`dp` search, and its map to the netlist's devices.
 /// A matched group collapses to one cell, so `n_cells <= n_devices`.
+///
+/// Invariants: `spaces` and `devices_of` are parallel (one entry per cell, in
+/// order of each cell's lowest member device); every space holds at least one
+/// alternative; `cell_of` has one entry per netlist device and
+/// `devices_of[cell_of[d]]` contains `d`.
 pub struct Cells {
-    /// Variant space per cell.
+    /// Variant space per cell; never empty, so variant 0 always exists.
     pub spaces: Vec<gp::VariantSpace>,
     /// `cell_of[device]` = its cell.
     pub cell_of: Vec<u16>,
@@ -39,11 +44,18 @@ pub struct Cells {
 /// member is injected, it overlaps an earlier unitization, its MOS members do
 /// not share a source net, or every merged pattern draws a short. Declined
 /// merges fall back to one cell per device.
-#[must_use]
 ///
 /// `merge_distinct_gates = false` keeps members on different gate nets (a
 /// differential input) as separate cells: the alternative to a common-centroid
 /// merge, which splits one member's drain across the row.
+///
+/// Folds at [`folds`] with no transconductance, the annotator's unitizations
+/// as cells, and no net classes or blocks. Every cell gets at least one
+/// alternative.
+///
+/// # Panics
+/// If a unitization spans more than one device kind (an annotator bug).
+#[must_use]
 pub fn enumerate(
     netlist: &Netlist,
     macros: &Macros,
@@ -62,6 +74,13 @@ pub fn enumerate(
 /// (FLOW-11: member devices, the child's geometry) is one cell of one
 /// alternative at its lowest member, drawn in the child, never here; a
 /// unitization touching a block member is declined.
+///
+/// `fold` is indexed by device; devices past its end draw unfolded. Block
+/// members and unitization members past `netlist.devices` are ignored.
+///
+/// # Panics
+/// If a unitization spans more than one device kind (an annotator bug), or
+/// the netlist holds more than `u16::MAX` cells.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn enumerate_folded(
@@ -116,7 +135,7 @@ pub fn enumerate_folded(
         // members are a series stack, drawn as a chain whose junctions are
         // exactly the nets they share (Razavi Fig. 19.12).
         let mut chain: Option<Vec<bool>> = None;
-        if matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos) {
+        if is_mos(kind) {
             let s = |d: &DeviceId| terminal(dev(d), "S");
             if s(&members[0]).is_none() || members.iter().any(|d| s(d) != s(&members[0])) {
                 let Some(order) = series_order(netlist, &members) else { continue };
@@ -276,8 +295,32 @@ fn split_dac(netlist: &Netlist, rails: &[NetId], members: &[DeviceId], dev_nf: i
     Some((lsb.into_iter().chain(msb).chain([bridge]).collect(), l, a_lsb))
 }
 
+/// The net on `d`'s terminal `name` (`"D"`, `"G"`, `"P"`, …), if it has one.
 fn terminal(d: &Device, name: &str) -> Option<NetId> {
     d.terminals.iter().find(|(t, _)| t == name).map(|(_, n)| *n)
+}
+
+/// `d`'s parameter `name` as written (nm or PDK units), if present.
+fn param(d: &Device, name: &str) -> Option<i64> {
+    d.params.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+}
+
+/// Whether `kind` is a MOSFET (drawn by the MOS or FinFET generator).
+fn is_mos(kind: DeviceKind) -> bool {
+    matches!(kind, DeviceKind::Nmos | DeviceKind::Pmos)
+}
+
+/// Splits a generated pin name `d{k}:{T}` into member ordinal `k` and
+/// terminal `T`; `None` for a bare name or a non-numeric ordinal.
+fn member_pin(name: &str) -> Option<(usize, &str)> {
+    let (k, t) = name.strip_prefix('d')?.split_once(':')?;
+    Some((k.parse().ok()?, t))
+}
+
+/// The net name bound to member `owner`'s pin `t` in `m`; `None` when `m`
+/// has no such pin or its net is outside `nets`.
+fn pin_net<'n>(m: &Macro, owner: usize, t: &str, nets: &'n [String]) -> Option<&'n String> {
+    m.pins.iter().find(|p| member_pin(&p.name) == Some((owner, t))).and_then(|p| nets.get(p.net.0 as usize))
 }
 
 /// A plate net's impedance rank (H06-40, H08-25): 0 a rail (Supply/Ground),
@@ -373,7 +416,7 @@ fn series_order(netlist: &Netlist, members: &[DeviceId]) -> Option<Vec<(DeviceId
 fn flip_members(m: &mut Macro, flips: &[bool]) {
     let flipped = |k: usize| flips.get(k).copied().unwrap_or(false);
     for p in &mut m.pins {
-        if let Some((k, t)) = p.name.strip_prefix('d').and_then(|r| r.split_once(':')).and_then(|(k, t)| Some((k.parse::<usize>().ok()?, t))) {
+        if let Some((k, t)) = member_pin(&p.name) {
             if flipped(k) && (t == "S" || t == "D") {
                 p.name = format!("d{k}:{}", if t == "S" { "D" } else { "S" });
             }
@@ -434,15 +477,11 @@ fn gate_straps_stay_private(m: &Macro, netlist: &Netlist, members: &[DeviceId], 
 fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
     let mut span: Vec<Option<(i32, i32)>> = vec![None; members];
     for pin in &m.pins {
-        let Some((n, t)) = pin.name.strip_prefix('d').and_then(|r| r.split_once(':')) else {
-            continue;
-        };
+        let Some((n, t)) = member_pin(&pin.name) else { continue };
         if t != "S" && t != "D" {
             continue;
         }
-        let Some(slot) = n.parse::<usize>().ok().and_then(|i| span.get_mut(i)) else {
-            continue;
-        };
+        let Some(slot) = span.get_mut(n) else { continue };
         let e = slot.get_or_insert((pin.at.x, pin.at.x));
         e.0 = e.0.min(pin.at.x);
         e.1 = e.1.max(pin.at.x);
@@ -456,6 +495,11 @@ fn region_spans(m: &Macro, members: usize) -> Vec<Option<(i32, i32)>> {
 /// `(DRC+ERC, bbox w, bbox h)` from the same prices; `matched[i]` keeps all).
 /// `ranked[i]` (missing = false) marks a cell whose generator lists its
 /// alternatives best-matching first (GAP-18).
+///
+/// Cost: one density-stripped DRC+ERC run per alternative of every cell.
+///
+/// # Panics
+/// If `pdk`'s own deck no longer parses into a [`Checker`].
 #[must_use]
 pub fn seed_assignment(variants: &[gp::VariantSpace], matched: &[bool], ranked: &[bool], pdk: &Pdk) -> (Vec<u16>, Vec<Vec<u16>>) {
     let mut checker = Checker::new(pdk, true).expect("a loaded Pdk re-parses its own deck");
@@ -529,7 +573,12 @@ fn price(m: &Macro, checker: &mut Checker) -> (usize, i64) {
     (geom, gr::group_hpwl(std::slice::from_ref(m)))
 }
 
-/// The geometry an assignment selects. A missing entry means variant 0.
+/// The geometry an assignment selects, one cloned macro per cell. A missing
+/// entry means variant 0; entries past `variants` are ignored.
+///
+/// # Panics
+/// If an entry names a variant its cell does not have (including any variant
+/// of an empty space).
 #[must_use]
 pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> {
     variants
@@ -553,7 +602,8 @@ pub fn realize(variants: &[gp::VariantSpace], assignment: &[u16]) -> Vec<Macro> 
 /// `allowed[i]` (ascending = best-matching first for a ranked cell; [`seed_assignment`]), fastest digit = the cell
 /// whose alternatives move pins the most ([`pin_spread`]): never repeats,
 /// always terminates, and changes pin geometry first. A cell with an empty
-/// or one-entry `allowed` row is a fixed digit.
+/// or one-entry `allowed` row is a fixed digit. Each `allowed` row must be
+/// ascending; a missing `current` entry reads as 0.
 #[must_use]
 pub fn escalate(variants: &[gp::VariantSpace], allowed: &[Vec<u16>], current: &[u16]) -> Option<Vec<u16>> {
     let spread: Vec<usize> = variants.iter().map(pin_spread).collect();
@@ -688,12 +738,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
         .enumerate()
         .filter(|(i, _)| !covered[*i])
     {
-        let param = |k: &str| {
-            dev.params
-                .iter()
-                .find(|(n, _)| n == k)
-                .map_or(0, |(_, v)| *v)
-        };
+        let param = |k: &str| param(dev, k).unwrap_or(0);
         unitization.push(Unitization {
             devices: vec![DeviceId(i as u16)],
             device_type: dev.kind,
@@ -724,7 +769,7 @@ fn with_per_device_sizing(netlist: &Netlist, annot: &Constraints, fold: &[(u16, 
     // fingers at `W/k`, ratios kept (every member scales alike).
     for u in &mut unitization {
         let Some(&(k, w)) = u.devices.first().and_then(|d| fold.get(d.0 as usize)) else { continue };
-        if k > 1 && matches!(u.device_type, DeviceKind::Nmos | DeviceKind::Pmos) {
+        if k > 1 && is_mos(u.device_type) {
             u.dev_nf = u.dev_nf.iter().map(|&n| n.saturating_mul(k)).collect();
             u.unit_w = w;
         }
@@ -770,11 +815,10 @@ const P2P_SHARE: f32 = 0.55;
 #[must_use]
 pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<DeviceId>, bool)]) -> Vec<(u16, i32)> {
     use pnr_core::Process;
-    let param = |d: &Device, k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v);
     let nm = |d: &Device, k: &str| param(d, k).map_or(0, |v| v.clamp(0, i64::from(i32::MAX)) as i32);
     // A MOS's width is its finger's, `W_total/nf`; anything else its written `w`.
     let w_of = |d: &Device| d.mos_size().map_or(nm(d, "w"), |s| s.w_finger_nm().min(i64::from(i32::MAX)) as i32);
-    let mos = |d: &Device| matches!(d.kind, DeviceKind::Nmos | DeviceKind::Pmos);
+    let mos = |d: &Device| is_mos(d.kind);
     // A channel below the deck's shortest legal one is drawn as asked (DRC
     // reports it), never resized behind the netlist's back: said here, by name.
     for d in netlist.devices.iter().filter(|d| mos(d)) {
@@ -888,8 +932,9 @@ pub fn folds(netlist: &Netlist, pdk: &Pdk, gm_us: &[Option<f64>], cells: &[(Vec<
     out
 }
 
+/// `d`'s SPICE `m` (parallel count), clamped to `1..=u16::MAX`; 1 when absent.
 fn multiplier(d: &Device) -> u16 {
-    d.params.iter().find(|(n, _)| n == "m").map_or(1, |&(_, v)| v.clamp(1, i64::from(u16::MAX)) as u16)
+    param(d, "m").map_or(1, |v| v.clamp(1, i64::from(u16::MAX)) as u16)
 }
 
 /// The longest-to-shortest side a matched member's subarray may have (GAP-11, Hastings rule 9, H13-46
@@ -966,10 +1011,9 @@ fn mos_overlay<'a>(pdk: &'a Pdk, model: &str) -> Option<verify::pdk::Overlay<'a>
     Some(verify::pdk::Overlay { pdk, recipe: verify::pdk::Recipe { model: model.into(), layers, rules: vec![] } })
 }
 
-/// Every enumerated variant of one group, by device kind.
 /// Every variant of `group`, a `kind` of schematic `model`. A resistor is
 /// drawn to its model's recipe ([`Pdk::recipe`]): the construction the
-/// deck's recogniser for that model expects.
+/// deck's recogniser for that model expects. Never empty.
 fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constraints, pdk: &Pdk) -> Vec<Macro> {
     match kind {
         // A fin process draws its transistors from fins.
@@ -1010,27 +1054,14 @@ fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constra
     }
 }
 
+/// Every variant generator `G` enumerates for `group`, drawn, in
 /// `Cell::enumerate` order. Never empty: an empty enumeration yields one empty
-/// macro so `variant == 0` always names something.
+/// macro (no shapes) so `variant == 0` always names something; callers that
+/// must not keep it filter on `shapes.is_empty()`.
 fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::Process) -> Vec<Macro> {
-    let drawn: Vec<Macro> = G::enumerate(group, c, pdk)
-        .iter()
-        .map(|v| v.draw(group, c, pdk))
-        .collect();
+    let mut drawn: Vec<Macro> = G::enumerate(group, c, pdk).iter().map(|v| v.draw(group, c, pdk)).collect();
     if drawn.is_empty() {
-        return vec![Macro {
-            shapes: Vec::new(),
-            pins: Vec::new(),
-            bbox: Rect {
-                x: 0,
-                y: 0,
-                w: 0,
-                h: 0,
-            },
-            units: Vec::new(),
-            dummies: Vec::new(),
-            ..Default::default()
-        }];
+        drawn.push(Macro::default());
     }
     drawn
 }
@@ -1061,6 +1092,12 @@ fn draw_all<G: Cell>(group: &DeviceGroup, c: &Constraints, pdk: &dyn pnr_core::P
 /// geometry drawn at the schematic's own fingers (the manual path).
 ///
 /// `skip`: devices whose cards come from [`drawn_cards`] instead.
+///
+/// A terminal that is absent reads as the empty net name `""`.
+///
+/// # Panics
+/// If a device terminal names a net outside `netlist.nets`.
+#[must_use]
 pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceId]) -> RefInput {
     let mut devices: Vec<RefDeviceIn> = Vec::new();
     for (i, dev) in netlist.devices.iter().enumerate() {
@@ -1085,7 +1122,7 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
                 terminal(dev, p).map_or(String::new(), |n| netlist.nets[n.0 as usize].name.clone())
             })
             .collect();
-        let (fingers, params) = if matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos) {
+        let (fingers, params) = if is_mos(dev.kind) {
             // No size (missing or non-positive w/l): one card without params,
             // so LVS reports the device rather than a made-up size.
             match dev.mos_size() {
@@ -1100,7 +1137,7 @@ pub fn reference(netlist: &Netlist, fold: Option<&[(u16, i32)]>, skip: &[DeviceI
             (i64::from(multiplier(dev)), Vec::new())
         } else if dev.kind == DeviceKind::Capacitor {
             // One card per drawn unit (dac4's XC4 `m=8` is 8 unit caps).
-            let nf = dev.params.iter().find(|(n, _)| n == "nf").map_or(1, |&(_, v)| v);
+            let nf = param(dev, "nf").unwrap_or(1);
             (nf.max(i64::from(multiplier(dev))).clamp(1, i64::from(u16::MAX)), Vec::new())
         } else {
             (1, Vec::new())
@@ -1157,11 +1194,7 @@ pub fn drawn_cards(placed: &[Macro], nets: &[String], schematic: &Netlist, pdk: 
             };
             let node = |n: &Node| match *n {
                 Node::Unused => None,
-                Node::Pin(t) => {
-                    let name = format!("d{}:{t}", d.owner);
-                    let net = m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned();
-                    Some(net.unwrap_or_else(|| format!("~{cell}.{}.no-{t}", d.owner)))
-                }
+                Node::Pin(t) => Some(pin_net(m, usize::from(d.owner), t, nets).cloned().unwrap_or_else(|| format!("~{cell}.{}.no-{t}", d.owner))),
                 Node::Internal(k) => Some(format!("~{cell}.{}.{k}", d.owner)),
             };
             let terminals: Vec<String> = d.nodes.iter().filter_map(node).collect();
@@ -1184,10 +1217,7 @@ pub fn dummy_cards(placed: &[Macro], nets: &[String], schematic_cards: &[RefDevi
     let sized = schematic_cards.iter().any(|c| matches!(c.kind, RefKind::Nmos | RefKind::Pmos) && !c.params.is_empty());
     let mut out = Vec::new();
     for m in placed {
-        let net = |owner: u8, t: &str| {
-            let name = format!("d{owner}:{t}");
-            m.pins.iter().find(|p| p.name == name).and_then(|p| nets.get(p.net.0 as usize)).cloned()
-        };
+        let net = |owner: u8, t: &str| pin_net(m, usize::from(owner), t, nets).cloned();
         for d in &m.dummies {
             let (Some(near), Some(bulk)) = (net(d.owner, d.edge), net(d.owner, "B")) else { continue };
             out.push(RefDeviceIn {
@@ -1242,7 +1272,7 @@ fn bind_pins(m: &mut Macro, netlist: &Netlist, members: &[DeviceId], ground: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pnr_core::{LayerId, Net, Pin, Shape};
+    use pnr_core::{LayerId, Net, Pin, Rect, Shape};
 
     /// The sky130 deck the benchmarks use, compiled in: a sidecar that fails
     /// validation fails the test, never skips it.
