@@ -1,6 +1,6 @@
 # Philis
 
-Constraint-aware analog place-and-route: SPICE in, placed, routed and signed-off GDS out (`philis run <netlist.sp> sky130 -o out/`).
+Constraint-aware analog place-and-route: SPICE in, placed, routed and signed-off GDS out.
 
 ## Progress
 
