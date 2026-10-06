@@ -1,0 +1,9 @@
+* LOCAL uncommitted: annotator emit.rs strongarm_like() for the REL-15 measurement.
+.subckt zz_strongarm outp inp outn inn clk sw sw2 VDD VSS
+XMN1 outp inp tail VSS nfet_01v8 W=10u L=1u
+XMN2 outn inn tail VSS nfet_01v8 W=10u L=1u
+XMP3 outp clk VDD VDD pfet_01v8 W=20u L=1u
+XMP4 outn clk VDD VDD pfet_01v8 W=20u L=1u
+XMN0 tail clk VSS VSS nfet_01v8 W=40u L=1u
+XS sw clk sw2 VSS nfet_01v8 W=1u L=0.15u
+.ends zz_strongarm

@@ -185,6 +185,7 @@ fn run_circuit(
     if let Some(k) = std::env::var("PNR_BENCH_STARTS").ok().and_then(|v| v.parse().ok()) {
         cfg.starts = k;
     }
+    if let Ok(n) = std::env::var("LOCAL_ESD") { cfg.esd = Some(library::EsdSpec { hbm_v: 2000.0, nets: vec![n] }); }
     let sol = match library::run(&text, pdk, &Macros::default(), &cfg) {
         Ok(s) => s,
         Err(e) => return (format!("flow failed: {e:?}"), Vec::new()),
@@ -230,6 +231,8 @@ fn run_circuit(
         .count();
     let undrawable = report.hard_violations.iter().filter(|v| v.rule.starts_with("cell/undrawable")).count();
 
+    for r in sol.metadata.routing.iter().filter(|r| r.kind.contains("Esd")) { eprintln!("LOCAL {} total {} viol {} unknown {} use {:?}", r.kind, r.total, r.violations, r.unknown, r.usage); }
+    if std::env::var("LOCAL_CENTRES").is_ok() { for (i, d) in sol.netlist.devices.iter().enumerate() { eprintln!("LOCAL centre {} {:?}", d.name, sol.layout.centre(pnr_core::Target::Device(pnr_core::DeviceId(i as _)))); } }
     let (area_um2, util_pct) = footprint(&sol.layout);
     let active_pct = active(&sol, pdk, area_um2);
     let s = &sol.stats;
