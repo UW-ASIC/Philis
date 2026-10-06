@@ -1,29 +1,18 @@
 # Philis
 
-**Analog layout from a SPICE netlist.** Philis reads your circuit, works out its layout constraints itself (symmetry, matching, common-centroid, EM, IR drop, antenna, parasitics), then places, routes and signs off a GDS. No constraint file and no hand layout needed.
+**Analog layout from a SPICE netlist.** Philis recognises the circuit's topology, derives the layout constraints an analog designer would apply, then places, routes and signs off a GDS (DRC, LVS, ERC, PEX).
 
 [![publish](https://github.com/UW-ASIC/Philis/actions/workflows/publish.yml/badge.svg)](https://github.com/UW-ASIC/Philis/actions/workflows/publish.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![PDKs](https://img.shields.io/badge/PDKs-sky130%20%7C%20gf180mcu%20%7C%20ihp__sg13g2-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-<p align="center"><img src="docs/progress/layouts/ota.svg" alt="OTA placed, routed and signed off by Philis on sky130" width="560"></p>
-
-## Why Philis
-
-- **Reads intent from the circuit.** 91 recognised topologies (differential pairs, current mirrors, cascodes, cross-coupled latches, OTAs, …) become placement and routing constraints automatically. An ALIGN-style JSON sidecar (`--constraints`) can add or override them.
-- **Only ships clean layouts.** Every candidate is checked in-process for DRC, LVS, ERC and PEX ([GPurify](https://github.com/UW-ASIC/GPurify)). The search keeps the best clean one, and the exit code says whether it is clean (0 clean, 1 not clean, 2 error), so CI can gate on it.
-- **Analog-aware all the way down.** Matched sets and common-centroid arrays, mirrored routing of differential nets, shields, electromigration-sized wires, antenna diodes, guard rings and dummies.
-- **Performance in the loop (optional).** Give it an ngspice operating point (`--op-lib`) and post-layout specs (`--perf`). It scores layouts on the simulated metrics, not only on geometry.
-- **Several PDKs.** sky130, gf180mcu, ihp_sg13g2 and a generic FinFET deck are built in. Any other process is one JSON sidecar.
-- **One Rust binary.** No Python stack and no license server.
+<p align="center"><img src="docs/progress/layouts/ota.svg" alt="OTA placed, routed and signed off by Philis on sky130" width="520"></p>
 
 ## Quick start
 
-Prerequisites: Rust (stable), CMake and a C++ compiler (for the HiGHS solver), or just `nix develop`, which provides all of them plus klayout, magic, netgen and ngspice for cross-checks.
-
 ```sh
-git clone https://github.com/UW-ASIC/Philis && cd Philis
+nix develop    # or: Rust stable + CMake + a C++ compiler
 cargo build --release -p philis
 ./target/release/philis run benchmarks/fixtures/rc_filter.spice sky130 -o out/
 ```
@@ -33,49 +22,65 @@ signoff CLEAN — cost 25.657
 wrote out/{rc_filter.gds, rc_filter_ref.spice, rc_filter_pex.spice, signoff.txt, signoff.json, report.txt}
 ```
 
-Every run writes:
+- Exit code 0 = signoff clean, 1 = not clean, 2 = error.
+- `report.txt` lists every constraint as met, violated or unknown.
+- Built-in PDKs: sky130, gf180mcu, ihp_sg13g2 and generic_finfet. Any other process is one JSON sidecar.
+- Optional inputs: `--constraints` (ALIGN-style JSON), `--interface` (die and pins), `--op-lib`/`--perf` (ngspice operating point and post-layout specs). Full flag list: [`frontend/cli/src/main.rs`](frontend/cli/src/main.rs).
 
-| file | what |
-|---|---|
-| `<top>.gds` | the layout, with `.subckt` ports as labels on the deck's text layers |
-| `<top>_ref.spice` | the LVS reference signoff compared against (dummies included) |
-| `<top>_pex.spice` | extracted parasitics, when extraction allows |
-| `signoff.txt` / `.json` | DRC, LVS, ERC and PEX results |
-| `report.txt` | per-constraint budgets (met / violated / unknown), recognised topologies, run stats |
+## Analog constraints
 
-Common flags (run `philis` with no arguments for the full usage line, or see the header of [`frontend/cli/src/main.rs`](frontend/cli/src/main.rs)):
+The annotator matches 91 topologies (differential pairs, current mirrors, cascodes, cross-coupled latches, OTAs, …) and classifies every net. Each rule below is enforced at one of three tiers: **hard** (must hold), **budget** (shares a bounded allowance) or **cost** (minimised).
 
-| flag | effect |
-|---|---|
-| `--seed N`, `--iters N`, `--starts N`, `--max-wall S` | search effort and reproducibility |
-| `--constraints FILE` | ALIGN-style JSON constraints on top of the extracted ones |
-| `--interface FILE` | die size and boundary pins, checked against the ports |
-| `--op-lib PATH`, `--perf SPECS.json` | simulate the operating point and post-layout specs with ngspice |
-| `--hierarchy flat\|auto\|bottom-up:N` | solve each sub-circuit once and place it as a block |
+**Matching** (Pelgrom; Hastings ch. 13)
+- Mismatch ledger per matched pair: random σ (Pelgrom) plus systematic gradient, thermal and LOD terms, all drawn against one offset allowance
+- Matching classes (minimal / moderate / precise), each with the layout environment it requires (Hastings' class-limit table)
+- Common-centroid 1-D and 2-D arrays and interdigitation, with first and second unit moments equalised (ABBA, ABBA/BAAB)
+- Orientation: matched channels parallel, with equal mean source→drain current direction
+- Layout-dependent effects: equal well-proximity (WPE) and STI/LOD stress distances across matched members, plus edge dummies
+- Capacitor arrays (binary-weighted and split DACs): spiral, chessboard or moment-balanced unit placement under an oxide-gradient model
+- Capacitor plates: equal lead capacitance per unit, and no bottom plate under a top plate
+- Sizing-reach report: pairs whose mismatch is set by sizing, not by layout
 
-As a library:
+**Placement**
+- Mirror symmetry about shared axes, with each symmetry group forming one connected island (Balasa–Graeb)
+- Proximity of related devices; declared utilisation floor
+- Thermal: matched sets kept isothermal and away from power dissipators
+- Substrate noise: noisy-to-sensitive spacing (Charbon); deep-trench isolation banding
+- Guard rings by role (minority-carrier injector, noisy aggressor, sensitive victim) and construction (tap ring, electron-collecting ring, hole-collecting ring, isolated tub)
+- Performance-driven placement: estimated ground capacitance on spec-sensitive nets, priced before any wire exists
 
-```rust
-let pdk = verify::Pdk::builtin("sky130").expect("built-in deck");
-let sol = library::run(&spice, &pdk, &library::Macros::default(), &library::Config::default()).expect("flow");
-let signoff = library::signoff(&sol, &pdk);
-```
+**Routing**
+- Differential nets: matched, mirrored routes
+- Common nodes: resistance balanced across branches (e.g. a pair's shared source)
+- Crosstalk: pairwise exclusion, plus total coupling per victim summed over every aggressor
+- Shielding of sensitive nets by a reference net
+- Parasitic budgets per net, and circuit specs as a shared parasitic budget over the routed nets
+- No metal over matched gates or precision resistor bodies
+- Electromigration (DC, per layer and via; wires and via arrays sized to current) — hard
+- IR drop along current-carrying nets
+- Antenna ratio, fixed with jumpers or inserted diodes — hard
+
+**Net classes** decide which routing rules a net gets: signal, clock, supply, ground, substrate, sensitive, bias, reference, static and switching digital, noisy.
+
+**Reliability at signoff**
+- |V<sub>GS</sub>| and |V<sub>DS</sub>| against oxide and drain ratings at the operating point
+- Forward-biased junctions
+- ESD width floor on pad nets
+- Latch-up deck rules
 
 ## How it works
 
 ```text
-SPICE ─► annotator ─► device generators ─► global placement ─► detailed placement ─► global routing ─► detailed routing ─► signoff
-          (91 topologies →                   (analytic)          (annealing,           (negotiated       (track lattice,     (DRC, LVS, ERC,
-           constraints)                                           sequence pair)        congestion)       EM-sized wires)     PEX)
-              ▲                                                                                                                │
-              └──────────────── each epoch's violations and spec misses steer the next one (warm and cold restarts) ─────────┘
+SPICE → annotator → device generators → placement (analytic → anneal / sequence pair)
+      → routing (negotiated global → track-lattice detailed) → signoff (DRC, LVS, ERC, PEX)
+        ↑__________ each epoch's violations and spec misses steer the next __________|
 ```
 
-Design notes, audits and the implementation plan are in [`docs/plans/`](docs/plans/00-MASTER-PLAN.md). Device-physics background is in [`docs/LAYOUT-FUNDAMENTALS.md`](docs/LAYOUT-FUNDAMENTALS.md).
+The search ships only the best clean candidate. Design notes and the roadmap are in [`docs/plans/`](docs/plans/00-MASTER-PLAN.md).
 
 ## Results
 
-Every push to `main` re-runs the sample circuits and refreshes this section: speed, the feedback loop's candidates, and the layouts.
+Re-run on every push to `main`.
 
 <!-- progress:start -->
 _Last snapshot: 2026-10-04 14:28, branch `m2 + progress-charts` at `3032483` (`bench local`, sky130, seed 1). Updated automatically by `benchmarks/progress.py`._
@@ -126,21 +131,14 @@ _Last snapshot: 2026-10-04 14:28, branch `m2 + progress-charts` at `3032483` (`b
 
 ## Status
 
-Pre-1.0 (`0.1.0`) and under active development. What that means today:
-
-- Most sample circuits sign off clean. dac4 and tq_chain do not yet (see the table above and [#70](https://github.com/UW-ASIC/Philis/issues/70)).
-- The CI gate ([`publish.yml`](.github/workflows/publish.yml)) requires DRC 0, ERC 0 and LVS MATCH on every benchmark circuit. It stays red until those circuits are fixed.
-- Roadmap and known bugs: [issues](https://github.com/UW-ASIC/Philis/issues).
+Pre-1.0. Most sample circuits sign off clean; dac4 and tq_chain do not yet ([#70](https://github.com/UW-ASIC/Philis/issues/70)). The [`publish`](.github/workflows/publish.yml) gate requires DRC 0, ERC 0 and LVS MATCH on every benchmark circuit. Roadmap and bugs: [issues](https://github.com/UW-ASIC/Philis/issues).
 
 ## Contributing
 
 ```sh
-nix develop                      # toolchain + EDA tools
-cargo test --workspace           # unit and integration tests
+nix develop && cargo test --workspace
 cargo run --release -p benchmark --bin bench local   # sign off every benchmark circuit
 ```
-
-Issues labelled `enhancement` map one-to-one to plan items in `docs/plans/`. Each one lists its plan section, its dependencies and its "done when" check.
 
 ## License
 
