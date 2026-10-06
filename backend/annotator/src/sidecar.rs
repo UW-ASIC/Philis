@@ -410,4 +410,173 @@ mod tests {
         assert_eq!((s.class, s.class_source), (MatchClass::Exceptional, analog::intent::ClassSource::User));
         assert_eq!(p.intent.compounds[s.compound.unwrap() as usize].kind, analog::intent::SymKind::Perfect);
     }
+
+    // ---- cleanup(annotator-sets) step 2 ----
+
+    fn kinds(d: &[Diagnostic]) -> Vec<&'static str> {
+        d.iter().map(|d| d.kind).collect()
+    }
+
+    fn run(json: &str) -> (AnnotationConfig, Vec<Diagnostic>) {
+        parse(json, &crate::tests::ota()).unwrap()
+    }
+
+    #[test]
+    fn name_tables() {
+        assert_eq!(match_class("MODERATE"), Some(MatchClass::Moderate));
+        assert_eq!(match_class("Minimal"), Some(MatchClass::Minimal));
+        assert_eq!(match_class("exceptional"), Some(MatchClass::Exceptional));
+        assert_eq!(match_class("tight"), None);
+        assert_eq!(match_kind("Voltage"), Some(MatchKind::Voltage));
+        assert_eq!(match_kind("ratio"), Some(MatchKind::Ratio));
+        assert_eq!(match_kind("current"), Some(MatchKind::Current));
+        assert_eq!(match_kind(""), None);
+        assert_eq!(net_class("Digital"), Some(NetClass::DigitalSwitching), "undeclared logic is an aggressor");
+        assert_eq!(net_class("digital_static"), Some(NetClass::DigitalStatic));
+        assert_eq!(net_class("noisy"), Some(NetClass::Noisy));
+        assert_eq!(net_class("loud"), None);
+        assert_eq!(term("g"), Some(Term::G));
+        assert_eq!(term("N"), Some(Term::N));
+        assert_eq!(term("X"), None);
+        assert_eq!(term(""), None);
+        assert_eq!(order_direction("top_to_bottom"), Some((AxisDir::V, true)));
+        assert_eq!(order_direction("left_to_right"), Some((AxisDir::H, false)));
+        assert_eq!(order_direction("Left_To_Right"), None, "directions are exact");
+    }
+
+    #[test]
+    fn empty_array_is_a_default_config() {
+        let (c, d) = run("[]");
+        assert!(d.is_empty() && c.seeds.is_empty() && c.groups.is_empty() && c.supply_nets.is_empty());
+    }
+
+    #[test]
+    fn entries_without_a_constraint_are_unsupported() {
+        let (_, d) = run(r#"[1, {}, {"constraint": 3}]"#);
+        assert_eq!(kinds(&d), ["sidecar_unsupported"; 3]);
+    }
+
+    #[test]
+    fn ports_resolve_case_insensitively() {
+        let (c, d) = run(r#"[{"constraint":"PowerPorts","ports":["vdd"]},{"constraint":"GroundPorts","ports":["vss"]},{"constraint":"ClockPorts","ports":["VBN"]}]"#);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!((c.supply_nets, c.ground_nets, c.clock_nets), (vec!["vdd".to_string()], vec!["vss".to_string()], vec!["VBN".to_string()]));
+    }
+
+    #[test]
+    fn do_not_identify_and_unknown_instance() {
+        let (c, d) = run(r#"[{"constraint":"DoNotIdentify","instances":["xm1","XM5"]},{"constraint":"DoNotIdentify","instances":["XM9"]}]"#);
+        assert_eq!(kinds(&d), ["sidecar_unknown_name"]);
+        let mut ids: Vec<u32> = c.do_not_identify.into_iter().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [0, 4]);
+    }
+
+    #[test]
+    fn symmetric_blocks_shapes() {
+        let (c, d) = run(
+            r#"[{"constraint":"GroupBlocks","instances":["XM1","XM2"],"instance_name":"DP"},
+                {"constraint":"GroupBlocks","instances":["XM3","XM4"],"instance_name":"LD"},
+                {"constraint":"SymmetricBlocks","direction":"H","pairs":[["XM1","XM2"],["XM5"],["dp"],["DP","LD"],["XM1","XM2","XM3"],["DP","XM5"],["nope"]]}]"#,
+        );
+        assert_eq!(c.symmetry_dir, Some(AxisDir::H));
+        let id = ConstraintId(u32::MAX - 2);
+        let seeds: Vec<(Vec<u16>, ConstraintId)> = c
+            .seeds
+            .iter()
+            .map(|s| match *s {
+                Seed::Devices(a, b, i) => (vec![a.0, b.0], i),
+                Seed::SelfDevice(a, i) => (vec![a.0], i),
+                Seed::Nets(..) => unreachable!("no net seed"),
+            })
+            .collect();
+        assert_eq!(seeds, [(vec![0, 1], id), (vec![4], id), (vec![0, 1], id), (vec![0, 2], id), (vec![1, 3], id)]);
+        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unsupported", "sidecar_unknown_name"]);
+        assert_eq!(c.groups.iter().map(|g| g.0).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn symmetric_blocks_default_vertical() {
+        let (c, _) = run(r#"[{"constraint":"SymmetricBlocks","pairs":[]}]"#);
+        assert_eq!(c.symmetry_dir, Some(AxisDir::V));
+        assert!(c.seeds.is_empty());
+    }
+
+    #[test]
+    fn symmetric_nets() {
+        let (c, d) = run(r#"[{"constraint":"SymmetricNets","net1":"VOUT1","net2":"vout2"},{"constraint":"SymmetricNets","net1":"vout1"}]"#);
+        assert!(matches!(c.seeds[..], [Seed::Nets(NetId(0), NetId(4), ConstraintId(u32::MAX))]));
+        assert_eq!(kinds(&d), ["sidecar_unknown_name"]);
+    }
+
+    #[test]
+    fn match_entries() {
+        let (c, d) = run(
+            r#"[{"constraint":"Match","instances":["XM1","XM2"],"class":"moderate","kind":"voltage"},
+                {"constraint":"Match","instances":["XM1","XM2"],"class":"tight"},
+                {"constraint":"Match","instances":["XM1","XM5"],"class":"minimal"},
+                {"constraint":"Match","instances":["XM1","XM3"],"class":"minimal"},
+                {"constraint":"Match","instances":["XM1","XM9"],"class":"minimal"}]"#,
+        );
+        assert_eq!(c.classes, [(vec![DeviceId(0), DeviceId(1)], MatchClass::Moderate, Some(MatchKind::Voltage))]);
+        // tight: unsupported; XM5 has another L and XM3 another kind: conflicts; XM9: unknown.
+        assert_eq!(kinds(&d), ["sidecar_unsupported", "conflict", "conflict", "sidecar_unknown_name"]);
+    }
+
+    #[test]
+    fn net_class_entries() {
+        let (c, d) = run(r#"[{"constraint":"NetClass","nets":["vbias","nope","VBN"],"class":"Bias"},{"constraint":"NetClass","nets":["vbias"],"class":"loud"}]"#);
+        assert_eq!(c.net_classes, [(NetId(6), NetClass::Bias), (NetId(8), NetClass::Bias)]);
+        assert_eq!(kinds(&d), ["sidecar_unknown_name", "sidecar_unsupported"]);
+    }
+
+    #[test]
+    fn offset_budget_entries() {
+        let (c, d) = run(r#"[{"constraint":"OffsetBudget","instances":["XM1","XM2"],"sigma_mv":1.5},{"constraint":"OffsetBudget","instances":["XM1"]},{"constraint":"OffsetBudget","instances":["XM7"],"sigma_mv":1}]"#);
+        assert_eq!(c.offset_budgets, [(vec![DeviceId(0), DeviceId(1)], 1.5)]);
+        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name"]);
+    }
+
+    #[test]
+    fn kelvin_entries() {
+        let (c, d) = run(r#"[{"constraint":"Kelvin","pin":"xm5/d","sense":["XM1/S","XM2/s"]},{"constraint":"Kelvin","pin":"XM5/Q","sense":[]},{"constraint":"Kelvin","pin":"XM5","sense":[]}]"#);
+        assert_eq!(c.kelvins.len(), 1);
+        let k = &c.kelvins[0];
+        assert_eq!((k.device, k.term, k.sense.clone()), (DeviceId(4), Term::D, vec![(DeviceId(0), Term::S), (DeviceId(1), Term::S)]));
+        assert_eq!(kinds(&d), ["sidecar_unknown_name"; 2]);
+    }
+
+    #[test]
+    fn load_entries() {
+        let (c, d) = run(r#"[{"constraint":"Load","net":"vout1"},{"constraint":"Load","net":"nope","ff":1}]"#);
+        assert!(c.loads.is_empty());
+        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name"]);
+    }
+
+    #[test]
+    fn order_entries() {
+        let (c, d) = run(
+            r#"[{"constraint":"GroupBlocks","instances":["XM1","XM2"],"instance_name":"dp"},
+                {"constraint":"Order","instances":["XM5","DP"],"direction":"top_to_bottom"},
+                {"constraint":"Order","instances":["XM5"],"direction":"sideways"},
+                {"constraint":"Order","instances":["XM5","nope"],"direction":"left_to_right"}]"#,
+        );
+        assert_eq!(c.order, [Order { steps: vec![vec![DeviceId(0), DeviceId(1)], vec![DeviceId(4)]], dir: AxisDir::V, reversible: false, weight: 1.0 }]);
+        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name"]);
+    }
+
+    #[test]
+    fn isolated_tub_needs_a_known_tie_and_members() {
+        let (c, d) = run(r#"[{"constraint":"IsolatedTub","instances":[],"tie":"vdd"},{"constraint":"IsolatedTub","instances":["XM1"],"tie":"nope"},{"constraint":"IsolatedTub","instances":["XM9"],"tie":"vdd"}]"#);
+        assert!(c.tubs.is_empty() && c.groups.is_empty());
+        assert_eq!(kinds(&d), ["sidecar_unsupported", "sidecar_unknown_name", "sidecar_unknown_name"]);
+    }
+
+    #[test]
+    fn from_json_is_parse() {
+        let nl = crate::tests::ota();
+        let json = r#"[{"constraint":"PowerPorts","ports":["vdd"]}]"#;
+        assert_eq!(AnnotationConfig::from_json(json, &nl).unwrap().0.supply_nets, parse(json, &nl).unwrap().0.supply_nets);
+        assert!(AnnotationConfig::from_json("[", &nl).is_err());
+    }
 }

@@ -349,4 +349,268 @@ mod tests {
         series.sort_unstable();
         assert_eq!(series, [(2, 2), (3, 1)]);
     }
+
+    // ---- cleanup(annotator-sets) step 2 ----
+
+    fn drawn_of(nl: &Netlist) -> Vec<Drawn> {
+        let mut models = Vec::new();
+        nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect()
+    }
+
+    /// Every net Signal except `rails`, which are Ground.
+    fn classes(nl: &Netlist, rails: &[u16]) -> Vec<NetClassification> {
+        use analog::metadata::NetClass;
+        (0..nl.nets.len() as u16)
+            .map(|n| NetClassification { net: NetId(n), class: if rails.contains(&n) { NetClass::Ground } else { NetClass::Signal }, c_budget_af: None, max_coupling_af: None })
+            .collect()
+    }
+
+    fn cap(name: &str, p: u16, n: u16, w: i64, l: i64, m: i64) -> Device {
+        two(name, DeviceKind::Capacitor, "mim", p, n, &[("w", w), ("l", l), ("m", m)])
+    }
+
+    fn res(name: &str, p: u16, n: u16, w: i64, l: i64) -> Device {
+        two(name, DeviceKind::Resistor, "rpoly", p, n, &[("w", w), ("l", l)])
+    }
+
+    #[test]
+    fn binary_banks() {
+        assert!(binary(&[1, 1, 2, 4]));
+        assert!(binary(&[4, 1, 2, 1]), "order does not matter");
+        assert!(binary(&[1, 1, 2]));
+        assert!(!binary(&[1, 2]), "N >= 2");
+        assert!(!binary(&[]));
+        assert!(!binary(&[1, 1, 3]));
+        assert!(!binary(&[2, 2, 4]));
+        assert!(!binary(&[1, 1, 1, 2]));
+    }
+
+    /// A 33-bit-and-more bank is no binary bank of `u32` counts, and asking
+    /// never overflows the shift.
+    #[test]
+    fn binary_wide_bank_does_not_overflow() {
+        let mut c: Vec<u32> = vec![1];
+        c.extend((0..32).map(|i| 1u32 << i));
+        c.push(u32::MAX);
+        assert!(!binary(&c));
+        c.pop();
+        assert!(binary(&c), "the full 32-bit bank");
+    }
+
+    #[test]
+    fn lone_resistor_cases() {
+        // Nets: 0=s 1=far 2=t. RA s-far; RB t-t (both ends on t); RC, RD on 2 too.
+        let nl = Netlist { devices: vec![res("RA", 0, 1, 1_000, 1_000), res("RB", 2, 2, 1_000, 1_000)], nets: nets(&["s", "far", "t"]), ..Default::default() };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        assert_eq!(lone_resistor(&hg, NetId(0)), Some((0, NetId(1))));
+        assert_eq!(lone_resistor(&hg, NetId(2)), None, "a resistor shorted on the net");
+        let nl = Netlist { devices: vec![res("RA", 0, 1, 1_000, 1_000), res("RB", 0, 2, 1_000, 1_000)], nets: nets(&["s", "a", "b"]), ..Default::default() };
+        assert_eq!(lone_resistor(&BipartiteHypergraph::from_netlist(&nl), NetId(0)), None, "two resistors");
+        assert_eq!(lone_resistor(&BipartiteHypergraph::from_netlist(&nl), NetId(1)), Some((0, NetId(0))));
+    }
+
+    #[test]
+    fn resistors_joined_only_through_a_rail_or_a_drain_are_no_divider() {
+        // Nets: 0=a 1=VSS 2=b 3=m 4=g.
+        let nl = Netlist {
+            devices: vec![res("RA", 0, 1, 2_000, 10_000), res("RB", 1, 2, 2_000, 10_000), res("RC", 2, 3, 2_000, 10_000), crate::tests::fet("M", DeviceKind::Nmos, 4, 3, 1, 1, 1_000, 500), res("RD", 3, 0, 2_000, 10_000)],
+            nets: nets(&["a", "VSS", "b", "m", "g"]),
+            ..Default::default()
+        };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let sets = resistor_sets(&hg, &drawn_of(&nl), &classes(&nl, &[1]), &[]);
+        // RA-RD through `a`, RB-RC through `b`; `m` reaches a drain, VSS is a rail.
+        assert_eq!(sets, [set(vec![0, 4], "divider", SetRole::FeedbackRatio), set(vec![1, 2], "divider", SetRole::FeedbackRatio)]);
+    }
+
+    #[test]
+    fn divider_through_a_gate_and_material() {
+        // Nets: 0=top 1=mid 2=VSS 3=d. The mid node also drives a gate.
+        let base = |w_b: i64| Netlist {
+            devices: vec![res("RA", 0, 1, 2_000, 10_000), res("RB", 1, 2, w_b, 10_000), crate::tests::fet("M", DeviceKind::Nmos, 1, 3, 2, 2, 1_000, 500)],
+            nets: nets(&["top", "mid", "VSS", "d"]),
+            ..Default::default()
+        };
+        let run = |nl: &Netlist| resistor_sets(&BipartiteHypergraph::from_netlist(nl), &drawn_of(nl), &classes(nl, &[2]), &[]);
+        assert_eq!(run(&base(2_000)), [set(vec![0, 1], "divider", SetRole::FeedbackRatio)]);
+        assert!(run(&base(3_000)).is_empty(), "two widths are two materials");
+    }
+
+    #[test]
+    fn symmetric_resistor_pairs() {
+        let nl = Netlist { devices: vec![res("RA", 0, 1, 2_000, 10_000), res("RB", 2, 3, 2_000, 10_000)], nets: nets(&["a", "VSS", "b", "VDD"]), ..Default::default() };
+        let c = Compound {
+            id: analog::intent::ConstraintId(0),
+            axis: pnr_core::ids::AxisId(0),
+            dir: analog::intent::AxisDir::V,
+            kind: analog::intent::SymKind::Mirror,
+            pairs: vec![(DeviceId(0), DeviceId(1))],
+            selfs: vec![],
+            net_pairs: vec![],
+            self_nets: vec![],
+            set_pairs: vec![],
+        };
+        let sets = resistor_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl), &classes(&nl, &[1, 3]), &[c]);
+        assert_eq!(sets, [set(vec![0, 1], "symmetric_r", SetRole::Other)]);
+    }
+
+    #[test]
+    fn bandgap_core_resistors() {
+        // Nets: 0=c1 1=b 2=e1 3=c2 4=e2 5=VSS.
+        let nl = |w2: i64| Netlist {
+            devices: vec![bjt("Q1", 0, 1, 2, 1), bjt("Q2", 3, 1, 4, 8), res("R1", 2, 5, 2_000, 10_000), res("R2", 4, 2, w2, 20_000)],
+            nets: nets(&["c1", "b", "e1", "c2", "e2", "VSS"]),
+            ..Default::default()
+        };
+        let run = |nl: &Netlist| bandgap_cores(&BipartiteHypergraph::from_netlist(nl), &drawn_of(nl), &[(DeviceId(0), DeviceId(1))]);
+        assert_eq!(run(&nl(2_000)), [set(vec![2, 3], "bandgap_r", SetRole::BandgapCore)]);
+        assert!(run(&nl(3_000)).is_empty(), "one material");
+        assert!(bandgap_cores(&BipartiteHypergraph::from_netlist(&nl(2_000)), &drawn_of(&nl(2_000)), &[]).is_empty());
+    }
+
+    /// Nets: 0=T 1=VSS 2=b0 3=b1 4=b2.
+    fn bank(counts_m: &[i64]) -> Netlist {
+        let mut devices = vec![cap("CT", 0, 1, 10_000, 10_000, 1)];
+        devices.extend(counts_m.iter().enumerate().map(|(i, &m)| cap(&format!("C{i}"), 0, 2 + (i as u16 % 3), 10_000, 10_000, m)));
+        Netlist { devices, nets: nets(&["T", "VSS", "b0", "b1", "b2"]), ..Default::default() }
+    }
+
+    #[test]
+    fn binary_bank_is_a_dac_bank_with_its_terminator_first() {
+        let nl = bank(&[4, 1, 2]);
+        let mut diags = Vec::new();
+        let sets = capacitor_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl), &classes(&nl, &[1]), &mut diags);
+        assert!(diags.is_empty());
+        assert_eq!(sets, [PassiveSet { reference: Some(DeviceId(0)), ..set(vec![0, 1, 2, 3], "dac_bank", SetRole::DacBank) }]);
+    }
+
+    #[test]
+    fn ratio_bank_and_unterminated_bank() {
+        let nl = bank(&[3, 5]);
+        let mut diags = Vec::new();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let sets = capacitor_sets(&hg, &drawn_of(&nl), &classes(&nl, &[1]), &mut diags);
+        assert_eq!(sets, [PassiveSet { reference: Some(DeviceId(0)), ..set(vec![0, 1, 2], "cap_ratio", SetRole::FeedbackRatio) }]);
+        // No rail: no terminator, members by id.
+        let sets = capacitor_sets(&hg, &drawn_of(&nl), &classes(&nl, &[]), &mut diags);
+        assert_eq!(sets, [set(vec![0, 1, 2], "cap_ratio", SetRole::FeedbackRatio)]);
+        // A lone capacitor is no bank.
+        let one = Netlist { devices: vec![cap("C", 0, 1, 1_000, 1_000, 1)], nets: nets(&["T", "VSS"]), ..Default::default() };
+        assert!(capacitor_sets(&BipartiteHypergraph::from_netlist(&one), &drawn_of(&one), &classes(&one, &[1]), &mut diags).is_empty());
+    }
+
+    /// DACP eq. 1: LSB bank {CT, C1, C2} (4 units, terminated) and MSB bank
+    /// {C3, C4} (4 units) joined by CB: C_B = (4 / 4)·C_u = 1e8 nm².
+    fn split_dac(bridge_l: i64, bridge_m: i64) -> Netlist {
+        // Nets: 0=T1 1=VSS 2=b0 3=b1 4=T2 5=b2 6=b3.
+        Netlist {
+            devices: vec![
+                cap("CT", 0, 1, 10_000, 10_000, 1),
+                cap("C1", 0, 2, 10_000, 10_000, 1),
+                cap("C2", 0, 3, 10_000, 10_000, 2),
+                cap("C3", 4, 5, 10_000, 10_000, 2),
+                cap("C4", 4, 6, 10_000, 10_000, 2),
+                cap("CB", 0, 4, 10_000, bridge_l, bridge_m),
+            ],
+            nets: nets(&["T1", "VSS", "b0", "b1", "T2", "b2", "b3"]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn split_dac_holds_its_bridge() {
+        for (l, m, flagged) in [(5_000, 2, false), (20_000, 1, true)] {
+            let nl = split_dac(l, m);
+            let mut diags = Vec::new();
+            let sets = capacitor_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl), &classes(&nl, &[1]), &mut diags);
+            assert_eq!(
+                sets,
+                [PassiveSet { bridge: Some(DeviceId(5)), reference: Some(DeviceId(0)), ..set(vec![0, 1, 2, 3, 4, 5], "split_dac", SetRole::DacBank) }],
+                "bridge {l}x{m}"
+            );
+            assert_eq!(diags.iter().map(|d| d.kind).collect::<Vec<_>>(), if flagged { vec!["bridge_cap_value"] } else { vec![] });
+        }
+    }
+
+    #[test]
+    fn two_bridges_make_no_split_dac() {
+        let mut nl = split_dac(5_000, 2);
+        nl.devices.push(cap("CB2", 4, 0, 3_000, 3_000, 1));
+        let mut diags = Vec::new();
+        let sets = capacitor_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl), &classes(&nl, &[1]), &mut diags);
+        assert_eq!(sets.iter().map(|s| s.rule).collect::<Vec<_>>(), ["dac_bank", "cap_ratio"]);
+    }
+
+    /// Degeneration needs one resistor per leg to one common node.
+    #[test]
+    fn degeneration_skips_open_legs() {
+        // Nets: 0=c1 1=vb 2=e1 3=c2 4=e2 5=t 6=u.
+        let nl = Netlist {
+            devices: vec![bjt("Q1", 0, 1, 2, 1), bjt("Q2", 3, 1, 4, 1), res("RA", 2, 5, 2_000, 10_000), res("RB", 4, 6, 2_000, 10_000)],
+            nets: nets(&["c1", "vb", "e1", "c2", "e2", "t", "u"]),
+            ..Default::default()
+        };
+        let mut diags = Vec::new();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        assert!(degeneration(&hg, &drawn_of(&nl), &[(DeviceId(0), DeviceId(1))], &mut diags).is_empty(), "two far nodes");
+        assert!(degeneration(&hg, &drawn_of(&nl), &[], &mut diags).is_empty());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn degenerated_pair_found() {
+        let n = DeviceKind::Nmos;
+        // Nets: 0=inp 1=a 2=s1 3=inn 4=b 5=s2 6=t 7=VSS.
+        let nl = |g2: u16| Netlist {
+            devices: vec![
+                crate::tests::fet("M1", n, 0, 1, 2, 7, 2_000, 500),
+                crate::tests::fet("M2", n, g2, 4, 5, 7, 2_000, 500),
+                res("RA", 2, 6, 2_000, 10_000),
+                res("RB", 5, 6, 2_000, 10_000),
+            ],
+            nets: nets(&["inp", "a", "s1", "inn", "b", "s2", "t", "VSS"]),
+            ..Default::default()
+        };
+        let roles = vec![crate::NetRole::Signal; 8];
+        let run = |nl: &Netlist| degenerated_pairs(&BipartiteHypergraph::from_netlist(nl), &drawn_of(nl), &roles);
+        assert_eq!(run(&nl(3)), [(DeviceId(0), DeviceId(1))]);
+        assert!(run(&nl(0)).is_empty(), "one gate");
+        let mut ground = roles.clone();
+        ground[2] = crate::NetRole::Ground;
+        assert!(degenerated_pairs(&BipartiteHypergraph::from_netlist(&nl(3)), &drawn_of(&nl(3)), &ground).is_empty(), "a source on a rail");
+    }
+
+    #[test]
+    fn diode_sets_per_shared_terminal() {
+        let d = |name: &str, p: u16, n: u16| two(name, DeviceKind::Diode, "dio", p, n, &[("w", 1_000), ("l", 1_000)]);
+        // Nets: 0=a 1=k1 2=k2. D0, D1 share the anode only.
+        let nl = Netlist { devices: vec![d("D0", 0, 1), d("D1", 0, 2)], nets: nets(&["a", "k1", "k2"]), ..Default::default() };
+        assert_eq!(diode_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl)), [set(vec![0, 1], "diode_set", SetRole::Other)]);
+        // Different area: no set.
+        let mut odd = nl.clone();
+        odd.devices[1].params[0].1 = 2_000;
+        assert!(diode_sets(&BipartiteHypergraph::from_netlist(&odd), &drawn_of(&odd)).is_empty());
+    }
+
+    /// Diodes in parallel share both terminals: one set, not the same set twice.
+    #[test]
+    fn parallel_diodes_are_one_set() {
+        let d = |name: &str| two(name, DeviceKind::Diode, "dio", 0, 1, &[("w", 1_000), ("l", 1_000)]);
+        let nl = Netlist { devices: vec![d("D0"), d("D1")], nets: nets(&["a", "k"]), ..Default::default() };
+        assert_eq!(diode_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl)), [set(vec![0, 1], "diode_set", SetRole::Other)]);
+    }
+
+    /// A diode written without `P`/`N` pins shares no net with anything.
+    #[test]
+    fn diodes_without_pins_join_nothing() {
+        let d = |name: &str, a: u16, k: u16| Device {
+            name: name.into(),
+            kind: DeviceKind::Diode,
+            model: "dio".into(),
+            terminals: vec![("A".into(), NetId(a)), ("K".into(), NetId(k))],
+            params: vec![],
+        };
+        let nl = Netlist { devices: vec![d("D0", 0, 1), d("D1", 2, 3)], nets: nets(&["a0", "k0", "a1", "k1"]), ..Default::default() };
+        assert!(diode_sets(&BipartiteHypergraph::from_netlist(&nl), &drawn_of(&nl)).is_empty());
+    }
 }

@@ -630,4 +630,358 @@ mod tests {
         let e = unitize(&ids(2), &drawn(&nl), DeviceKind::Nmos, MatchClass::Moderate, &DECK).unwrap_err();
         assert_eq!(e.kind, "non_integer_ratio");
     }
+
+    // ---- cleanup(annotator-sets) step 2: kernels and every unitize branch ----
+
+    /// A drawn device straight from its numbers.
+    fn dr(w: Option<i64>, l: Option<i64>, fingers: u32, model: u16) -> Drawn {
+        Drawn { w_finger_nm: w, l_nm: l, fingers, model, bulk: None }
+    }
+
+    fn unit(members: usize, d: &[Drawn], kind: DeviceKind, class: MatchClass) -> Result<(UnitGeom, Vec<(u16, u16)>), Diagnostic> {
+        unitize(&ids(members), d, kind, class, &DECK)
+    }
+
+    #[test]
+    fn gcd_corners() {
+        assert_eq!(gcd(0, 0), 0);
+        assert_eq!(gcd(12, 18), 6);
+        assert_eq!(gcd(18, 12), 6);
+        assert_eq!(gcd(-4, 6), 2);
+        assert_eq!(gcd(7, 0), 7);
+        assert_eq!(gcd_all([]), 0);
+        assert_eq!(gcd_all([7]), 7);
+        assert_eq!(gcd_all([4, 6, 9]), 1);
+    }
+
+    #[test]
+    fn group_keeps_first_seen_and_input_order() {
+        assert!(group(Vec::<(u8, u8)>::new()).is_empty());
+        let g = group([('b', 1), ('a', 2), ('b', 3)]);
+        assert_eq!(g, [('b', vec![1, 3]), ('a', vec![2])]);
+    }
+
+    #[test]
+    fn device_index_and_inside() {
+        let items = [vec![DeviceId(0), DeviceId(2)], vec![DeviceId(2)]];
+        let idx = device_index(3, items.iter().map(Vec::as_slice));
+        assert_eq!(idx, [vec![0], vec![], vec![0, 1]]);
+        assert!(device_index(0, std::iter::empty::<&[DeviceId]>()).is_empty());
+        assert_eq!(inside(&idx, [0, 2], |_| true), [0, 1], "ascending, distinct");
+        assert_eq!(inside(&idx, [2], |i| i == 1), [1]);
+        assert!(inside(&idx, [1], |_| true).is_empty(), "an untouched device");
+        assert!(inside(&idx, std::iter::empty::<usize>(), |_| true).is_empty());
+    }
+
+    #[test]
+    fn union_roots_at_the_smallest_member() {
+        let mut p: Vec<usize> = (0..5).collect();
+        union(&mut p, 3, 1);
+        union(&mut p, 4, 3);
+        union(&mut p, 2, 2);
+        assert_eq!([find(&mut p, 1), find(&mut p, 3), find(&mut p, 4)], [1, 1, 1]);
+        assert_eq!([find(&mut p, 0), find(&mut p, 2)], [0, 2]);
+    }
+
+    #[test]
+    fn diode_connection() {
+        let n = DeviceKind::Nmos;
+        let nl = Netlist {
+            devices: vec![mk("D", n, 0, 0, 1, 1, 1_000, 500), mk("M", n, 0, 2, 1, 1, 1_000, 500)],
+            nets: nets(&["g", "VSS", "d"]),
+            ..Default::default()
+        };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        assert!(diode(&hg, 0));
+        assert!(!diode(&hg, 1));
+    }
+
+    #[test]
+    fn every_missing_deck_key_is_incomplete() {
+        let d = [dr(Some(2_000), Some(1_000), 1, 0); 2];
+        let decks = [
+            UnitDeck { grid_nm: 0, ..DECK },
+            UnitDeck { min_w_nm: 0, ..DECK },
+            UnitDeck { max_w_nm: 0, ..DECK },
+            UnitDeck { min_l_nm: 0, ..DECK },
+            UnitDeck { res_min_segment_nm: 0, ..DECK },
+            UnitDeck::default(),
+        ];
+        for deck in decks {
+            let e = unitize(&ids(2), &d, DeviceKind::Nmos, MatchClass::Moderate, &deck).unwrap_err();
+            assert_eq!((e.kind, e.devices.len()), ("unit_deck_incomplete", 2), "{deck:?}");
+        }
+    }
+
+    /// No members is no ratio, whatever the kind: an error, never a panic.
+    #[test]
+    fn empty_members_is_an_error_for_every_kind() {
+        for kind in [DeviceKind::Nmos, DeviceKind::Resistor, DeviceKind::Capacitor, DeviceKind::Npn, DeviceKind::Diode] {
+            let e = unitize(&[], &[], kind, MatchClass::Moderate, &DECK).unwrap_err();
+            assert_eq!(e.kind, "non_integer_ratio", "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn models_differ() {
+        let d = [dr(Some(2_000), Some(1_000), 1, 0), dr(Some(2_000), Some(1_000), 1, 1)];
+        assert_eq!(unit(2, &d, DeviceKind::Nmos, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio");
+    }
+
+    #[test]
+    fn fet_unknown_size() {
+        for d in [[dr(None, Some(1_000), 1, 0), dr(Some(2_000), Some(1_000), 1, 0)], [dr(Some(2_000), None, 1, 0), dr(Some(2_000), Some(1_000), 1, 0)]] {
+            assert_eq!(unit(2, &d, DeviceKind::Pmos, MatchClass::Moderate).unwrap_err().kind, "unknown_size");
+        }
+    }
+
+    /// Hastings MOS rule 11's 1 µm floor binds only from Moderate up.
+    #[test]
+    fn fet_floor_follows_the_class() {
+        let d = [dr(Some(500), Some(1_000), 1, 0), dr(Some(1_000), Some(1_000), 1, 0)];
+        let (u, units) = unit(2, &d, DeviceKind::Nmos, MatchClass::Minimal).unwrap();
+        assert_eq!((u.w_nm, u.l_nm, units), (500, 1_000, vec![(1, 1), (2, 1)]));
+        assert_eq!(unit(2, &d, DeviceKind::Nmos, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio");
+    }
+
+    /// The unit width is capped at `max_w`: the largest on-grid divisor below it.
+    #[test]
+    fn fet_unit_width_capped_at_max() {
+        let d = [dr(Some(20_000), Some(1_000), 1, 0), dr(Some(40_000), Some(1_000), 1, 0)];
+        let (u, units) = unit(2, &d, DeviceKind::Nmos, MatchClass::Moderate).unwrap();
+        assert_eq!((u.w_nm, par(&units)), (10_000, vec![2, 4]));
+    }
+
+    /// Fingers multiply the finger width into the total.
+    #[test]
+    fn fet_fingers_count_into_the_total() {
+        let d = [dr(Some(2_000), Some(1_000), 3, 0), dr(Some(2_000), Some(1_000), 1, 0)];
+        let (u, units) = unit(2, &d, DeviceKind::Nmos, MatchClass::Moderate).unwrap();
+        assert_eq!((u.w_nm, par(&units)), (2_000, vec![3, 1]));
+    }
+
+    #[test]
+    fn fet_off_grid_width_has_no_unit() {
+        // gcd 2003 is prime: neither 1 nor 2003 is a 5 nm multiple at or above the floor.
+        let d = [dr(Some(2_003), Some(1_000), 1, 0), dr(Some(4_006), Some(1_000), 1, 0)];
+        assert_eq!(unit(2, &d, DeviceKind::Nmos, MatchClass::Minimal).unwrap_err().kind, "non_integer_ratio");
+    }
+
+    #[test]
+    fn fet_unequal_lengths_split_on_the_floor() {
+        let d = [dr(Some(2_000), Some(1_500), 1, 0), dr(Some(2_000), Some(2_000), 1, 0)];
+        // gcd 500: below the 1 µm Moderate floor, above min_l for Minimal.
+        assert_eq!(unit(2, &d, DeviceKind::Nmos, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio");
+        let (u, units) = unit(2, &d, DeviceKind::Nmos, MatchClass::Minimal).unwrap();
+        assert_eq!((u.l_nm, units), (500, vec![(1, 3), (1, 4)]));
+        // Off-grid split length.
+        let d = [dr(Some(2_000), Some(1_502), 1, 0), dr(Some(2_000), Some(3_004), 1, 0)];
+        assert_eq!(unit(2, &d, DeviceKind::Nmos, MatchClass::Minimal).unwrap_err().kind, "non_integer_ratio");
+    }
+
+    #[test]
+    fn fet_too_many_units() {
+        let d = [dr(Some(10_000), Some(1_000), 1, 0), dr(Some(700_000_000), Some(1_000), 1, 0)];
+        let e = unit(2, &d, DeviceKind::Nmos, MatchClass::Moderate).unwrap_err();
+        assert_eq!((e.kind, e.message.as_str()), ("non_integer_ratio", "too many units"));
+    }
+
+    #[test]
+    fn fet_single_member_is_one_unit() {
+        let (u, units) = unit(1, &[dr(Some(4_000), Some(1_000), 1, 0)], DeviceKind::Nmos, MatchClass::Moderate).unwrap();
+        assert_eq!((u.w_nm, u.l_nm, units), (4_000, 1_000, vec![(1, 1)]));
+    }
+
+    #[test]
+    fn resistor_rules() {
+        let r = DeviceKind::Resistor;
+        let d = [dr(Some(2_000), Some(10_000), 2, 0), dr(Some(2_000), Some(30_000), 1, 0)];
+        let (u, units) = unit(2, &d, r, MatchClass::Moderate).unwrap();
+        assert_eq!((u.w_nm, u.l_nm, units), (2_000, 10_000, vec![(2, 1), (1, 3)]), "parallel = m, series = L / L_u");
+        let widths = [dr(Some(2_000), Some(10_000), 1, 0), dr(Some(3_000), Some(10_000), 1, 0)];
+        assert_eq!(unit(2, &widths, r, MatchClass::Moderate).unwrap_err().kind, "resistor_widths_differ");
+        let unknown = [dr(Some(2_000), None, 1, 0), dr(Some(2_000), Some(10_000), 1, 0)];
+        assert_eq!(unit(2, &unknown, r, MatchClass::Moderate).unwrap_err().kind, "unknown_size");
+        let short = [dr(Some(2_000), Some(5_000), 1, 0), dr(Some(2_000), Some(10_000), 1, 0)];
+        assert_eq!(unit(2, &short, r, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio");
+    }
+
+    #[test]
+    fn capacitor_rules() {
+        let c = DeviceKind::Capacitor;
+        let same = [dr(Some(10_000), Some(10_000), 1, 0), dr(Some(10_000), Some(10_000), 2, 0), dr(Some(10_000), Some(10_000), 4, 0)];
+        let (u, units) = unit(3, &same, c, MatchClass::Moderate).unwrap();
+        assert_eq!((u.w_nm, u.l_nm, units), (10_000, 10_000, vec![(1, 1), (2, 1), (4, 1)]));
+        let multiple = [dr(Some(10_000), Some(10_000), 1, 0), dr(Some(10_000), Some(30_000), 2, 0)];
+        let (u, units) = unit(2, &multiple, c, MatchClass::Moderate).unwrap();
+        assert_eq!((u.l_nm, units), (10_000, vec![(1, 1), (6, 1)]));
+        let widths = [dr(Some(10_000), Some(10_000), 1, 0), dr(Some(20_000), Some(20_000), 1, 0)];
+        assert_eq!(unit(2, &widths, c, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio");
+        let off = [dr(Some(10_000), Some(10_000), 1, 0), dr(Some(10_000), Some(15_000), 1, 0)];
+        assert_eq!(unit(2, &off, c, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio");
+        let unknown = [dr(Some(10_000), Some(10_000), 1, 0), dr(Some(10_000), None, 1, 0)];
+        assert_eq!(unit(2, &unknown, c, MatchClass::Moderate).unwrap_err().kind, "unknown_size");
+    }
+
+    #[test]
+    fn identical_unit_kinds() {
+        for k in [DeviceKind::Npn, DeviceKind::Pnp, DeviceKind::Diode] {
+            let d = [dr(Some(5_000), Some(5_000), 1, 0), dr(Some(5_000), Some(5_000), 8, 0)];
+            let (u, units) = unit(2, &d, k, MatchClass::Moderate).unwrap();
+            assert_eq!((u.w_nm, u.l_nm, units), (5_000, 5_000, vec![(1, 1), (8, 1)]), "{k:?}");
+            let differ = [dr(Some(5_000), Some(5_000), 1, 0), dr(Some(10_000), Some(10_000), 1, 0)];
+            assert_eq!(unit(2, &differ, k, MatchClass::Moderate).unwrap_err().kind, "non_integer_ratio", "{k:?}");
+        }
+    }
+
+    fn bridged(bridge: u16) -> PassiveSet {
+        PassiveSet { devices: ids(3), rule: "split_dac", role: crate::class::SetRole::DacBank, reference: None, bridge: Some(DeviceId(bridge)) }
+    }
+
+    #[test]
+    fn unitize_set_skips_the_bridge() {
+        let d = [dr(Some(10_000), Some(10_000), 1, 0), dr(Some(10_000), Some(10_000), 2, 0), dr(Some(3_000), Some(7_000), 1, 0)];
+        let (u, units) = unitize_set(&ids(3), &[bridged(2)], &d, DeviceKind::Capacitor, MatchClass::Moderate, &DECK).unwrap();
+        assert_eq!((u.w_nm, units), (10_000, vec![(1, 1), (2, 1), (1, 1)]));
+        // The bridge first: the others keep their order.
+        let order = [DeviceId(2), DeviceId(0), DeviceId(1)];
+        let (_, units) = unitize_set(&order, &[bridged(2)], &d, DeviceKind::Capacitor, MatchClass::Moderate, &DECK).unwrap();
+        assert_eq!(units, [(1, 1), (1, 1), (2, 1)]);
+        // Without the bridge entry, the odd capacitor breaks the ratio.
+        assert!(unitize_set(&ids(3), &[], &d, DeviceKind::Capacitor, MatchClass::Moderate, &DECK).is_err());
+    }
+
+    /// Only bridges: nothing to unitize, an error and no panic.
+    #[test]
+    fn unitize_set_of_only_a_bridge() {
+        let d = [dr(Some(10_000), Some(10_000), 1, 0)];
+        let e = unitize_set(&[DeviceId(0)], &[bridged(0)], &d, DeviceKind::Capacitor, MatchClass::Moderate, &DECK).unwrap_err();
+        assert_eq!(e.kind, "non_integer_ratio");
+    }
+
+    fn classes_of(nl: &Netlist, class: impl Fn(usize) -> NetClass) -> Vec<NetClassification> {
+        (0..nl.nets.len()).map(|n| NetClassification { net: pnr_core::ids::NetId(n as u16), class: class(n), c_budget_af: None, max_coupling_af: None }).collect()
+    }
+
+    /// Bias gate, two drains: one group; one drain: one device written twice;
+    /// Signal gate without a diode: no bias relation.
+    #[test]
+    fn shared_bias_rules() {
+        let n = DeviceKind::Nmos;
+        // Nets: 0=vb 1=VSS 2=d1 3=d2.
+        let nl = Netlist {
+            devices: vec![mk("A", n, 0, 2, 1, 1, 2_000, 500), mk("B", n, 0, 3, 1, 1, 4_000, 500), mk("C", n, 0, 2, 1, 1, 2_000, 1_000), mk("D", n, 0, 2, 1, 1, 2_000, 1_000)],
+            nets: nets(&["vb", "VSS", "d1", "d2"]),
+            ..Default::default()
+        };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let d = drawn(&nl);
+        let bias = classes_of(&nl, |n| if n == 0 { NetClass::Bias } else { NetClass::Signal });
+        assert_eq!(shared_bias_groups(&hg, &d, &bias), [vec![DeviceId(0), DeviceId(1)]], "C and D share one drain");
+        let signal = classes_of(&nl, |_| NetClass::Signal);
+        assert!(shared_bias_groups(&hg, &d, &signal).is_empty());
+        assert!(shared_bias_groups(&hg, &[], &bias).is_empty(), "no devices");
+    }
+
+    /// A diode-connected member makes a group on a Signal gate, and leads it.
+    #[test]
+    fn shared_bias_diode_leads() {
+        let n = DeviceKind::Nmos;
+        // Nets: 0=g 1=VSS 2=out. Device 1 is the diode (D = G).
+        let nl = Netlist { devices: vec![mk("O", n, 0, 2, 1, 1, 2_000, 500), mk("R", n, 0, 0, 1, 1, 2_000, 500)], nets: nets(&["g", "VSS", "out"]), ..Default::default() };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let signal = classes_of(&nl, |_| NetClass::Signal);
+        assert_eq!(shared_bias_groups(&hg, &drawn(&nl), &signal), [vec![DeviceId(1), DeviceId(0)]]);
+    }
+
+    /// Components split by kind with `mixed_kind_set`; members in canonical
+    /// order; no compound, so the origin is the default symmetry seed.
+    #[test]
+    fn matched_sets_split_mixed_kinds() {
+        let (n, p) = (DeviceKind::Nmos, DeviceKind::Pmos);
+        // Nets: 0=a 1=b 2=c 3=VSS.
+        let nl = Netlist {
+            devices: vec![mk("N0", n, 0, 1, 3, 3, 2_000, 1_000), mk("P1", p, 0, 2, 3, 3, 2_000, 1_000), mk("N2", n, 1, 2, 3, 3, 2_000, 1_000)],
+            nets: nets(&["a", "b", "c", "VSS"]),
+            ..Default::default()
+        };
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let req = |a: u16, b: u16| Req { a: DeviceId(a), b: DeviceId(b), ty: ReqType::MatchBlock, source: ConstraintId(0) };
+        let mut diags = Vec::new();
+        let sets = matched_sets(&[req(0, 1), req(1, 2)], &[], &[], &[], &[], &[5, 0, 1], &drawn(&nl), &hg, &DECK, &mut diags);
+        assert_eq!(diags.iter().map(|d| d.kind).collect::<Vec<_>>(), ["mixed_kind_set"]);
+        assert_eq!(sets.len(), 1);
+        let s = &sets[0];
+        assert_eq!(s.members.iter().map(|m| m.device).collect::<Vec<_>>(), [DeviceId(2), DeviceId(0)], "canonical order");
+        assert_eq!(s.origin, Origin::Symmetry { seed: ConstraintId(0) });
+        assert_eq!((s.kind, s.class, s.reference, s.compound), (MatchKind::Current, MatchClass::Moderate, None, None));
+        assert_eq!(s.family, Family::of(n).unwrap());
+        assert!(s.unit.is_some());
+        // ProxBlock edges join nothing.
+        let prox = Req { ty: ReqType::ProxBlock, ..req(0, 2) };
+        assert!(matched_sets(&[prox], &[], &[], &[], &[], &[0, 1, 2], &drawn(&nl), &hg, &DECK, &mut diags).is_empty());
+    }
+
+    /// A set that cannot be unitized keeps `(m, 1)` per member and reports why.
+    #[test]
+    fn matched_sets_fall_back_to_fingers() {
+        let nl = mos(&[(2_000, 1_000, 1), (2_000, 1_000, 1)]);
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let req = Req { a: DeviceId(0), b: DeviceId(1), ty: ReqType::MatchSym, source: ConstraintId(0) };
+        let mut diags = Vec::new();
+        let sets = matched_sets(&[req], &[], &[], &[], &[], &[0, 1], &drawn(&nl), &hg, &UnitDeck::default(), &mut diags);
+        assert_eq!(diags.iter().map(|d| d.kind).collect::<Vec<_>>(), ["unit_deck_incomplete"]);
+        assert!(sets[0].unit.is_none());
+        assert_eq!(sets[0].members.iter().map(|m| (m.parallel, m.series)).collect::<Vec<_>>(), [(1, 1), (1, 1)]);
+    }
+
+    fn compound(pairs: &[(u16, u16)]) -> Compound {
+        Compound {
+            id: ConstraintId(0),
+            axis: pnr_core::ids::AxisId(0),
+            dir: analog::intent::AxisDir::V,
+            kind: analog::intent::SymKind::Mirror,
+            pairs: pairs.iter().map(|&(a, b)| (DeviceId(a), DeviceId(b))).collect(),
+            selfs: Vec::new(),
+            net_pairs: Vec::new(),
+            self_nets: Vec::new(),
+            set_pairs: vec![(9, 9)],
+        }
+    }
+
+    fn spec(devs: &[u16]) -> MatchSpec {
+        MatchSpec {
+            id: ConstraintId(0),
+            origin: Origin::SharedBias,
+            members: devs.iter().map(|&d| Member { device: DeviceId(d), parallel: 1, series: 1, half: None }).collect(),
+            reference: None,
+            family: Family::of(DeviceKind::Nmos).unwrap(),
+            kind: MatchKind::Current,
+            class: MatchClass::Moderate,
+            class_source: ClassSource::Role,
+            unit: None,
+            allowance: None,
+            weight: None,
+            style: ArrayStyle::Any,
+            compound: None,
+        }
+    }
+
+    #[test]
+    fn set_pairs_corners() {
+        // No sets: stale pairs are cleared.
+        let mut cs = vec![compound(&[(0, 1)])];
+        set_pairs(&mut cs, &[]);
+        assert!(cs[0].set_pairs.is_empty());
+        // {0, 2} maps onto {1, 3} whatever the member order; {4} is outside the pairs.
+        let sets = [spec(&[2, 0]), spec(&[4]), spec(&[3, 1])];
+        let mut cs = vec![compound(&[(0, 1), (2, 3)]), compound(&[])];
+        set_pairs(&mut cs, &sets);
+        assert_eq!(cs[0].set_pairs, [(0, 2)]);
+        assert!(cs[1].set_pairs.is_empty());
+        // A partial image is no pair.
+        let mut cs = vec![compound(&[(0, 1)])];
+        set_pairs(&mut cs, &sets);
+        assert!(cs[0].set_pairs.is_empty());
+    }
 }

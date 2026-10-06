@@ -440,4 +440,103 @@ mod tests {
         assert_eq!(c.pairs.iter().map(|&(a, b)| (name(a), name(b))).collect::<Vec<_>>(), [("M1", "M2")]);
         assert!(p.intent.diagnostics.iter().any(|d| d.kind == "ambiguous_symmetry"), "{:?}", p.intent.diagnostics);
     }
+
+    // ---- cleanup(annotator-sets) step 2 ----
+
+    use super::{analyze, channel, control, passive, Seed};
+    use analog::intent::ConstraintId;
+    use pnr_core::ids::{DeviceId, NetId};
+    use pnr_core::BipartiteHypergraph;
+
+    /// `analyze` over `nl` with the annotator's own net classes and identity
+    /// canonical labels.
+    fn run(nl: &Netlist, seeds: &[Seed]) -> (Vec<analog::intent::Compound>, Vec<analog::intent::Diagnostic>) {
+        let hg = BipartiteHypergraph::from_netlist(nl);
+        let mut models = Vec::new();
+        let drawn: Vec<_> = nl.devices.iter().map(|d| crate::size::drawn(d, &mut models)).collect();
+        let classes = annotate(nl, &AnnotationConfig::default()).net_classes;
+        let canon: Vec<u64> = (0..nl.devices.len() as u64).collect();
+        analyze(&hg, &drawn, &classes, seeds, &canon)
+    }
+
+    #[test]
+    fn terminal_classes() {
+        for t in ["D", "S", "C", "E", "P", "N"] {
+            assert!(channel(t), "{t}");
+        }
+        assert!(!channel("G") && !channel("B"));
+        assert!(control(DeviceKind::Nmos, "G") && control(DeviceKind::Npn, "B") && control(DeviceKind::Pnp, "B"));
+        assert!(!control(DeviceKind::Nmos, "B"), "a FET's B is its bulk");
+        assert!(passive(DeviceKind::Resistor) && passive(DeviceKind::Capacitor) && passive(DeviceKind::Inductor) && passive(DeviceKind::Diode));
+        assert!(!passive(DeviceKind::Nmos) && !passive(DeviceKind::Npn));
+    }
+
+    #[test]
+    fn no_seeds_no_compounds() {
+        let (c, d) = run(&crate::tests::ota(), &[]);
+        assert!(c.is_empty() && d.is_empty(), "{d:?}");
+    }
+
+    /// The OTA's input pair propagates to its load pair; ids and axes are indices.
+    #[test]
+    fn ota_pair_propagates_to_the_load() {
+        let (c, d) = run(&crate::tests::ota(), &[Seed::Devices(DeviceId(0), DeviceId(1), ConstraintId(7))]);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].pairs, [(DeviceId(0), DeviceId(1)), (DeviceId(2), DeviceId(3))]);
+        assert_eq!((c[0].id, c[0].axis), (ConstraintId(0), pnr_core::ids::AxisId(0)));
+        assert!(c[0].net_pairs.contains(&(NetId(0), NetId(4))), "{:?}", c[0].net_pairs);
+        assert!(c[0].selfs.contains(&DeviceId(4)), "the tail sits on the self-symmetric tail net");
+    }
+
+    /// A device seeded against itself is no pair (a pair has two devices).
+    #[test]
+    fn a_device_seeded_with_itself_is_no_pair() {
+        let (c, _) = run(&crate::tests::ota(), &[Seed::Devices(DeviceId(0), DeviceId(0), ConstraintId(1))]);
+        assert!(c.iter().all(|c| c.pairs.iter().all(|&(a, b)| a != b)), "{:?}", c.iter().map(|c| &c.pairs).collect::<Vec<_>>());
+    }
+
+    /// Different signatures never pair, and say nothing.
+    #[test]
+    fn unlike_devices_are_skipped_silently() {
+        let (c, d) = run(&crate::tests::ota(), &[Seed::Devices(DeviceId(0), DeviceId(2), ConstraintId(1))]);
+        assert!(c.is_empty() && d.is_empty());
+    }
+
+    /// GAP-09 (a): the earlier seed wins; the later one is a conflict naming both.
+    #[test]
+    fn contradicting_seeds_conflict() {
+        let seeds = [Seed::Devices(DeviceId(0), DeviceId(1), ConstraintId(7)), Seed::SelfDevice(DeviceId(0), ConstraintId(9))];
+        let (c, d) = run(&crate::tests::ota(), &seeds);
+        assert_eq!(c[0].pairs[0], (DeviceId(0), DeviceId(1)));
+        assert_eq!(d.iter().map(|d| d.kind).collect::<Vec<_>>(), ["conflict"]);
+        assert!(d[0].message.contains('9') && d[0].message.contains('7'), "{}", d[0].message);
+        // The same pair seeded twice is no conflict.
+        let twice = [seeds[0], seeds[0]];
+        assert!(run(&crate::tests::ota(), &twice).1.is_empty());
+    }
+
+    /// A self seed alone makes no compound (a compound needs a pair).
+    #[test]
+    fn a_lone_self_is_dropped() {
+        let (c, d) = run(&crate::tests::ota(), &[Seed::SelfDevice(DeviceId(4), ConstraintId(1))]);
+        assert!(c.is_empty() && d.is_empty());
+    }
+
+    /// Rails take no mate: a rail net seed changes nothing.
+    #[test]
+    fn rail_net_seeds_do_nothing() {
+        let (c, d) = run(&crate::tests::ota(), &[Seed::Nets(NetId(3), NetId(3), ConstraintId(1)), Seed::Nets(NetId(3), NetId(7), ConstraintId(2))]);
+        assert!(c.is_empty() && d.is_empty());
+    }
+
+    /// Mating the OTA's outputs finds the same pairs as seeding the devices.
+    #[test]
+    fn net_seed_propagates_like_a_device_seed() {
+        let (c, _) = run(&crate::tests::ota(), &[Seed::Nets(NetId(0), NetId(4), ConstraintId(1))]);
+        assert_eq!(c.len(), 1);
+        let mut pairs = c[0].pairs.clone();
+        pairs.sort_by_key(|p| p.0 .0);
+        assert_eq!(pairs, [(DeviceId(0), DeviceId(1)), (DeviceId(2), DeviceId(3))]);
+    }
 }

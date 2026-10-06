@@ -372,4 +372,137 @@ mod tests {
         assert_eq!(quiet_ground(&classes[..1], &names, &agg, &hg), Some((NetId(0), true)), "shared");
         assert_eq!(quiet_ground(&classes[2..], &names, &[], &hg), None);
     }
+
+    // ---- cleanup(annotator-sets) step 2 ----
+
+    use analog::intent::{ArrayStyle, ClassSource, ConstraintId, MatchClass, MatchSpec, Member, Origin};
+    use pnr_core::netlist::{Device, DeviceKind, Netlist};
+
+    fn spec(devs: &[u16], kind: MatchKind) -> MatchSpec {
+        MatchSpec {
+            id: ConstraintId(0),
+            origin: Origin::SharedBias,
+            members: devs.iter().map(|&d| Member { device: DeviceId(d), parallel: 1, series: 1, half: None }).collect(),
+            reference: None,
+            family: analog::intent::Family::of(DeviceKind::Nmos).unwrap(),
+            kind,
+            class: MatchClass::Moderate,
+            class_source: ClassSource::Role,
+            unit: None,
+            allowance: None,
+            weight: None,
+            style: ArrayStyle::Any,
+            compound: None,
+        }
+    }
+
+    fn signal_classes(n: usize, ground: &[u16]) -> Vec<NetClassification> {
+        (0..n as u16).map(|i| NetClassification { net: NetId(i), class: if ground.contains(&i) { NetClass::Ground } else { NetClass::Signal }, c_budget_af: None, max_coupling_af: None }).collect()
+    }
+
+    #[test]
+    fn class_predicates_and_policy_rows() {
+        for c in [NetClass::Supply, NetClass::Ground, NetClass::Substrate] {
+            assert!(rail(c) && !victim_net(c) && !aggressor_net(c), "{c:?}");
+        }
+        for c in [NetClass::Sensitive, NetClass::Bias, NetClass::Reference] {
+            assert!(victim_net(c) && !rail(c) && !aggressor_net(c));
+            assert_eq!(policy_row(c, true), 0, "a victim before the third row");
+        }
+        for c in [NetClass::Clock, NetClass::DigitalSwitching, NetClass::Noisy] {
+            assert!(aggressor_net(c) && !rail(c));
+            assert_eq!(policy_row(c, true), 1);
+        }
+        assert_eq!(policy_row(NetClass::Signal, true), 2);
+        assert_eq!(policy_row(NetClass::Signal, false), 3);
+    }
+
+    /// One Antenna per gate net over the summed gate area; none without a ratio.
+    #[test]
+    fn antennas_sum_gate_area_per_net() {
+        let nl = crate::tests::ota();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let policy = crate::policy::Policy::default();
+        let gate_um2 = [1.0, 0.0, 0.5, 0.5, -1.0];
+        assert!(antennas(&hg, &gate_um2, &crate::ProcessNumbers::default(), &policy).is_empty());
+        let process = crate::ProcessNumbers { antenna_max_ratio: Some(4.0), ..Default::default() };
+        let a = antennas(&hg, &gate_um2, &process, &policy);
+        let got: Vec<(NetId, i32, i64)> = a.iter().map(|a| (a.net, a.max_ratio_x100, a.gate_area_nm2)).collect();
+        assert_eq!(got, [(NetId(1), 400, 1_000_000), (NetId(6), 400, 1_000_000)]);
+        assert!(a.iter().all(|a| a.margin_pct == policy.antenna_margin_pct));
+    }
+
+    /// The OTA's input pair shares vtail: one common node, halves by id; the
+    /// tail's drain is the feed, so no star unless vtail is a port.
+    #[test]
+    fn common_node_of_the_input_pair() {
+        let nl = crate::tests::ota();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let classes = signal_classes(nl.nets.len(), &[3]);
+        for (ports, star) in [(vec![], false), (vec![NetId(2)], true)] {
+            let mut intent = Intent { sets: vec![spec(&[1, 0], MatchKind::Current)], ..Default::default() };
+            common_nodes(&hg, &classes, &mut intent, &[], &ports, None);
+            let c: Vec<(NetId, u16, Vec<DeviceId>, Vec<DeviceId>, Term)> = intent.common_nodes.iter().map(|c| (c.net, c.set, c.a.clone(), c.b.clone(), c.term)).collect();
+            assert_eq!(c, [(NetId(2), 0, vec![DeviceId(0)], vec![DeviceId(1)], Term::S)]);
+            assert_eq!(intent.stars.len(), usize::from(star), "ports {ports:?}");
+            if star {
+                assert!(intent.stars[0].root.is_none());
+            }
+        }
+    }
+
+    /// A reference member makes one common node per other member.
+    #[test]
+    fn common_nodes_from_a_reference() {
+        let nl = crate::tests::ota();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let mut s = spec(&[0, 1], MatchKind::Current);
+        s.reference = Some(1);
+        let mut intent = Intent { sets: vec![s], ..Default::default() };
+        common_nodes(&hg, &signal_classes(nl.nets.len(), &[3]), &mut intent, &[], &[], None);
+        let c: Vec<(Vec<DeviceId>, Vec<DeviceId>)> = intent.common_nodes.iter().map(|c| (c.a.clone(), c.b.clone())).collect();
+        assert_eq!(c, [(vec![DeviceId(1)], vec![DeviceId(0)])]);
+    }
+
+    /// Members on different sources, or a lone member, share no node.
+    #[test]
+    fn no_common_node_without_a_shared_source() {
+        let nl = crate::tests::ota();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let mut intent = Intent { sets: vec![spec(&[0, 4], MatchKind::Current), spec(&[0], MatchKind::Current)], ..Default::default() };
+        common_nodes(&hg, &signal_classes(nl.nets.len(), &[3]), &mut intent, &[], &[], None);
+        assert!(intent.common_nodes.is_empty() && intent.stars.is_empty());
+    }
+
+    /// An empty set (no members) is skipped, never indexed.
+    #[test]
+    fn empty_sets_are_skipped() {
+        let nl = crate::tests::ota();
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let mut intent = Intent { sets: vec![spec(&[], MatchKind::Voltage)], ..Default::default() };
+        common_nodes(&hg, &signal_classes(nl.nets.len(), &[3]), &mut intent, &[crate::class::SetRole::DacBank], &[], None);
+        assert!(intent.common_nodes.is_empty() && intent.kelvins.is_empty());
+    }
+
+    /// A resistor between the two gates of a Voltage set is sensed at both ends.
+    #[test]
+    fn kelvin_across_a_voltage_pair() {
+        let mut nl: Netlist = crate::tests::ota();
+        nl.devices.push(Device {
+            name: "R".into(),
+            kind: DeviceKind::Resistor,
+            model: "r".into(),
+            terminals: vec![("P".into(), NetId(1)), ("N".into(), NetId(5))],
+            params: vec![],
+        });
+        let hg = BipartiteHypergraph::from_netlist(&nl);
+        let mut intent = Intent { sets: vec![spec(&[0, 1], MatchKind::Voltage)], ..Default::default() };
+        kelvins(&hg, &mut intent);
+        let k: Vec<(DeviceId, Term, Vec<(DeviceId, Term)>)> = intent.kelvins.iter().map(|k| (k.device, k.term, k.sense.clone())).collect();
+        assert_eq!(k, [(DeviceId(5), Term::P, vec![(DeviceId(0), Term::G)]), (DeviceId(5), Term::N, vec![(DeviceId(1), Term::G)])]);
+        // A Current set is not sensed.
+        let mut intent = Intent { sets: vec![spec(&[0, 1], MatchKind::Current)], ..Default::default() };
+        kelvins(&hg, &mut intent);
+        assert!(intent.kelvins.is_empty());
+    }
 }
