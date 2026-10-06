@@ -472,31 +472,40 @@ pub fn retarget(nl: &mut Netlist, pdk: &verify::Pdk) -> Vec<String> {
                     notes.push(format!("{}: no l, drawn at the deck's minimum l = {l_min} nm", d.name));
                 }
             }
-            DeviceKind::Resistor if ideal(&d.model) => {
-                let Some(recipe) = pdk.recipe("resistor", "") else {
-                    notes.push(format!("{}: ideal resistor left as written: this PDK has no resistor", d.name));
+            // An ideal one becomes the default recipe; a modelled one missing
+            // W or L is completed the same way (`post_layout_spice` needs both).
+            DeviceKind::Resistor if ideal(&d.model) || !sized => {
+                let generic = ideal(&d.model);
+                let Some(recipe) = pdk.recipe("resistor", if generic { "" } else { &d.model }) else {
+                    if generic {
+                        notes.push(format!("{}: ideal resistor left as written: this PDK has no resistor", d.name));
+                    }
                     continue;
                 };
                 let ov = verify::pdk::Overlay { pdk, recipe };
-                let w = ov.rule("res_min_width", 0).max(ov.width("rpoly").unwrap_or(0));
+                let w = get(d, "w").map_or_else(|| ov.rule("res_min_width", 0).max(ov.width("rpoly").unwrap_or(0)), |w| w as i32);
                 let ohm = get(d, "r_mohm").map(|v| v as f64 / 1e3).filter(|&r| r > 0.0);
                 // The recipe's own model (body plus heads), else the deck's body sheet.
-                let l = ohm.filter(|_| !sized && w > 0).and_then(|r| match cells::resistor::ResModel::of(&ov) {
-                    Some(m) => m.seg_len(w, r, 1, 0, 1, i32::MAX),
-                    None => ov.sheet_ohm("rpoly").filter(|&s| s > 0.0).map(|s| ((r * f64::from(w) / f64::from(s)).round() as i32).max(w)),
+                let l = get(d, "l").map(|l| l as i32).or_else(|| {
+                    ohm.filter(|_| w > 0).and_then(|r| match cells::resistor::ResModel::of(&ov) {
+                        Some(m) => m.seg_len(w, r, 1, 0, 1, i32::MAX),
+                        None => ov.sheet_ohm("rpoly").filter(|&s| s > 0.0).map(|s| ((r * f64::from(w) / f64::from(s)).round() as i32).max(w)),
+                    })
                 });
-                match (sized, l) {
-                    (true, _) => notes.push(format!("{}: drawn as {}", d.name, ov.recipe.model)),
-                    (false, Some(l)) => {
-                        d.params.extend([("w".to_string(), i64::from(w)), ("l".to_string(), i64::from(l))]);
-                        notes.push(format!("{}: ideal {} Ω drawn as {} w = {w} nm, l = {l} nm", d.name, ohm.unwrap_or(0.0), ov.recipe.model));
-                    }
-                    (false, None) => {
-                        notes.push(format!("{}: ideal resistor left as written: no value, or none {} can be sized to", d.name, ov.recipe.model));
-                        continue;
+                let Some(l) = l.filter(|_| w > 0) else {
+                    notes.push(format!("{}: resistor left as written: no value or L to size {} by", d.name, ov.recipe.model));
+                    continue;
+                };
+                for (k, v) in [("w", w), ("l", l)] {
+                    if get(d, k).is_none() {
+                        d.params.push((k.to_string(), i64::from(v)));
                     }
                 }
-                d.model = ov.recipe.model;
+                let what = ohm.filter(|_| generic).map_or_else(String::new, |r| format!("ideal {r} Ω "));
+                notes.push(format!("{}: {what}drawn as {} w = {w} nm, l = {l} nm", d.name, ov.recipe.model));
+                if generic {
+                    d.model = ov.recipe.model;
+                }
             }
             DeviceKind::Capacitor if ideal(&d.model) => {
                 // The first recipe the deck's LVS recognises, the default first.
@@ -994,7 +1003,7 @@ X2 a b c cell wu={2*lu}
     fn retarget_fills_what_a_generic_netlist_leaves_to_sky130() {
         use pnr_core::Process as _;
         let pdk = verify::Pdk::builtin("sky130").unwrap();
-        let mut nl = spice("XM1 d g 0 0 nfet_01v8 nf=2\nR1 d out 10k\nC1 d 0 100f\nR2 a b resistor r=1k\nV1 vdd 0 1.8\n").unwrap();
+        let mut nl = spice("XM1 d g 0 0 nfet_01v8 nf=2\nR1 d out 10k\nC1 d 0 100f\nR2 a b resistor r=1k\nV1 vdd 0 1.8\nXR3 a c sky130_fd_pr__res_xhigh_po_0p35 L=5u\n").unwrap();
         let notes = retarget(&mut nl, &pdk);
         let (l_min, _) = pdk.min_channel(false, "nfet_01v8");
         let d = &nl.devices;
@@ -1007,8 +1016,10 @@ X2 a b c cell wu={2*lu}
         assert!(param(&d[2], "w").is_some_and(|w| w >= i64::from(ov.pdk.width("capm").unwrap_or(1))) && param(&d[2], "w") == param(&d[2], "l"));
         assert_eq!(param(&d[3], "r_mohm"), Some(1_000_000), "r= is R2's value");
         assert_eq!(d[3].model, "sky130_fd_pr__res_high_po");
+        assert_eq!((d[4].model.as_str(), param(&d[4], "l")), ("sky130_fd_pr__res_xhigh_po_0p35", Some(5000)), "a modelled R keeps its model and L");
+        assert_eq!(param(&d[4], "w"), param(&d[1], "w"), "and gets the drawn width");
         assert!(notes.iter().any(|n| n.starts_with("V1:")), "{notes:?}");
-        assert_eq!(notes.len(), 6, "{notes:?}");
+        assert_eq!(notes.len(), 7, "{notes:?}");
     }
 
     /// On ASAP7 a FET's width is its fins (`nfin`, else one per finger) and
