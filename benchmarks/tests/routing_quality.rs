@@ -169,3 +169,14 @@ fn wrong_way_jogs_cut_vias() {
     println!("ota vias {}", sol.route_stats.vias);
     assert!(sol.route_stats.vias < OTA_VIAS_BEFORE, "ota vias {} (before {OTA_VIAS_BEFORE})", sol.route_stats.vias);
 }
+
+/// RTE-27 on ota: at most 10 % of stack vias left with one cut.
+#[test]
+#[ignore = "full flow on ota; run with --include-ignored"]
+fn vias_and_corners_on_ota() {
+    let sol = run("ota", &pdk());
+    let s = &sol.route_stats;
+    println!("ota single_cut_vias {} stack_vias {} em rows {:?}", s.single_cut_vias, s.stack_vias, rows(&sol, "em"));
+    assert!(s.stack_vias > 0, "no stack vias");
+    assert!(10 * s.single_cut_vias <= s.stack_vias, "single {} of {}", s.single_cut_vias, s.stack_vias);
+}
