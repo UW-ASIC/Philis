@@ -12,44 +12,51 @@
 <line x1="70" x2="610" y1="30.0" y2="30.0" stroke="#e9ecef"/>
 <text x="64" y="34.0" text-anchor="end" fill="#495057">18,934</text>
 <text x="70.0" y="326" text-anchor="middle" fill="#495057">04-13:56</text>
-<text x="610.0" y="326" text-anchor="middle" fill="#495057">04-14:28</text>
-<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,212.7 610.0,254.7"/>
+<text x="340.0" y="326" text-anchor="middle" fill="#495057">04-14:28</text>
+<text x="610.0" y="326" text-anchor="middle" fill="#495057">10-06-8f84de4</text>
+<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,212.7 340.0,254.7 610.0,292.0"/>
 <circle cx="70.0" cy="212.7" r="3" fill="#2a6fdb"/>
-<circle cx="610.0" cy="254.7" r="3" fill="#2a6fdb"/>
+<circle cx="340.0" cy="254.7" r="3" fill="#2a6fdb"/>
+<circle cx="610.0" cy="292.0" r="3" fill="#2a6fdb"/>
 <rect x="622" y="30" width="10" height="10" fill="#2a6fdb"/><text x="636" y="39">bgr_core</text>
 <circle cx="70.0" cy="199.2" r="3" fill="#e0542b"/>
 <rect x="622" y="44" width="10" height="10" fill="#e0542b"/><text x="636" y="53">bjt_mirror</text>
 <circle cx="70.0" cy="234.6" r="3" fill="#2f9e44"/>
 <rect x="622" y="58" width="10" height="10" fill="#2f9e44"/><text x="636" y="67">chain4</text>
-<polyline fill="none" stroke="#9c36b5" stroke-width="2" points="70.0,103.7 610.0,225.8"/>
+<polyline fill="none" stroke="#9c36b5" stroke-width="2" points="70.0,103.7 340.0,225.8 610.0,255.3"/>
 <circle cx="70.0" cy="103.7" r="3" fill="#9c36b5"/>
-<circle cx="610.0" cy="225.8" r="3" fill="#9c36b5"/>
+<circle cx="340.0" cy="225.8" r="3" fill="#9c36b5"/>
+<circle cx="610.0" cy="255.3" r="3" fill="#9c36b5"/>
 <rect x="622" y="72" width="10" height="10" fill="#9c36b5"/><text x="636" y="81">dac4</text>
 <circle cx="70.0" cy="244.2" r="3" fill="#f59f00"/>
 <rect x="622" y="86" width="10" height="10" fill="#f59f00"/><text x="636" y="95">dac4_mim</text>
 <circle cx="70.0" cy="296.6" r="3" fill="#0b7285"/>
 <rect x="622" y="100" width="10" height="10" fill="#0b7285"/><text x="636" y="109">mirror_ratio</text>
-<polyline fill="none" stroke="#c2255c" stroke-width="2" points="70.0,175.0 610.0,55.5"/>
+<polyline fill="none" stroke="#c2255c" stroke-width="2" points="70.0,175.0 340.0,55.5 610.0,207.6"/>
 <circle cx="70.0" cy="175.0" r="3" fill="#c2255c"/>
-<circle cx="610.0" cy="55.5" r="3" fill="#c2255c"/>
+<circle cx="340.0" cy="55.5" r="3" fill="#c2255c"/>
+<circle cx="610.0" cy="207.6" r="3" fill="#c2255c"/>
 <rect x="622" y="114" width="10" height="10" fill="#c2255c"/><text x="636" y="123">ota</text>
 <circle cx="70.0" cy="223.0" r="3" fill="#5c940d"/>
 <rect x="622" y="128" width="10" height="10" fill="#5c940d"/><text x="636" y="137">ota_constrained</text>
-<polyline fill="none" stroke="#495057" stroke-width="2" points="70.0,296.9 610.0,268.1"/>
+<polyline fill="none" stroke="#495057" stroke-width="2" points="70.0,296.9 340.0,268.1 610.0,308.5"/>
 <circle cx="70.0" cy="296.9" r="3" fill="#495057"/>
-<circle cx="610.0" cy="268.1" r="3" fill="#495057"/>
+<circle cx="340.0" cy="268.1" r="3" fill="#495057"/>
+<circle cx="610.0" cy="308.5" r="3" fill="#495057"/>
 <rect x="622" y="142" width="10" height="10" fill="#495057"/><text x="636" y="151">pair</text>
 <circle cx="70.0" cy="276.4" r="3" fill="#1864ab"/>
 <rect x="622" y="156" width="10" height="10" fill="#1864ab"/><text x="636" y="165">quad</text>
-<polyline fill="none" stroke="#d9480f" stroke-width="2" points="70.0,287.3 610.0,289.2"/>
+<polyline fill="none" stroke="#d9480f" stroke-width="2" points="70.0,287.3 340.0,289.2 610.0,305.9"/>
 <circle cx="70.0" cy="287.3" r="3" fill="#d9480f"/>
-<circle cx="610.0" cy="289.2" r="3" fill="#d9480f"/>
+<circle cx="340.0" cy="289.2" r="3" fill="#d9480f"/>
+<circle cx="610.0" cy="305.9" r="3" fill="#d9480f"/>
 <rect x="622" y="170" width="10" height="10" fill="#d9480f"/><text x="636" y="179">rc_filter</text>
 <circle cx="70.0" cy="303.8" r="3" fill="#087f5b"/>
 <rect x="622" y="184" width="10" height="10" fill="#087f5b"/><text x="636" y="193">res_m2</text>
-<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,250.5 610.0,194.9"/>
+<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,250.5 340.0,194.9 610.0,238.8"/>
 <circle cx="70.0" cy="250.5" r="3" fill="#2a6fdb"/>
-<circle cx="610.0" cy="194.9" r="3" fill="#2a6fdb"/>
+<circle cx="340.0" cy="194.9" r="3" fill="#2a6fdb"/>
+<circle cx="610.0" cy="238.8" r="3" fill="#2a6fdb"/>
 <rect x="622" y="198" width="10" height="10" fill="#2a6fdb"/><text x="636" y="207">tq_chain</text>
 <circle cx="70.0" cy="236.7" r="3" fill="#e0542b"/>
 <rect x="622" y="212" width="10" height="10" fill="#e0542b"/><text x="636" y="221">tt_ota</text>
