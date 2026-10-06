@@ -149,7 +149,12 @@ impl RuleBatch<Routes> for CommonNodes {
         self.nodes.iter().map(|n| u32::from(self.star_broken(n, r)) + u32::from(self.usage(n, r).is_some_and(|u| u > 1.0))).sum()
     }
     fn residual(&self, r: &Routes) -> f64 {
-        self.nodes.iter().filter_map(|n| self.usage(n, r)).map(|u| f64::from((u - 1.0).max(0.0))).sum()
+        // ΔR overshoots, plus one full budget per broken star: a star break
+        // is a violation, and a violation never reads as Θ = 0.
+        self.nodes
+            .iter()
+            .map(|n| f64::from(u8::from(self.star_broken(n, r))) + self.usage(n, r).map_or(0.0, |u| f64::from((u - 1.0).max(0.0))))
+            .sum()
     }
     fn kind(&self) -> &'static str {
         "CommonNode"

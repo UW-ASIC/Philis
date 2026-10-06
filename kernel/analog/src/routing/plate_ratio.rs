@@ -59,7 +59,11 @@ impl PlateRatio {
             .map(|&(bit, _)| {
                 let lead: Vec<Shape> = r.shapes(bit).iter().copied().filter(|s| !inside(s)).collect();
                 let b = bit.0 as usize;
-                let coupled: f32 = (0..r.wires.len()).filter(|&m| m != b).map(|m| net_pair_af(Some(self.stack), &lead, &r.wires[m], &screens_but(r, &[b, m]))).sum();
+                // An unrouted net couples nothing: skip it before building its screens.
+                let coupled: f32 = (0..r.wires.len())
+                    .filter(|&m| m != b && !r.wires[m].is_empty())
+                    .map(|m| net_pair_af(Some(self.stack), &lead, &r.wires[m], &screens_but(r, &[b, m])))
+                    .sum();
                 self.stack.ground_af(&lead) + coupled
             })
             .collect()

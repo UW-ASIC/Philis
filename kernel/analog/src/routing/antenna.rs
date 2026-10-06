@@ -28,7 +28,9 @@ pub struct Antenna {
 impl Rule for Antenna {
     type On = Routes;
     const REPAIR: crate::RepairKind = crate::RepairKind::Antenna;
-    const LOCAL: bool = true;
+    // Not local: the latent merge (GAP-13) reads other nets' shapes, so a
+    // score cached on this net's shapes alone goes stale (RTE-23).
+    const LOCAL: bool = false;
     /// Ratio overshoot past the worst stage's limit, ×100.
     fn cost(self, r: &Routes) -> f32 {
         let (ratio, limit) = self.worst(r);

@@ -34,6 +34,19 @@ impl Shield {
     /// Shielded fraction of the victim's wire length, `0..=1`; `None` when the
     /// victim has no wire.
     fn coverage(self, r: &Routes) -> Option<f32> {
+        let (covered, total) = self.lengths(r);
+        (total > 0).then(|| covered as f32 / total as f32)
+    }
+
+    /// Whether `covered / total` reaches `min_coverage_pct`, compared in
+    /// integers so a share exactly at the floor passes whatever f32 rounding
+    /// of the percentage would say. `true` when the victim has no wire.
+    fn meets_floor(self, (covered, total): (i64, i64)) -> bool {
+        covered * 100 >= i64::from(self.min_coverage_pct) * total
+    }
+
+    /// `(shielded, total)` wire length of the victim, nm.
+    fn lengths(self, r: &Routes) -> (i64, i64) {
         let refs = r.shapes(self.reference);
         let (mut total, mut covered) = (0i64, 0i64);
         for v in r.shapes(self.victim).iter().filter(|s| s.rect.w != s.rect.h) {
@@ -57,7 +70,7 @@ impl Shield {
             // shorter of the two side lengths.
             covered += intersection_len(&side(true), &side(false));
         }
-        (total > 0).then(|| covered as f32 / total as f32)
+        (covered, total)
     }
 }
 
@@ -85,7 +98,7 @@ pub(crate) fn intersection_len(p: &[(i32, i32)], q: &[(i32, i32)]) -> i64 {
     let (mut i, mut j, mut len) = (0, 0, 0i64);
     while i < p.len() && j < q.len() {
         let (a, b) = (p[i].0.max(q[j].0), p[i].1.min(q[j].1));
-        len += i64::from((b - a).max(0));
+        len += (i64::from(b) - i64::from(a)).max(0);
         if p[i].1 < q[j].1 { i += 1 } else { j += 1 }
     }
     len
@@ -109,14 +122,18 @@ impl Rule for Shield {
         self.residual(r)
     }
     fn satisfied(self, r: &Routes) -> bool {
-        self.coverage(r).is_none_or(|c| c * 100.0 >= f32::from(self.min_coverage_pct))
+        self.meets_floor(self.lengths(r))
     }
     fn known(self, r: &Routes) -> bool {
         self.coverage(r).is_some()
     }
     fn residual(self, r: &Routes) -> f32 {
+        let (covered, total) = self.lengths(r);
+        if self.meets_floor((covered, total)) {
+            return 0.0;
+        }
         let want = f32::from(self.min_coverage_pct) / 100.0;
-        self.coverage(r).map_or(0.0, |c| crate::rule::over(want - c, want))
+        crate::rule::over(want - covered as f32 / total as f32, want)
     }
     fn usage(self, r: &Routes) -> Option<f32> {
         self.coverage(r)

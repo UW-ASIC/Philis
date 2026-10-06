@@ -94,7 +94,7 @@ impl Differential {
         r.wires
             .iter()
             .enumerate()
-            .filter(|&(m, _)| m != p && m != n)
+            .filter(|&(m, x)| m != p && m != n && !x.is_empty())
             .map(|(m, x)| (w.get(m).copied().unwrap_or(1.0), m, x))
             .filter(|&(wm, ..)| wm != 0.0)
             .map(|(wm, m, x)| {

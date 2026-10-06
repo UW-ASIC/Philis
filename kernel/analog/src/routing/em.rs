@@ -17,10 +17,12 @@ const K_EV: f32 = 8.617e-5;
 /// Never credits a conductor cooler than the rating: `F ≤ 1`.
 #[must_use]
 pub fn derate(t_k: f32, t_ref_k: f32, ea_ev: f32, n: f32) -> f32 {
-    if t_k <= t_ref_k || n <= 0.0 {
+    // A NaN temperature or exponent is unknown: no derating.
+    if t_k.is_nan() || n.is_nan() || t_k <= t_ref_k || n <= 0.0 {
         return 1.0;
     }
-    ((ea_ev / (n * K_EV)) * (1.0 / t_k - 1.0 / t_ref_k)).exp()
+    // `f32::min` drops a NaN (NaN Ea) and caps a negative Ea's credit at 1.
+    ((ea_ev / (n * K_EV)) * (1.0 / t_k - 1.0 / t_ref_k)).exp().min(1.0)
 }
 
 /// One layer's deck EM limits, already derated to the conductor temperature.

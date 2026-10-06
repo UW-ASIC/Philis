@@ -177,7 +177,8 @@ impl CouplingBudget {
         }
         let mut total = 0.0f32;
         for (other, shapes) in r.wires.iter().enumerate() {
-            if other == self.net.0 as usize || self.exclude.is_some_and(|e| other == e.0 as usize) {
+            // An unrouted net couples nothing: skip it before building its screens.
+            if shapes.is_empty() || other == self.net.0 as usize || self.exclude.is_some_and(|e| other == e.0 as usize) {
                 continue;
             }
             let w = self.aggressor_weight.and_then(|w| w.get(other).copied()).unwrap_or(1.0);
@@ -199,6 +200,11 @@ impl Rule for CouplingBudget {
     }
     fn satisfied(self, r: &Routes) -> bool {
         self.total_af(r) <= self.max_coupling_af as f32
+    }
+    /// The victim is routed: an unrouted victim has no coupling to measure,
+    /// and its vacuous zero must not certify the budget.
+    fn known(self, r: &Routes) -> bool {
+        !r.shapes(self.net).is_empty()
     }
     fn headroom(self, r: &Routes) -> f32 {
         1.0 - self.total_af(r) / self.max_coupling_af.max(1) as f32

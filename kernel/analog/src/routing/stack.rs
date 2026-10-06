@@ -176,12 +176,20 @@ impl Stack {
     #[must_use]
     pub fn terminal_resistance_ohm(&self, shapes: &[Shape], terminals: &[Rect]) -> Vec<Option<f32>> {
         let g = self.port_graph(shapes, terminals, false);
-        let reach = |r: &[Option<f32>]| r.iter().flatten().copied().fold(0.0f32, f32::max);
-        (0..g.adj.len())
-            .map(|c| g.from(&[c]))
-            .filter(|r| r.iter().any(Option::is_some))
-            .min_by(|a, b| reach(a).total_cmp(&reach(b)))
-            .unwrap_or_else(|| vec![None; terminals.len()])
+        // One least-R sweep per terminal, not one per candidate centre: the
+        // graph is undirected, so terminal t's sweep is every node's R to t.
+        let dist: Vec<Vec<f32>> = g.term.iter().map(|t| t.map_or_else(Vec::new, |n| g.dijkstra(&[n]).0)).collect();
+        // `(terminals reached, farthest reached R)` from centre `c`. An open
+        // net's centre lies in the piece reaching the most terminals; among
+        // those, the farthest terminal is nearest. Ties keep the first node.
+        let score = |c: usize| {
+            dist.iter().filter_map(|d| d.get(c).copied().filter(|x| x.is_finite())).fold((0usize, 0.0f32), |(k, far), x| (k + 1, far.max(x)))
+        };
+        let centre = (0..g.adj.len()).map(|c| (c, score(c))).filter(|&(_, (k, _))| k > 0).min_by(|(_, (ka, fa)), (_, (kb, fb))| kb.cmp(ka).then(fa.total_cmp(fb)));
+        match centre {
+            Some((c, _)) => dist.iter().map(|d| d.get(c).copied().filter(|x| x.is_finite())).collect(),
+            None => vec![None; terminals.len()],
+        }
     }
 
     /// Series R from the nearest of `feeds` (where current enters: a tail

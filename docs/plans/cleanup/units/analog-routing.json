@@ -1,0 +1,51 @@
+{
+  "unit": "analog-routing",
+  "commits": [
+    "16ba4e3 cleanup(analog-routing): step 1 — document every pub item, split Differential mismatch into per-term helpers, fold span merging, shape R, edge gap and overlap area into shared helpers",
+    "92f70e0 cleanup(analog-routing): step 2 — corner-case tests for every routing rule and helper",
+    "cleanup(analog-routing): step 3 — exact-floor shield coverage, overflow-safe span intersection, open-net terminal-R centre in T sweeps, star breaks in CommonNodes residual, unrouted coupling victim unknown, derate capped at 1 and NaN-safe, Antenna not LOCAL, empty aggressors skipped"
+  ],
+  "testsAdded": 87,
+  "flaggedFixed": [
+    "Shield::satisfied compared f32 coverage*100 >= pct, so a share exactly at 53 % or 59 % failed while residual read 0; now compared in integers (covered*100 >= pct*total) and residual is 0 exactly when satisfied",
+    "shield::intersection_len subtracted span ends in i32 (overflow panic on spans wider than i32::MAX); now in i64",
+    "Stack::terminal_resistance_ohm on an open net could pick a centre in an isolated piece reaching one terminal (reach 0), reporting every other terminal as unreached; the centre now lies in the piece reaching the most terminals. Also T Dijkstra sweeps (one per terminal) instead of V (one per graph node)",
+    "CommonNodes::residual ignored star breaks, so a batch with violations() == 1 read Θ = 0; each break now adds one full budget",
+    "CouplingBudget used the default known() == true, so an unrouted victim's vacuous 0 aF certified the budget; now unknown until the victim is routed",
+    "em::derate returned NaN for a NaN temperature and > 1 for a negative Ea, breaking its F <= 1 contract; now 1.0 on NaN inputs and capped at 1",
+    "Antenna declared LOCAL = true while its latent merge (GAP-13) reads other nets' wires and cell metal, so RTE-23 caching could keep a stale score; now LOCAL = false",
+    "CrosstalkExclusion's edge gap (and Stack::antenna's latent-merge gap) subtracted coordinates in i32; now shared stack::edge_gap_sq in i64",
+    "CouplingBudget::total_af, PlateRatio::lead_af and Differential's coupling skew built a full screens_but copy for every net, routed or not; empty aggressors are now skipped first (same result)",
+    "Antenna collected every foreign shape even without a stack (unused); now only when the stack is present"
+  ],
+  "flaggedOpen": [
+    "Stack::antenna: a piece reaching only gates of unknown area (nm2 = 0) divides by 1 nm2 and reads a huge ratio; it arguably should fall back to fallback_nm2 or be unknown. Left as is: the intended semantics are not stated",
+    "Stack::terminal_resistance_ohm's doc still says only 'the port whose farthest terminal is nearest'; the open-net tie-break (most terminals reached first) is in a line comment because step 3 may not edit docs",
+    "MetalOverGate pads `metals` with u16::MAX, so a shape on LayerId(u16::MAX) would count as a listed metal",
+    "CommonNodes::cost does not include star breaks (only residual does); the router's objective still sees a broken star only through violations",
+    "CommonNodes counts a Kelvin node (max_delta_ohm <= 0) as unknown even though its star check is fully measured",
+    "Rule fields and shape coordinates are i32 nm; x + w itself can overflow for shapes near i32::MAX. Treated as a caller precondition"
+  ],
+  "seamRequests": [
+    {
+      "seam": "analog-consumers",
+      "item": "analog::routing::em::Electromigration::limits ([(u16, Limit); MAX_LAYERS]) and MetalOverGate::metals ([u16; MAX_METALS]) sentinel-padded arrays",
+      "change": "Take &'static [(u16, Limit)] / &'static [u16] slices (as aggressor_weight does) instead of u16::MAX-padded fixed arrays",
+      "why": "The u16::MAX padding is an in-band sentinel that dr and library both have to reproduce; a real layer id 65535 would match the padding"
+    },
+    {
+      "seam": "analog-consumers",
+      "item": "analog::routing::Differential::max_len_delta_pct10",
+      "change": "Rename to max_mismatch_pct10",
+      "why": "With a stack it bounds the worst electrical term (C, terminal R, vias, coupling skew), not length"
+    }
+  ],
+  "risks": [
+    "No build was run (per rules): step 2 tests and step 3 edits are reasoned, not compiled",
+    "CouplingBudget now reports unknown for an unrouted victim: report/unknown counts in dr and library change where a budgeted net was left unrouted",
+    "CommonNodes::residual now includes star breaks: dr budget rows for a broken star now appear (consistently with residual > 0)",
+    "Antenna::LOCAL = false disables dr's per-net score cache for antenna batches (correctness over speed); measure routing time on large designs",
+    "terminal_resistance_ohm sums Dijkstra distances from the terminal side instead of the centre side: results differ by float rounding only, except on open nets where the centre choice is now the larger piece",
+    "No SIMD added (fearless_simd not wired in): the hot loops are O(n^2) pairwise scans over short analog nets (tens to low hundreds of AoS shapes) with data-dependent geometry branches; below the size where vectorizing pays, and branchless rewrites of cold geometry predicates would cost clarity without a measured miss rate"
+  ]
+}
