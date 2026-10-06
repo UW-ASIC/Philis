@@ -762,6 +762,19 @@ mod tests {
         assert_eq!(vec![Plain].repair_kind(), K::Reroute);
     }
 
+    /// `over` is the overshoot fraction, never negative, never NaN.
+    #[test]
+    fn over_is_a_clamped_fraction_of_the_budget() {
+        assert_eq!(over(5.0, 10.0), 0.5);
+        assert_eq!(over(-5.0, 10.0), 0.0, "inside the budget");
+        assert_eq!(over(0.0, 10.0), 0.0);
+        // A non-positive budget is pass/fail.
+        assert_eq!(over(0.1, 0.0), 1.0);
+        assert_eq!(over(0.0, 0.0), 0.0);
+        assert_eq!(over(-1.0, -2.0), 0.0);
+        assert_eq!(over(1.0, -2.0), 1.0);
+    }
+
     /// A failed check whose measure says "0 over" (at the edge, or a boolean
     /// with no scale) must still cost Θ; so must a batch with no residual.
     #[test]

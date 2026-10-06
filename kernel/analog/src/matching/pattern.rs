@@ -34,7 +34,8 @@ fn spiral_key(i: usize, rows: usize, cols: usize) -> (i64, f64) {
 
 /// Grids `(rows, cols)` that can hold `counts` point-symmetrically, nearest
 /// square first (aspect compared exactly), then fewest empty cells, then
-/// fewest rows; the `1 × T` row always last. With exactly one odd member both
+/// fewest rows; the `1 × T` row is always offered, last unless it passes the
+/// aspect filter on its own. With exactly one odd member both
 /// sides are odd, so it takes the centre and the empties pair up. Aspect
 /// above `max_aspect` (≥ 1) is dropped. Empty for `T = 0`.
 #[must_use]

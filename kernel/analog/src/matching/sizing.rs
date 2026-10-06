@@ -134,6 +134,21 @@ mod tests {
     }
 
     #[test]
+    fn single_member_set_has_no_pair_to_note() {
+        let l = layout(&[0, 5_000], &[0, 0], 100);
+        let one = MatchedSet { members: vec![pnr_core::ids::DeviceId(0)], ..voltage() };
+        assert!(notes(&one, &l, Some(3.0)).is_empty());
+    }
+
+    #[test]
+    fn no_area_note_without_avt() {
+        let l = layout(&[0, 5_000], &[0, 0], 100);
+        let mut s = voltage();
+        s.coeffs.avt_mv_um = None;
+        assert!(notes(&s, &l, Some(3.0)).iter().all(|n| n.kind != "area" && n.kind != "dstar"));
+    }
+
+    #[test]
     fn area_note_only_with_class_limit() {
         let l = layout(&[0, 5_000], &[0, 0], 100);
         assert!(notes(&voltage(), &l, None).iter().all(|n| n.kind != "area"));
