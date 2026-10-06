@@ -57,22 +57,21 @@ impl Cell for Capacitor {
         if group.devices.is_empty() {
             return vec![];
         }
-        let s = group_sizing(group, constraints, process);
-        let units = s.dev_nf.iter().sum::<u16>().max(1);
-        let columns: Vec<u16> = (1..=units).filter(|c| units % c == 0).collect();
         let kinds = feasible_kinds(process);
-
-        // Column-outer / kind-inner so the `MAX_VARIANTS` truncation below keeps a
-        // spread of stacks rather than every column of the first kind.
-        let mut specs: Vec<Self> = Vec::new();
-        for &cols in &columns {
-            for &kind in &kinds {
-                specs.push(Capacitor { units_x: cols, kind });
-            }
+        if kinds.is_empty() {
+            return vec![];
         }
+        let s = group_sizing(group, constraints, process);
+        // u32: members' unit counts may sum past u16::MAX.
+        let units = s.dev_nf.iter().map(|&n| u32::from(n)).sum::<u32>().max(1);
+        let columns = (1..=units.min(u32::from(u16::MAX))).filter(|c| units % c == 0).map(|c| c as u16);
 
-        specs.truncate(MAX_VARIANTS);
-        specs
+        // Column-outer / kind-inner so the `MAX_VARIANTS` cut keeps a spread of
+        // stacks rather than every column of the first kind.
+        columns
+            .flat_map(|units_x| kinds.iter().map(move |&kind| Capacitor { units_x, kind }))
+            .take(MAX_VARIANTS)
+            .collect()
     }
 
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
@@ -91,7 +90,9 @@ impl Cell for Capacitor {
             };
             b.pin(pin(di, "N", bot_pin, g.bot_metal));
             b.pin(pin(di, "P", top_pin, g.top_metal));
-            x0 += g.tile_w(n_units) + g.device_gap;
+            // Never abut two devices' electrodes: a deck without `device_gap`
+            // still gets a metal spacing between tiles.
+            x0 += g.tile_w(n_units) + g.device_gap.max(g.m_space);
         }
 
         b.finish()
@@ -160,8 +161,14 @@ impl Geom {
         // Fingers: the deck's MOM pitch, never under the comb metal's own
         // width and spacing (the MOM keys may be another metal's).
         let comb = ["met1", "met2"];
-        let finger_w = comb.iter().filter_map(|m| process.width(m)).fold(process.rule("mom_finger_width", 0), i32::max);
-        let finger_space = comb.iter().filter_map(|m| process.space(m)).fold(process.rule("mom_finger_space", 0), i32::max);
+        // At least one grid step each: a deck stating neither must not leave
+        // the comb a zero pitch.
+        let step = process.grid().max(1);
+        let finger_w = comb.iter().filter_map(|m| process.width(m)).fold(process.rule("mom_finger_width", 0), i32::max).max(step);
+        let finger_space = comb.iter().filter_map(|m| process.space(m)).fold(process.rule("mom_finger_space", 0), i32::max).max(step);
+        // The smallest unit every kind draws legally: two spines and two
+        // fingers of the comb, which also exceeds every plate metal's width.
+        let min_side = 2 * finger_w + 2 * finger_space;
         Self {
             bot_metal: met(0),
             // The comb keeps both electrodes on one metal — that *is* the kind.
@@ -169,8 +176,8 @@ impl Geom {
             third_metal: sandwich.then(|| met(2)),
             cuts: [v.first().copied().unwrap_or(LayerId(0)), v.get(1).copied().unwrap_or(LayerId(0))],
             cut_w,
-            unit_w: s.unit_w,
-            unit_h: s.unit_l,
+            unit_w: s.unit_w.max(min_side),
+            unit_h: s.unit_l.max(min_side),
             m_space,
             device_gap: process.rule("device_gap", 0),
             inset: unit_gap,

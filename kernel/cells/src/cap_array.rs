@@ -268,7 +268,7 @@ fn even_up(v: i32, lat: i32) -> i32 {
 /// shrinks `r`.
 fn grow_to_area(r: Rect, area_nm2: i64, lat: i32) -> Rect {
     let need = (area_nm2 + i64::from(r.w) - 1) / i64::from(r.w.max(1));
-    let h = (i32::try_from(need).unwrap_or(i32::MAX) + lat - 1).div_euclid(lat) * lat;
+    let h = i32::try_from(need).unwrap_or(i32::MAX).saturating_add(lat - 1).div_euclid(lat) * lat;
     let h = h.max(r.h);
     Rect { y: r.y - ((h - r.h) / 2).div_euclid(lat) * lat, h, ..r }
 }

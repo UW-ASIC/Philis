@@ -387,7 +387,7 @@ fn tub_well_ext(process: &dyn Process, width: i32) -> i32 {
 /// included (a reach that a band already covers).
 fn on_grid_up(process: &dyn Process, v: i32) -> i32 {
     let g = process.grid().max(1);
-    (v + g - 1) / g * g
+    (v + g - 1).div_euclid(g) * g
 }
 
 /// How far a ring's implant grows past its tap (see [`tap_ring`]).
