@@ -1,0 +1,193 @@
+diff --git a/backend/dp/src/anneal.rs b/backend/dp/src/anneal.rs
+index 414cd27..76b0fb1 100644
+--- a/backend/dp/src/anneal.rs
++++ b/backend/dp/src/anneal.rs
+@@ -329,12 +329,13 @@ impl<'a> St<'a> {
+             }
+             (r, _) if (0.75..0.83).contains(&r) && n > 0 => {
+                 let c = rng.below(n);
+-                let set = self.inp.locks.members(c, false);
+-                if set.iter().any(|&m| self.inp.fixed.get(m).copied().unwrap_or(false)) {
++                let (inp, alone) = (self.inp, [c as u16]);
++                let set = inp.locks.members(c, false).unwrap_or(&alone);
++                if set.iter().any(|&m| inp.fixed.get(usize::from(m)).copied().unwrap_or(false)) {
+                     return false;
+                 }
+-                let o0 = quarter_turn(self.l.orient[set[0]]);
+-                for &m in &set {
++                let o0 = quarter_turn(self.l.orient[usize::from(set[0])]);
++                for m in set.iter().map(|&m| usize::from(m)) {
+                     self.u_cells.push((m, self.l.variant[m], self.l.orient[m]));
+                     self.l.orient[m] = o0.then(self.inp.locks.rel.get(m).copied().unwrap_or(Orient::R0));
+                     self.set_geom(m);
+@@ -358,16 +359,17 @@ impl<'a> St<'a> {
+     /// `inp.variants.len() == n`.
+     fn reshape(&mut self, c: usize, rng: &mut SplitMix64) -> bool {
+         let inp = self.inp;
+-        let set = inp.locks.members(c, true);
++        let alone = [c as u16];
++        let set = inp.locks.members(c, true).unwrap_or(&alone);
+         let depth = inp.variants[c].alternatives.len();
+         let fixed = |m: usize| inp.fixed.get(m).copied().unwrap_or(false);
+-        if depth < 2 || set.iter().any(|&m| fixed(m) || inp.variants[m].alternatives.len() != depth) {
++        if depth < 2 || set.iter().map(|&m| usize::from(m)).any(|m| fixed(m) || inp.variants[m].alternatives.len() != depth) {
+             return false;
+         }
+         let cur = usize::from(self.l.variant[c]);
+         let draw = rng.below(depth - 1);
+         let next = if cur < depth && draw >= cur { draw + 1 } else { draw };
+-        for &m in &set {
++        for m in set.iter().map(|&m| usize::from(m)) {
+             self.u_cells.push((m, self.l.variant[m], self.l.orient[m]));
+             self.l.variant[m] = next as u16;
+             self.set_geom(m);
+diff --git a/backend/dp/src/lib.rs b/backend/dp/src/lib.rs
+index 0b36ec3..7de46e1 100644
+--- a/backend/dp/src/lib.rs
++++ b/backend/dp/src/lib.rs
+@@ -420,12 +420,14 @@ pub fn place(
+                 let bid = usize::from(branch_ids[rng.below(branch_ids.len())].0);
+                 try_branch(&mut sa, &mut l, &mut rng, temp, bid)
+             } else if can_reshape && roll >= 0.95 {
+-                try_reshape(&mut sa, &mut l, &mut rng, temp, &locks.members(c, true), variants, &clamp_x, &clamp_y)
++                let alone = [c as u16];
++                try_reshape(&mut sa, &mut l, &mut rng, temp, locks.members(c, true).unwrap_or(&alone), variants, &clamp_x, &clamp_y)
+             } else {
+-                let set = locks.members(c, false);
++                let alone = [c as u16];
++                let set = locks.members(c, false).unwrap_or(&alone);
+                 can_rotate
+-                    && !set.iter().any(|&m| sa.is_fixed(m))
+-                    && try_rotate(&mut sa, &mut l, &mut rng, temp, &set, &locks.rel, &clamp_x, &clamp_y)
++                    && !set.iter().any(|&m| sa.is_fixed(usize::from(m)))
++                    && try_rotate(&mut sa, &mut l, &mut rng, temp, set, &locks.rel, &clamp_x, &clamp_y)
+             };
+         }
+ 
+@@ -674,14 +676,14 @@ fn try_rotate(
+     l: &mut Layout,
+     rng: &mut SplitMix64,
+     temp: f64,
+-    set: &[usize],
++    set: &[u16],
+     rel: &[Orient],
+     clamp_x: &impl Fn(i32, i32) -> i32,
+     clamp_y: &impl Fn(i32, i32) -> i32,
+ ) -> bool {
+     sa.trial(l, rng, temp, |l, _, _| {
+-        let o0 = quarter_turn(l.orient[set[0]]);
+-        for &c in set {
++        let o0 = quarter_turn(l.orient[usize::from(set[0])]);
++        for c in set.iter().map(|&c| usize::from(c)) {
+             l.orient[c] = o0.then(rel.get(c).copied().unwrap_or(Orient::R0));
+             (l.hw[c], l.hh[c]) = (l.hh[c], l.hw[c]);
+             l.x[c] = clamp_x(l.x[c], l.hw[c]);
+@@ -701,14 +703,15 @@ fn try_reshape(
+     l: &mut Layout,
+     rng: &mut SplitMix64,
+     temp: f64,
+-    set: &[usize],
++    set: &[u16],
+     variants: &[gp::VariantSpace],
+     clamp_x: &impl Fn(i32, i32) -> i32,
+     clamp_y: &impl Fn(i32, i32) -> i32,
+ ) -> bool {
+-    let c = set[0];
++    let c = usize::from(set[0]);
++    let members = || set.iter().map(|&m| usize::from(m));
+     let depth = variants[c].alternatives.len();
+-    if depth < 2 || set.iter().any(|&m| sa.is_fixed(m) || variants[m].alternatives.len() != depth) {
++    if depth < 2 || members().any(|m| sa.is_fixed(m) || variants[m].alternatives.len() != depth) {
+         return false;
+     }
+     let cur = l.variant[c] as usize;
+@@ -716,7 +719,7 @@ fn try_reshape(
+     let next = if cur < depth && draw >= cur { draw + 1 } else { draw };
+ 
+     let ok = sa.trial(l, rng, temp, |l, nets, cell_nets| {
+-        for &m in set {
++        for m in members() {
+             let alt = &variants[m].alternatives[next];
+             let (w, h) = variant_extents(alt);
+             l.variant[m] = next as u16;
+@@ -730,7 +733,7 @@ fn try_reshape(
+         }
+     });
+     if !ok {
+-        for &m in set {
++        for m in members() {
+             if let Some(alt) = variants[m].alternatives.get(l.variant[m] as usize) {
+                 sa.nets.reshape_cell(m, &sa.cell_nets[m], alt);
+             }
+diff --git a/backend/dp/src/locks.rs b/backend/dp/src/locks.rs
+index 5dee18f..3631cf8 100644
+--- a/backend/dp/src/locks.rs
++++ b/backend/dp/src/locks.rs
+@@ -124,14 +124,12 @@ fn sets(uf: &mut UnionFind, n: usize) -> (Vec<Vec<u16>>, Vec<Option<u16>>) {
+ 
+ impl Locks {
+     /// Cells sharing `c`'s orient (`shape = false`) or shape set, ascending;
+-    /// `[c]` when unlocked or `c` is past the map. Allocates the result.
++    /// `None` when `c` is unlocked or past the map (the set is `c` alone).
++    /// Borrows the stored set: no allocation per move.
+     #[must_use]
+-    pub fn members(&self, c: usize, shape: bool) -> Vec<usize> {
++    pub fn members(&self, c: usize, shape: bool) -> Option<&[u16]> {
+         let (sets, of) = if shape { (&self.shape, &self.shape_of) } else { (&self.orient, &self.orient_of) };
+-        match of.get(c).copied().flatten() {
+-            Some(s) => sets[usize::from(s)].iter().map(|&m| usize::from(m)).collect(),
+-            None => vec![c],
+-        }
++        of.get(c).copied().flatten().map(|s| sets[usize::from(s)].as_slice())
+     }
+ 
+     /// Re-derive every orient set's members from its first member:
+@@ -305,12 +303,12 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn members_returns_the_set_or_the_cell_alone() {
++    fn members_returns_the_set_or_none_when_alone() {
+         let k = locks(&reqs_of(&[(0, 2)], &[]), 4, &[]);
+-        assert_eq!(k.members(2, false), vec![0, 2]);
+-        assert_eq!(k.members(0, true), vec![0, 2]);
+-        assert_eq!(k.members(1, false), vec![1]);
+-        assert_eq!(k.members(99, true), vec![99], "past the map reads as unlocked");
++        assert_eq!(k.members(2, false), Some(&[0, 2][..]));
++        assert_eq!(k.members(0, true), Some(&[0, 2][..]));
++        assert_eq!(k.members(1, false), None);
++        assert_eq!(k.members(99, true), None, "past the map reads as unlocked");
+     }
+ 
+     #[test]
+diff --git a/kernel/analog/src/placement/orientation.rs b/kernel/analog/src/placement/orientation.rs
+index 10759fa..59e914a 100644
+--- a/kernel/analog/src/placement/orientation.rs
++++ b/kernel/analog/src/placement/orientation.rs
+@@ -128,7 +128,7 @@ mod tests {
+     /// Devices 0 and 1, each alone in its own 100 × 100 cell drawing `phis`
+     /// (one unit per entry); cell 1 turned `o1`.
+     fn two_cells(phis: &[(i8, i8)], o1: Orient) -> Layout {
+-        let units: Vec<Unit> = phis.iter().map(|&phi| Unit { owner: 0, x: 50, y: 50, weight: 10, phi, sa: 0, sb: 0 }).collect();
++        let units: Vec<Unit> = phis.iter().map(|&phi| Unit { owner: 0, x: 50, y: 50, weight: 10, phi, sa_sb: None }).collect();
+         let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[..])];
+         let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &alts[..]].into_iter());
+         Layout {
+@@ -201,7 +201,7 @@ mod tests {
+             assert_eq!((set(c).violations(&l), set(c).unknown(&l)), (0, 1), "{c:?}");
+         }
+         // One member drawn, its partner not: still unknown.
+-        let units = [Unit { owner: 0, x: 50, y: 50, weight: 10, phi: (1, 0), sa: 0, sb: 0 }];
++        let units = [Unit { owner: 0, x: 50, y: 50, weight: 10, phi: (1, 0), sa_sb: None }];
+         let alts = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[..])];
+         let none = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &[][..])];
+         l.units = Arc::new(UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&alts[..], &none[..]].into_iter()));
+@@ -221,7 +221,7 @@ mod cleanup_tests {
+     /// Devices 0 and 1 in cells 0 and 1, each drawing one unit per entry of
+     /// its own φ list.
+     fn cells(phis: [&[(i8, i8)]; 2]) -> Layout {
+-        let units: Vec<Vec<Unit>> = phis.iter().map(|p| p.iter().map(|&phi| Unit { owner: 0, x: 50, y: 50, weight: 10, phi, sa: 0, sb: 0 }).collect()).collect();
++        let units: Vec<Vec<Unit>> = phis.iter().map(|p| p.iter().map(|&phi| Unit { owner: 0, x: 50, y: 50, weight: 10, phi, sa_sb: None }).collect()).collect();
+         let a0 = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[0][..])];
+         let a1 = [(Rect { x: 0, y: 0, w: 100, h: 100 }, &units[1][..])];
+         let lib = UnitLib::build(vec![0, 1], &[vec![DeviceId(0)], vec![DeviceId(1)]], [&a0[..], &a1[..]].into_iter());

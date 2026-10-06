@@ -19,13 +19,13 @@
 - Deleted branch SHAs, for recovery: m0-rte03-original ae99602, m0-rte06-rejected f6ba021, experimental 01c25bf (also `refs/backup/experimental`).
 - RTE-28 uncommitted WIP: docs/plans/wip/rte28-wip.patch.
 
-## Running: cleanup workflow (docs/plans/workflows-cleanup.js, units in docs/plans/cleanup-units.json)
-- Per UPDATE_APPS.md adapted to Rust: 26 unit agents (step 1 shape, step 2 tests, step 3 impl; NO builds) → 10 seam agents (/api-design; no builds) → 2 integration agents (build+clippy, then tests vs docs/plans/cleanup-baseline-tests.txt). Max 3 agents at once.
-- Commits: "cleanup(<unit>): step N", "cleanup(seam <id>)", "cleanup(integrate)". Results: docs/plans/cleanup/{units,seams}/*.json.
-- RESTART (never resumeFromRunId): launch the script fresh with cleanup-units.json as args, `skipUnits` = units with a "cleanup(<id>): step 3" commit, `skipSeams` = seams with a docs/plans/cleanup/seams/<id>.json. A unit interrupted mid-way resumes from its next step (it checks its own commits).
-- Builds only via tools/qcargo (two flock queues, 4 workers in ../philis-workers, -j 6, 2 test threads, 15 GB/worker budget; `tools/qcargo --gc` when idle).
+## Parked: cleanup workflow (stopped 2026-10-06 by owner)
+- All 26 units finished (step 1–3 each) and 4 of 10 seams (core-types, analog-annotator, annotator-library, cells-cellgen); none of it was ever compiled.
+- Parked by one revert commit (9208782): main is the pre-cleanup code (3ed23a0) again, which builds; baseline: docs/plans/cleanup-baseline-tests.txt.
+- Resume: `git revert 9208782`, `git apply docs/plans/wip/cleanup-seams-inflight.patch` (dp anneal/lib/locks, analog orientation: a seam cut off mid-edit), then launch docs/plans/workflows-cleanup.js fresh with skipUnits = all 26, skipSeams = the 4 above. Its integration agents do the first build.
+- Conflict risk: work landed on the pre-cleanup code meanwhile (e.g. the identification items, the asap7/field-report fixes) will conflict with the revert-of-revert in the same files.
 
-## Queued: constraint identification (launch when the cleanup workflow has integrated)
+## Queued: constraint identification (main builds again; launch when the owner says)
 - `docs/plans/workflows-identification.js`: ID-01..ID-18 of docs/plans/research-constraint-identification.md (#75), one agent per item, sequential, then a verify agent.
 - args: {"order":["ID-02","ID-01","ID-07","ID-03","ID-04","ID-06","ID-09","ID-08","ID-05","ID-15","ID-10","ID-12","ID-13","ID-11","ID-14","ID-16","ID-17","ID-18"],"skip":[]}
 - Restart: fresh launch, `skip` = items with an "ID-xx:" commit on main.
