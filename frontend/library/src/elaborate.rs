@@ -93,6 +93,7 @@ impl Elaborated {
             &self.nets,
             schematic,
             None,
+            &Default::default(),
             pdk,
         ).report)
     }

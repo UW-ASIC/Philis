@@ -182,6 +182,10 @@ fn run_circuit(
         return (format!("skipped ({} cells > {MAX_CELLS})", g.devices.len()), Vec::new());
     }
     let mut cfg = Config { seed, feedback_iters: FEEDBACK_ITERS, op: op_config(pdk_json_path), ..Config::default() };
+    // FLOW-08's T10 sweep: `PNR_BENCH_COLD_EVERY` overrides the default schedule.
+    if let Some(n) = std::env::var("PNR_BENCH_COLD_EVERY").ok().and_then(|v| v.parse().ok()) {
+        cfg.cold_every = n;
+    }
     if let Some(k) = std::env::var("PNR_BENCH_STARTS").ok().and_then(|v| v.parse().ok()) {
         cfg.starts = k;
     }
@@ -276,7 +280,7 @@ fn run_circuit(
         active_pct,
         s.best_iteration + 1,
         s.iterations,
-        if s.converged { " converged" } else { " budget" },
+        format!(" {:?} warm {}", s.stop, s.warm_epochs),
         s.outer_iterations,
         s.variant_escalations,
         s.pruned,

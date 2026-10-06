@@ -7,6 +7,7 @@
 mod cellgen;
 mod fill;
 mod geometry;
+mod hier;
 mod parse;
 pub use parse::{spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
 
@@ -126,6 +127,45 @@ pub struct Config {
     pub constraints: Option<String>,
     /// ESD pad nets (REL-17); `None` = no ESD width floor.
     pub esd: Option<EsdSpec>,
+    /// FLOW-08: with an incumbent from the current assignment, every
+    /// `cold_every`-th epoch (counted over the whole search) is cold (gp +
+    /// [`dp::Schedule::cold`], fresh routing history); the rest anneal the
+    /// incumbent warm ([`epoch_kind`]). `1` = every epoch cold: T10's
+    /// cold-only baseline, not the pre-FLOW-08 loop (which kept routing
+    /// history across all epochs and ran on past a feasible incumbent).
+    pub cold_every: u32,
+    /// A warm epoch's dp schedule.
+    pub warm: dp::Schedule,
+    /// Wall budget over the whole run, starts included: once it is spent, a
+    /// search that has an incumbent stops before its next epoch
+    /// ([`StopReason::WallBudget`]). `None` = unbounded.
+    pub max_wall: Option<std::time::Duration>,
+    /// Flat, or each eligible sub-circuit definition solved once as a block (FLOW-11).
+    pub hierarchy: Hierarchy,
+}
+
+/// Bottom-up hierarchy (FLOW-11). Opt-in: bottom-up is not globally optimal
+/// (Balasa–Graeb L3068–3075): a child is solved without its parent's context.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Hierarchy {
+    /// One flat solve of every device.
+    #[default]
+    Flat,
+    /// Every eligible definition with at least `min_devices` devices
+    /// (own + nested) solved once, children first, and instanced as a cell.
+    BottomUp { min_devices: usize },
+    /// `BottomUp { min_devices: 2 }` when the flattened top has more than 100
+    /// devices, else `Flat` (policy bound, Balasa–Graeb L1604–1605).
+    Auto,
+}
+
+/// [`Config::hierarchy`] resolved on `nl`: `Some(min_devices)`, `None` = flat.
+fn hierarchy(cfg: &Config, nl: &pnr_core::Netlist) -> Option<usize> {
+    match cfg.hierarchy {
+        Hierarchy::Flat => None,
+        Hierarchy::BottomUp { min_devices } => Some(min_devices),
+        Hierarchy::Auto => (nl.devices.len() > 100).then_some(2),
+    }
 }
 
 /// A die edge.
@@ -224,6 +264,13 @@ impl Default for Config {
             top: None,
             constraints: None,
             esd: None,
+            // ponytail: T10 (`bench local` over cold_every ∈ {1,2,4,8,∞}) has
+            // not been measured, so the default stays all-cold (history reset
+            // every epoch; not the pre-FLOW-08 loop, which kept it).
+            cold_every: 1,
+            warm: dp::Schedule::warm(),
+            max_wall: None,
+            hierarchy: Hierarchy::Flat,
         }
     }
 }
@@ -272,6 +319,14 @@ pub struct Solution {
     /// ambiguous symmetry, conflicts), in annotator order; the CLI writes one
     /// line each to `report.txt`.
     pub diagnostics: Vec<analog::intent::Diagnostic>,
+    /// The shipped geometry's PEX matrix: post-fill when `metadata.post_fill`,
+    /// else the winning epoch's (PERF-15/22 read it).
+    pub caps: verify::CapMatrix,
+    /// Per sub-circuit definition solved as a block (FLOW-11), children first:
+    /// its name and its own solve's report. Empty when flat.
+    pub blocks: Vec<(String, metadata::MetadataReport)>,
+    /// The LVS side of the placed blocks ([`hier::BlockRef`]).
+    pub(crate) block_ref: hier::BlockRef,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -326,6 +381,58 @@ pub struct RunStats {
     /// ngspice decks run: sensitivities plus every scored epoch, over every
     /// start and cell topology.
     pub sims: u32,
+    /// Warm epochs ([`epoch_kind`]) over the winning start's search.
+    pub warm_epochs: u32,
+    /// Why the winning start's search ended.
+    pub stop: StopReason,
+    /// Sub-circuit definitions solved as blocks (FLOW-11); 0 when flat.
+    pub block_solves: u32,
+}
+
+/// Why a search ended (FLOW-08).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StopReason {
+    /// Feasible with stationary, unsaturated prices.
+    Converged,
+    /// Feasible, prices still moving or saturated: a feasible incumbent is
+    /// never escalated, so the search ends here.
+    FeasibleNotStationary,
+    /// Infeasible when the last variant assignment stalled.
+    #[default]
+    OuterBudget,
+    /// Infeasible and every allowed assignment tried.
+    EscalationExhausted,
+    /// [`Config::max_wall`] spent.
+    WallBudget,
+}
+
+/// An epoch's start: gp + cold dp, or a warm dp from the incumbent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Cold,
+    Warm,
+}
+
+/// Epoch `k` (counted over the whole search) is cold without an incumbent
+/// from the current assignment (none yet, or the incumbent predates the last
+/// escalation) or every `cold_every`-th epoch; else warm.
+fn epoch_kind(k: u32, current_incumbent: bool, cold_every: u32) -> Kind {
+    if !current_incumbent || k % cold_every.max(1) == 0 {
+        Kind::Cold
+    } else {
+        Kind::Warm
+    }
+}
+
+/// After a middle loop: the search's stop, or `None` = escalate. A feasible
+/// incumbent is never escalated.
+fn next_action(feasible: bool, stationary: bool, last_outer: bool) -> Option<StopReason> {
+    match (feasible, stationary, last_outer) {
+        (true, true, _) => Some(StopReason::Converged),
+        (true, false, _) => Some(StopReason::FeasibleNotStationary),
+        (false, _, true) => Some(StopReason::OuterBudget),
+        (false, _, false) => None,
+    }
 }
 
 /// [`RunStats::stage_ms`]'s stages: `route` is gr+dr, `reroute` dr again
@@ -342,6 +449,8 @@ pub enum FlowError {
     InjectedNotADevice(String, Option<usize>),
     /// [`Config::interface`] names a net that is not a port of the top cell.
     Interface(String),
+    /// The deck's routing stack is unusable (`elaborate::routing_stack`).
+    Deck(String),
 }
 
 /// Epochs without improvement before an assignment counts as stalled.
@@ -414,14 +523,37 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     }
 
     check_injected(&netlist, injected, pdk)?;
+    // 2. Bias: per-device power and per-net current. Placement-independent,
+    //    so solved once, before annotation: its op point and testbench are the
+    //    annotator's evidence (EXT-17).
+    let bias = bias(&netlist, cfg);
+    // FLOW-11: blocks are solved first, each from its first instance, and
+    // enter this solve as one cell per outermost instance.
+    let (blocks, placed) = match hierarchy(cfg, &netlist) {
+        Some(k) => {
+            let b = hier::solve_blocks(&netlist, pdk, cfg, &bias, k)?;
+            let p = hier::instantiate(&netlist, &b);
+            (b, p)
+        }
+        None => Default::default(),
+    };
+    let mut sol = solve(&netlist, pdk, injected, cfg, bias, &placed)?;
+    sol.stats.block_solves = blocks.len() as u32;
+    sol.blocks = blocks.into_iter().map(|b| (b.subckt, b.metadata)).collect();
+    Ok(sol)
+}
 
+/// Steps 3–7 of [`run`] on a parsed, biased `netlist`: annotate, draw cells
+/// (each of `blocks.cells` one fixed-geometry cell), search, finish. A block
+/// child is solved here too ([`hier::solve_blocks`]).
+fn solve(netlist: &pnr_core::Netlist, pdk: &Pdk, injected: &Macros, cfg: &Config, bias: Bias, blocks: &hier::Placed) -> Result<Solution, FlowError> {
     // Annotated once here for the sensitivity rows; each topology annotates
     // its own `Problem` with the same `ann` (one leaked stack per run).
     let stack: &'static analog::routing::Stack = Box::leak(Box::new(elaborate::stack(pdk)));
     let mut ann = annotation_with(pdk, &cfg.annotation, stack);
     ann.process.die_temp_k = cfg.op.as_ref().map(|o| o.temp_c as f32 + 273.15);
     if let Some(text) = &cfg.constraints {
-        let (side, diags) = AnnotationConfig::from_json(text, &netlist).map_err(FlowError::Interface)?;
+        let (side, diags) = AnnotationConfig::from_json(text, netlist).map_err(FlowError::Interface)?;
         ann.supply_nets.extend(side.supply_nets);
         ann.ground_nets.extend(side.ground_nets);
         ann.clock_nets.extend(side.clock_nets);
@@ -437,19 +569,15 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
         ann.tubs.extend(side.tubs);
         ann.sidecar_diags.extend(diags);
     }
-    // 2. Bias: per-device power and per-net current. Placement-independent,
-    //    so solved once, before annotation: its op point and testbench are the
-    //    annotator's evidence (EXT-17).
-    let bias = bias(&netlist, cfg);
     let ev = bias.op.as_ref().map_or_else(Default::default, |o| {
-        let mut e = o.evidence(&netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
+        let mut e = o.evidence(netlist, bias.summary.as_ref().is_some_and(|s| s.probe));
         if let Some(tb) = cfg.op.as_ref().and_then(|c| c.testbench.as_deref()) {
-            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(&netlist, tb);
+            (e.switching_nets, e.dc_sources) = oppoint::testbench_sources(netlist, tb);
         }
         e
     });
-    let base = annotator::annotate_with(&netlist, &ann, &ev);
-    let plan = performance_rows(&netlist, cfg, &ann, &base.net_classes);
+    let base = annotator::annotate_with(netlist, &ann, &ev);
+    let plan = performance_rows(netlist, cfg, &ann, &base.net_classes);
     let ev = annotator::Evidence { sens: plan.evidence.clone(), ..ev };
 
     // 3–7 per cell topology. A distinct-gate pair merged as ABBA cancels a
@@ -459,16 +587,17 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     // lexicographically better kept.
     // Both topologies are built once on this thread (pricing every variant
     // once); the starts only search them.
-    let merged = topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, true);
-    let apart = merged.distinct.then(|| topology(&netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, false));
+    let merged = topology(netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, blocks, true)?;
+    let apart = if merged.distinct { Some(topology(netlist, injected, pdk, cfg, &bias, &ann, &ev, &plan, blocks, false)?) } else { None };
     let tops: Vec<&Topology> = std::iter::once(&merged).chain(apart.as_ref()).collect();
     let tops = &tops;
+    let deadline = cfg.max_wall.map(|d| std::time::Instant::now() + d);
     let runs: Vec<Vec<Searched>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..cfg.starts.max(1))
             .map(|j| {
                 s.spawn(move || {
                     let seed = cfg.seed.wrapping_add(u64::from(j).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                    tops.iter().map(|t| search(t, cfg, seed)).collect()
+                    tops.iter().map(|t| search(t, cfg, seed, deadline)).collect()
                 })
             })
             .collect();
@@ -508,6 +637,7 @@ pub fn run(spice: &str, pdk: &Pdk, injected: &Macros, cfg: &Config) -> Result<So
     sol.metadata.budget_rows = plan.notes;
     sol.metadata.sensitivity = plan.sens;
     sol.metadata.pareto = pareto;
+    sol.block_ref = blocks.refs.clone();
     Ok(sol)
 }
 
@@ -727,8 +857,9 @@ fn topology<'a>(
     ann: &AnnotationConfig,
     ev: &annotator::Evidence,
     perf: &'a PerfPlan,
+    blocks: &hier::Placed,
     merge_distinct_gates: bool,
-) -> Topology<'a> {
+) -> Result<Topology<'a>, FlowError> {
     #[cfg(test)]
     if !merge_distinct_gates {
         APART_BUILDS.with(|c| c.set(c.get() + 1));
@@ -747,7 +878,7 @@ fn topology<'a>(
     // One fold table for the cells and every LVS reference of this run.
     let unit_cells: Vec<(Vec<DeviceId>, bool)> = problem.constraints.unitization.iter().map(|u| (u.devices.clone(), u.route_matching_required)).collect();
     let fold = cellgen::folds(&netlist, pdk, &bias.gm_us, &unit_cells);
-    let cells = CellSpace::new(&netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold);
+    let cells = CellSpace::new(netlist, injected, &mut problem, pdk, &bias.power, merge_distinct_gates, &fold, &blocks.cells);
     // Already cell-indexed: pushed after the retarget.
     let env = live_environment(&problem, &cells, pdk);
     if !env.pairs.is_empty() {
@@ -797,8 +928,7 @@ fn topology<'a>(
     let distinct = cells.distinct_gate_merges > 0;
 
     // 5. Stages. The metal stack and router config come from the deck.
-    // ponytail: a bad deck still panics here; FLOW-11 propagates the `Err`.
-    let stack = elaborate::routing_stack(pdk, None).unwrap_or_else(|e| panic!("routing stack: {e}"));
+    let stack = elaborate::routing_stack(pdk, None).map_err(FlowError::Deck)?;
     let (layers, cuts, pin_access) = (stack.layers.clone(), stack.cuts.clone(), stack.pin_access);
     // EM limits on the pin-access layer and cut too (sky130 mcon 0.36 mA/cut):
     // the access jogs and pin cuts carry their terminal's current.
@@ -864,10 +994,12 @@ fn topology<'a>(
         perf_rows.iter().flat_map(|r| r.nets.iter().copied().zip(r.weights.iter().copied())).collect();
     let net_weight = gp::net_weights(&problem.net_classes, &sens, &net_ua);
     let intent = elaborate::intent(netlist, &problem.net_classes, currents.as_deref(), cfg.op.as_ref().map_or(0.0, |o| o.vdd * 1_000.0), &ir);
+    let weights = Weights { route: route_weights(&net_weight, &problem.net_classes, &sens), place: net_weight };
     let mut flow = Flow {
         pdk,
         netlist,
         net_names: netlist.nets.iter().map(|n| n.name.clone()).collect(),
+        block_ref: blocks.refs.clone(),
         d_router: {
             let mut r = elaborate::detailed_router(pdk, &stack);
             r.cfg.supply_nets = problem
@@ -885,11 +1017,6 @@ fn topology<'a>(
                 .map(|members| members.iter().enumerate().map(|(k, d)| (format!("d{k}:G"), u32::from(d.0), (netlist.devices[d.0 as usize].gate_area_um2() * 1e6) as i64)).collect())
                 .collect();
             r.cfg.em = em;
-            // Routing prices parasitics only on nets something budgets, on [0, 1].
-            let budgeted = |n: usize| problem.net_classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
-            let w: Vec<f32> = net_weight.iter().enumerate().map(|(n, &w)| if budgeted(n) { w } else { 0.0 }).collect();
-            let top = w.iter().copied().fold(0.0f32, f32::max);
-            r.cfg.net_weight = w.iter().map(|&x| if top > 0.0 { x / top } else { 0.0 }).collect();
             r
         },
         layers,
@@ -903,7 +1030,8 @@ fn topology<'a>(
         perf_active,
         perf_plan: perf,
         intent,
-        net_weight,
+        weights,
+        warm: cfg.warm,
         fold,
         stack: ann.process.stack.expect("`annotation` always carries the stack"),
         id_ua: currents
@@ -927,7 +1055,7 @@ fn topology<'a>(
     let (assignment0, allowed) = cellgen::seed_assignment(&flow.cells.variants, &matched, &ranked, pdk);
     // PLC-28: symmetry axes on the router's track centrelines.
     flow.rules.axis_grid = axis_grid(&dr::lattice_spec(&flow.d_router.cfg), flow.rules.grid);
-    Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate }
+    Ok(Topology { flow, assignment0, allowed, distinct, t_em_k, em_derate })
 }
 
 /// One start's search on a shared topology: the winning epoch, the start's
@@ -945,28 +1073,55 @@ struct Searched {
 
 /// 6. Search. Outer: variant assignment. Middle: epochs at that assignment,
 ///    keeping the best [`LexKey`], whose V includes the epoch's own signoff
-///    errors. Prices and routing history persist across epochs and are this
-///    start's own.
-fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
+///    errors. Prices persist across epochs; routing history is reset at every
+///    cold epoch and kept across warm ones ([`epoch_kind`]); both are this
+///    start's own. A feasible incumbent stops the search; an infeasible stall
+///    escalates by blame ([`cellgen::escalate_blamed`]), never revisiting an
+///    assignment. [`RunStats::stop`] says which way it ended.
+fn search(t: &Topology, cfg: &Config, seed: u64, deadline: Option<std::time::Instant>) -> Searched {
     let flow = &t.flow;
     let mut assignment = t.assignment0.clone();
     let mut prices = gp::Prices::new();
     let mut neg = gr::Negotiation::new();
+    let weights = flow.weights.clone();
     let mut best: Option<Epoch> = None;
     let mut stats = RunStats::default();
     let (mut pareto, mut epochs) = (Vec::new(), Vec::new());
+    // Every unified assignment an epoch ran: escalation never revisits one.
+    let mut tried: std::collections::BTreeSet<Vec<u16>> = std::collections::BTreeSet::new();
+    // `current`: `best` came from an epoch of the current assignment (its
+    // variants are that assignment's, maybe dp-reshaped); after an escalation
+    // a warm start from it would anneal the old assignment instead.
+    let (mut k, mut current) = (0u32, false);
 
     let n_outer = cfg.outer_iters.max(1);
-    for outer in 0..n_outer {
+    'search: for outer in 0..n_outer {
         stats.outer_iterations += 1;
         let mut stall = 0;
         for iter in 0..cfg.feedback_iters.max(1) {
+            if best.is_some() && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                stats.stop = StopReason::WallBudget;
+                break 'search;
+            }
             stats.iterations += 1;
             let seed = seed ^ u64::from(iter) ^ (u64::from(outer) << 32);
+            let kind = epoch_kind(k, best.is_some() && current, cfg.cold_every);
+            k += 1;
+            let start = match kind {
+                Kind::Warm => best.as_ref().map(|b| &b.layout),
+                Kind::Cold => {
+                    neg = gr::Negotiation::new();
+                    None
+                }
+            };
+            let mut ran = start.map_or_else(|| assignment.clone(), |l| l.variant.clone());
+            flow.locks.unify(&mut ran);
+            tried.insert(ran);
             // Alternate: dp's reshape trades a squarer variant for HPWL, which
             // the utilization floor cannot see mid-anneal (a 1-row tail cost
             // ota 40% area); the epoch key picks between the two.
-            let mut epoch = flow.epoch(&assignment, iter % 2 == 1, &mut prices, &mut neg, seed);
+            let mut epoch = flow.epoch(&assignment, iter % 2 == 1, start, &weights, &mut prices, &mut neg, seed);
+            stats.warm_epochs += epoch.stats.warm_epochs;
             // Promotion: simulate only a candidate whose hard count can still
             // beat the incumbent; its spec miss then decides against it.
             if best.as_ref().is_none_or(|b| epoch.key.0 <= b.key.0) {
@@ -995,7 +1150,7 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
                     iteration: iter,
                     ..epoch
                 });
-                stall = 0;
+                (stall, current) = (0, true);
             } else {
                 stall += 1;
                 if stall >= PATIENCE {
@@ -1004,30 +1159,42 @@ fn search(t: &Topology, cfg: &Config, seed: u64) -> Searched {
             }
         }
 
-        // Feasible with settled prices: done. A price held at its cap reads as
-        // settled in `drift` but is still binding, so it blocks convergence.
+        // Feasible: stop, converged or not (a feasible incumbent is never
+        // escalated). A price held at its cap reads as settled in `drift` but
+        // is still binding, so it blocks convergence.
         let feasible = best
             .as_ref()
             .is_some_and(|b| b.key.0 == 0 && b.key.1 == 0 && b.key.3 <= 0.0);
-        if feasible && prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty() {
-            stats.converged = true;
+        let stationary = prices.drift() < PRICE_STATIONARY && prices.saturated().is_empty();
+        if let Some(stop) = next_action(feasible, stationary, outer + 1 == n_outer) {
+            stats.stop = stop;
+            stats.converged = stop == StopReason::Converged;
             break;
         }
-        // Not converged: infeasible, or feasible with prices still moving or
-        // saturated. Try the next variant assignment, unless the budget or the
-        // variant space is exhausted. ponytail: a feasible run that once
-        // saturated a λ relaxes it by ρ·slack per epoch, ρ ≥ RHO_FLOOR = 0.25:
-        // −64 at slack 0.5 with ρ at the floor is 512 epochs of drift above
-        // PRICE_STATIONARY, so it escalates rather than converges; FLOW-08's
-        // `RunStats.stop` will show it.
-        if outer + 1 == n_outer {
-            break;
-        }
-        let Some(next) = cellgen::escalate(&flow.cells.variants, &t.allowed, &assignment) else {
+        // Infeasible stall: move the most-blamed cells first.
+        let b = best.as_ref().expect("an epoch ran");
+        let blame = flow.blame(b);
+        let next = loop {
+            let Some(raw) = cellgen::escalate_blamed(&flow.cells.variants, &t.allowed, &assignment, &blame, &tried) else {
+                break None;
+            };
+            let mut next = raw.clone();
+            flow.locks.unify(&mut next);
+            let fresh = !tried.contains(&next);
+            // The raw pick is spent either way, so the loop terminates.
+            tried.insert(raw.clone());
+            assignment = raw;
+            if fresh {
+                break Some(next);
+            }
+        };
+        let Some(next) = next else {
+            stats.stop = StopReason::EscalationExhausted;
             break;
         };
         stats.variant_escalations += 1;
         assignment = next;
+        current = false;
     }
 
     let best = best.expect("at least one epoch ran");
@@ -1071,7 +1238,9 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let matched: Vec<pnr_core::Rect> = pnr_core::place_macros(&macros, &best.layout).iter()
         .filter(|m| m.units.iter().any(|u| u.owner != m.units[0].owner)).map(|m| m.bbox).collect();
     use analog::metadata::NetClass::{Bias, Ground, Reference, Sensitive};
-    macros.extend(fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk));
+    let filled = fill::fill(&drawn, &wires_of(&[Ground]), &wires_of(&[Sensitive, Bias, Reference]), &matched, pdk);
+    let post_fill = filled.is_some();
+    macros.extend(filled);
     let metadata = metadata::build(
         &flow.problem.placement,
         &best.layout,
@@ -1089,6 +1258,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     let mut metadata = metadata;
     metadata.binding = s.binding;
     metadata.epochs = s.epochs;
+    metadata.post_fill = post_fill;
     metadata.audit = flow.problem.intent.diagnostics.iter().filter(|d| annotator::audit::KINDS.contains(&d.kind)).map(|d| format!("{}: {}", d.kind, d.message)).collect();
     let pairs = matched_pairs(&flow.problem.blocks);
     if let Some(op) = &bias.op {
@@ -1154,7 +1324,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     // Inserted devices (antenna diodes) join the schematic LVS reads.
     let mut netlist = flow.netlist.clone();
     netlist.devices.extend(best.extra);
-    Solution {
+    let mut sol = Solution {
         layout: best.layout,
         routes: best.routes,
         macros,
@@ -1172,7 +1342,19 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         route: best.route,
         route_stats: best.route_stats,
         diagnostics: flow.problem.intent.diagnostics,
+        caps: best.caps,
+        blocks: Vec::new(),
+        block_ref: hier::BlockRef::default(),
+    };
+    // FLOW-10: the certificate is of what ships. Budgets are not re-scored:
+    // fill moves no cell and adds no route.
+    if post_fill {
+        let s = drawn_signoff(&sol, pdk);
+        sol.stats.drc_hard = s.report.hard_violations.len();
+        sol.stats.warnings = s.warnings.len() as u32;
+        sol.caps = s.caps;
     }
+    sol
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -1181,6 +1363,8 @@ struct Flow<'a> {
     /// The schematic (LVS reference) and its net names (label text).
     netlist: &'a pnr_core::Netlist,
     net_names: Vec<String>,
+    /// Placed blocks' LVS cards and the schematic devices they replace (FLOW-11).
+    block_ref: hier::BlockRef,
     /// Rules and constraints; placement rules retargeted to cell ids.
     problem: Problem,
     cells: CellSpace,
@@ -1198,8 +1382,10 @@ struct Flow<'a> {
     perf_active: &'a [usize],
     /// Sensitivity tables and V_T σ the winner's robustness reads (PERF-13).
     perf_plan: &'a PerfPlan,
-    /// Placement HPWL weight per net ([`gp::net_weights`]).
-    net_weight: Vec<f32>,
+    /// Net weights; [`search`] clones them per start.
+    weights: Weights,
+    /// A warm epoch's dp schedule ([`Config::warm`]).
+    warm: dp::Schedule,
     layers: Vec<LayerId>,
     cuts: Vec<elaborate::Cut>,
     d_router: dr::DetailedRoute,
@@ -1482,6 +1668,25 @@ fn axis_grid(spec: &dr::LatticeSpec, lattice: i32) -> Option<(i32, i32)> {
     (spec.p0 > 0 && spec.p0 % (2 * lattice.max(1)) == 0).then_some((spec.p0, p))
 }
 
+/// Per-net weights an epoch places and routes with (FLOW-08 plumbing: a
+/// search owns its copy; PERF-15/GAP-08 will update it between epochs).
+#[derive(Clone)]
+pub(crate) struct Weights {
+    /// Placement HPWL weight ([`gp::net_weights`]).
+    place: Vec<f32>,
+    /// dr's parasitic weight ([`route_weights`]).
+    route: Vec<f32>,
+}
+
+/// dr prices parasitics only on nets something budgets (a C budget or a
+/// sensitivity row), `place` scaled to [0, 1]; every other net 0.
+fn route_weights(place: &[f32], classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)]) -> Vec<f32> {
+    let budgeted = |n: usize| classes.get(n).is_some_and(|c| c.c_budget_af.is_some()) || sens.iter().any(|(s, _)| usize::from(s.0) == n);
+    let w: Vec<f32> = place.iter().enumerate().map(|(n, &w)| if budgeted(n) { w } else { 0.0 }).collect();
+    let top = w.iter().copied().fold(0.0f32, f32::max);
+    w.iter().map(|&x| if top > 0.0 { x / top } else { 0.0 }).collect()
+}
+
 /// One scored epoch.
 struct Epoch {
     key: LexKey,
@@ -1514,17 +1719,23 @@ struct Epoch {
 
 impl Flow<'_> {
     /// Place → route → signoff at `assignment`, scored. `reshape` lets dp
-    /// swap variants; without it the assignment is kept as drawn.
+    /// swap variants; without it the assignment is kept as drawn. `start`
+    /// `None` = cold (gp, then [`dp::Schedule::cold`]); `Some(incumbent)` =
+    /// warm: the incumbent's variants and positions annealed at
+    /// [`Flow::warm`], no gp. Routing history accumulates once per epoch.
+    #[allow(clippy::too_many_arguments)]
     fn epoch(
         &self,
         assignment: &[u16],
         reshape: bool,
+        start: Option<&Layout>,
+        w: &Weights,
         prices: &mut gp::Prices,
         neg: &mut gr::Negotiation,
         seed: u64,
     ) -> Epoch {
         let unified = {
-            let mut a = assignment.to_vec();
+            let mut a = start.map_or(assignment, |l| &l.variant[..]).to_vec();
             self.locks.unify(&mut a);
             a
         };
@@ -1541,7 +1752,7 @@ impl Flow<'_> {
             assignment,
             reqs: placement,
             rules: &self.rules,
-            net_weight: &self.net_weight,
+            net_weight: &w.place,
             n_axes: self.problem.axis_count,
             power_uw: &cells.power,
             units: cells.units.clone(),
@@ -1557,7 +1768,10 @@ impl Flow<'_> {
         let dp_seed = seed ^ 0xD1B5_4A32_D192_ED03;
         let dp_variants = if reshape { &cells.variants[..] } else { &[] };
         let mut tree = None;
+        let cold;
         let (mut layout, place_report, dp_stats) = if self.dp_mode == dp::DpMode::Sp {
+            // ponytail: FLOW-08 warm starts cover the flat path only; the SP
+            // path always starts cold until PLC-10 step 1 (dp::Start::Warm).
             let coarse = (self.gp_mode != GpMode::Constructive).then(|| gp::place(&inp, prices, seed).0);
             lap(0);
             let sp_in = dp::PlaceInput {
@@ -1570,7 +1784,7 @@ impl Flow<'_> {
                 rules: self.rules.clone(),
                 locks: &self.locks,
                 halo: &[],
-                net_weight: &self.net_weight,
+                net_weight: &w.place,
                 n_axes: self.problem.axis_count,
                 power_uw: &cells.power,
                 units: cells.units.clone(),
@@ -1580,22 +1794,16 @@ impl Flow<'_> {
             tree = Some(t);
             (l, rep, st)
         } else {
-            let (coarse, _) = gp::place(&inp, prices, seed);
+            let (coarse, schedule) = match start {
+                Some(inc) => (inc, self.warm),
+                None => {
+                    cold = gp::place(&inp, prices, seed).0;
+                    cold.debug_check("gp::place");
+                    (&cold, dp::Schedule::cold())
+                }
+            };
             lap(0);
-            coarse.debug_check("gp::place");
-            dp::place(
-                &coarse,
-                &macros,
-                dp_variants,
-                placement,
-                &cells.fixed,
-                &self.locks,
-                prices,
-                &self.rules,
-                &self.net_weight,
-                dp_seed,
-                dp::Schedule::cold(),
-            )
+            dp::place(coarse, &macros, dp_variants, placement, &cells.fixed, &self.locks, prices, &self.rules, &w.place, dp_seed, schedule)
         };
         layout.debug_check("dp::place");
         layout.groups = cells.groups.clone();
@@ -1651,9 +1859,12 @@ impl Flow<'_> {
                 stack: Some(self.stack),
                 pin_share: macros.iter().map(pnr_core::pin_shares).collect(),
                 n_nets: self.netlist.nets.len(),
+                net_weight: w.route.clone(),
                 ..self.d_router.cfg.clone()
             },
         };
+        // AT-34: a diode reroute replays from here, so history counts once.
+        let before = neg.clone();
         let (mut routes, mut route_report, mut route_stats) =
             router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
         lap(3);
@@ -1673,6 +1884,7 @@ impl Flow<'_> {
                 extra.push(device);
                 rings.push(m);
             }
+            *neg = before;
             (routes, route_report, route_stats) = router.route(&pins, &placed, &rings, routing, layers, &self.cuts, neg);
             lap(4);
             let marked = !marks.is_empty();
@@ -1708,7 +1920,7 @@ impl Flow<'_> {
         // The epoch is scored by the same DRC/ERC/LVS gate as the final result.
         let mut labelled = placed;
         labelled.extend(rings.iter().cloned());
-        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), self.pdk);
+        let mut signoff = signoff_shapes(&self.intent, &shapes, &labelled, &self.net_names, &netlist, Some(&self.fold), &self.block_ref, self.pdk);
         signoff.report.hard_violations.extend(undrawable(&macros, &self.cells.devices_of, self.netlist));
         lap(6);
         let mut budgets = metadata::build(
@@ -1726,7 +1938,7 @@ impl Flow<'_> {
         let c = signoff_c_tier(&signoff, &self.net_names, &self.problem.net_classes, self.perf_rows);
         let (key, stats) = epoch_score(&place_report, &route_report, &signoff, &budgets, c, layout.footprint_nm2());
         lap(7);
-        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, ..stats };
+        let stats = RunStats { place, dp: dp_stats, stage_ms: ms, warm_epochs: u32::from(start.is_some()), ..stats };
         Epoch {
             key,
             min_beta: None,
@@ -1743,6 +1955,38 @@ impl Flow<'_> {
             route_stats,
             tree,
         }
+    }
+
+    /// Per cell, how much an epoch's failures point at it: +1 per id a
+    /// violated placement hard or budget rule touches ([`analog::RuleBatch::violating_ids`],
+    /// cell ids), +1 per DRC finding (label-free, cells + routes + rings)
+    /// inside the cell's placed bbox. [`cellgen::escalate_blamed`] moves the
+    /// most-blamed cell first.
+    fn blame(&self, e: &Epoch) -> Vec<u32> {
+        let n = e.layout.x.len();
+        let mut blame = vec![0u32; n];
+        let mut ids = Vec::new();
+        for b in self.problem.placement.hard.iter().chain(&self.problem.placement.budget) {
+            b.violating_ids(&e.layout, &mut ids);
+        }
+        for i in ids {
+            if let Some(c) = blame.get_mut(i as usize) {
+                *c += 1;
+            }
+        }
+        let macros = cellgen::realize(&self.cells.variants, &e.layout.variant);
+        let mut shapes = geometry::collect(&macros, &e.layout, &e.routes);
+        shapes.extend(e.rings.iter().flat_map(|r| r.shapes.iter().copied()));
+        let placed = pnr_core::place_macros(&macros, &e.layout);
+        for f in verify::drc(&shapes, &[], self.pdk) {
+            let inside = |r: &pnr_core::Rect| (i64::from(r.x)..=i64::from(r.x) + i64::from(r.w)).contains(&f.x) && (i64::from(r.y)..=i64::from(r.y) + i64::from(r.h)).contains(&f.y);
+            for (c, m) in blame.iter_mut().zip(&placed) {
+                if inside(&m.bbox) {
+                    *c += 1;
+                }
+            }
+        }
+        blame
     }
 }
 
@@ -2327,13 +2571,14 @@ impl CellSpace {
         power: &[i32],
         merge_distinct_gates: bool,
         fold: &[(u16, i32)],
+        blocks: &[(Vec<DeviceId>, Macro)],
     ) -> Self {
         let cellgen::Cells {
             spaces,
             cell_of,
             devices_of,
             aspect_missed,
-        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes);
+        } = cellgen::enumerate_folded(netlist, injected, &problem.constraints, pdk, merge_distinct_gates, fold, &problem.net_classes, blocks);
         let note = ("MatchClass", "no variant meets the aspect limit");
         if aspect_missed > 0 && !problem.missing.contains(&note) {
             problem.missing.push(note);
@@ -2360,8 +2605,10 @@ impl CellSpace {
         debug_check_retargeted(problem, spaces.len(), &groups);
 
         // Guard rings land on cells; two members of one cell asking is one ring.
+        // A block member's ring was drawn in the block (FLOW-11).
         let mut guard_rings = analog::Constraints::default();
-        for r in &problem.constraints.guard_rings {
+        let in_block = |d: DeviceId| blocks.iter().any(|b| b.0.contains(&d));
+        for r in problem.constraints.guard_rings.iter().filter(|r| !in_block(r.device)) {
             let mut r = r.clone();
             if let Some(&c) = cell_of.get(r.device.0 as usize) {
                 r.device = DeviceId(c);
@@ -2496,13 +2743,20 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 /// errors in `report`, deck warnings and coverage apart ([`verify::Signoff`]).
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
-    let (shapes, pins, reference) = signoff_inputs(sol, pdk);
-    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
-    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
+    let mut s = drawn_signoff(sol, pdk);
     if let Some(op) = &sol.op {
         let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);
         s.report.hard_violations.extend(reliability::voltage_findings(&sol.netlist, op, &pdk.fet_voltage_limits(), &sol.pairs, probe).0);
     }
+    s
+}
+
+/// DRC/ERC/LVS over the drawn solution plus undrawable devices — what an
+/// epoch's `RunStats::drc_hard` counts (no operating-point rows).
+fn drawn_signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
+    let (shapes, pins, reference) = signoff_inputs(sol, pdk);
+    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
+    s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
     s
 }
 
@@ -2561,7 +2815,7 @@ pub fn signoff_inputs(
     let shapes = sol.geometry();
     let placed = pnr_core::place_macros(&sol.macros, &sol.layout);
     let names: Vec<String> = sol.netlist.nets.iter().map(|n| n.name.clone()).collect();
-    let (pins, reference) = labels_and_reference(&shapes, &placed, &names, &sol.netlist, Some(&sol.folds), pdk);
+    let (pins, reference) = labels_and_reference(&shapes, &placed, &names, &sol.netlist, Some(&sol.folds), &sol.block_ref, pdk);
     (shapes, pins, reference)
 }
 
@@ -2684,6 +2938,7 @@ pub fn post_layout_spice(sol: &Solution, pdk: &Pdk, top: &str) -> Result<String,
 
 /// Signoff over drawn `shapes`; `fold`: the table the cells were drawn at
 /// ([`cellgen::folds`], the flow), `None` for the schematic's own fingers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn signoff_shapes(
     intent: &verify::Intent,
     shapes: &[pnr_core::Shape],
@@ -2691,24 +2946,29 @@ pub(crate) fn signoff_shapes(
     nets: &[String],
     schematic: &pnr_core::Netlist,
     fold: Option<&[(u16, i32)]>,
+    blocks: &hier::BlockRef,
     pdk: &Pdk,
 ) -> verify::Signoff {
-    let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, fold, pdk);
+    let (pins, reference) = labels_and_reference(shapes, placed, nets, schematic, fold, blocks, pdk);
     verify::signoff_checked(shapes, &pins, &reference, intent, pdk)
 }
 
 /// Labels every provable net (see [`labeled_pins`]) and builds the LVS
 /// reference with exactly those names as ports — `verify` requires they match.
+/// A placed block's members are replaced by its own cards (`blocks`, FLOW-11).
+#[allow(clippy::too_many_arguments)]
 fn labels_and_reference(
     shapes: &[pnr_core::Shape],
     placed: &[Macro],
     nets: &[String],
     schematic: &pnr_core::Netlist,
     fold: Option<&[(u16, i32)]>,
+    blocks: &hier::BlockRef,
     pdk: &Pdk,
 ) -> (Vec<verify::LabeledPin>, verify::RefInput) {
     let pins = labeled_pins(placed, nets, pdk, shapes);
-    let (drawn, replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
+    let (drawn, mut replaced) = cellgen::drawn_cards(placed, nets, schematic, pdk);
+    replaced.extend_from_slice(&blocks.members);
     let mut reference = cellgen::reference(schematic, fold, &replaced);
     // A resistor is drawn to its model's recipe: the deck model that names.
     for d in reference.devices.iter_mut().filter(|d| d.kind == verify::reference::RefKind::Resistor) {
@@ -2718,6 +2978,7 @@ fn labels_and_reference(
     }
     reference.devices.extend(cellgen::dummy_cards(placed, nets, &reference.devices));
     reference.devices.extend(drawn);
+    reference.devices.extend(blocks.cards.iter().cloned());
     reference.ports = pins.iter().map(|p| p.name.clone()).collect();
     // PERF-03: only the declared `.subckt` ports leave the cell; with none
     // (no `.subckt` around the top) every labelled net stays exempt.
@@ -2774,6 +3035,106 @@ mod start_tests {
         assert_eq!(super::axis_grid(&spec(vec![1, 1, 2, 2]), 10), Some((420, 420)));
         assert_eq!(super::axis_grid(&spec(vec![1, 3]), 10), Some((420, 1260)));
         assert_eq!(super::axis_grid(&spec(vec![1, 1, 2, 2]), 25), None);
+    }
+
+    use crate::{Kind, StopReason};
+
+    const THREE_FET: &str = ".subckt three a b c g VSS\nXM1 a g VSS VSS nfet_01v8 W=2u L=0.5u\nXM2 b a VSS VSS nfet_01v8 W=4u L=0.15u\nXM3 c b VSS VSS nfet_01v8 W=1u L=1u\n.ends three\n";
+    const ONE_FET: &str = ".subckt one d g VSS\nXM1 d g VSS VSS nfet_01v8 W=2u L=0.5u\n.ends one\n";
+
+    /// FLOW-08: cold first, without a current-assignment incumbent (after an
+    /// escalation) and every `cold_every`-th epoch; `1` is all cold,
+    /// `u32::MAX` warm after the first.
+    #[test]
+    fn schedule_is_cold_first_then_periodic() {
+        use crate::epoch_kind;
+        assert_eq!(epoch_kind(0, false, 4), Kind::Cold);
+        assert_eq!(epoch_kind(1, true, 4), Kind::Warm);
+        assert_eq!(epoch_kind(4, true, 4), Kind::Cold);
+        assert_eq!(epoch_kind(5, false, 4), Kind::Cold);
+        assert!((0..8).all(|k| epoch_kind(k, true, 1) == Kind::Cold));
+        assert_eq!(epoch_kind(7, true, u32::MAX), Kind::Warm);
+    }
+
+    /// FLOW-08: feasible stops (converged or not); infeasible escalates
+    /// until the outer budget.
+    #[test]
+    fn feasible_incumbent_is_never_escalated() {
+        use crate::next_action;
+        assert_eq!(next_action(true, false, false), Some(StopReason::FeasibleNotStationary));
+        assert_eq!(next_action(true, true, false), Some(StopReason::Converged));
+        assert_eq!(next_action(true, true, true), Some(StopReason::Converged));
+        assert_eq!(next_action(false, false, true), Some(StopReason::OuterBudget));
+        assert_eq!(next_action(false, true, true), Some(StopReason::OuterBudget));
+        assert_eq!(next_action(false, false, false), None);
+    }
+
+    /// FLOW-08: a spent wall budget stops after the first epoch (one
+    /// incumbent is always kept).
+    #[test]
+    fn wall_budget_stops_with_its_reason() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let cfg = crate::Config { max_wall: Some(std::time::Duration::ZERO), feedback_iters: 5, outer_iters: 2, starts: 1, ..Default::default() };
+        let sol = crate::run(ONE_FET, &pdk, &Default::default(), &cfg).expect("flow");
+        assert_eq!((sol.stats.iterations, sol.stats.stop), (1, StopReason::WallBudget));
+    }
+
+    /// FLOW-08: a warm epoch with a no-op schedule keeps its incumbent's
+    /// positions and variants, where a cold epoch at its seed places elsewhere
+    /// (so the match is the warm start's); `cold_every: 1` never runs warm.
+    #[test]
+    fn warm_epoch_starts_from_the_incumbent() {
+        let pdk = verify::Pdk::builtin("sky130").expect("sky130 loads");
+        let cfg = |cold_every| crate::Config { cold_every, feedback_iters: 2, outer_iters: 1, starts: 1, warm: dp::Schedule { range0: 0.0, max_temps: 0, t0_scale: 0.0 }, ..Default::default() };
+        let mut nl = crate::parse(THREE_FET).unwrap();
+        crate::deck_models(&mut nl, &pdk);
+        let cfg_warm = cfg(u32::MAX);
+        let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
+        let ann = crate::annotation_with(&pdk, &cfg_warm.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
+        let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
+        let t = crate::topology(&nl, &Default::default(), &pdk, &cfg_warm, &bias, &ann, &Default::default(), &plan, &Default::default(), true).unwrap();
+        let f = &t.flow;
+        let epoch = |start: Option<&pnr_core::Layout>, seed: u64| f.epoch(&t.assignment0, false, start, &f.weights, &mut gp::Prices::new(), &mut gr::Negotiation::new(), seed).layout;
+        let pos = |l: &pnr_core::Layout| (l.x.clone(), l.y.clone(), l.variant.clone());
+        let inc = epoch(None, 1);
+        assert_ne!(pos(&epoch(None, 2)), pos(&inc), "seed 2 places elsewhere cold");
+        assert_eq!(pos(&epoch(Some(&inc), 2)), pos(&inc));
+        let run = |c| crate::run(THREE_FET, &pdk, &Default::default(), &cfg(c)).expect("flow").stats.warm_epochs;
+        assert_eq!((run(u32::MAX), run(1)), (1, 0));
+    }
+
+    /// FLOW-10 (T7): the shipped `drc_hard` is the signoff of the shipped
+    /// geometry. Without a covered density rule nothing is filled; with a
+    /// 10 µm metal1 floor fill is kept and the stats and caps are re-measured
+    /// on it.
+    /// 80 %, not 40 %: fill counts a 2 µm tile any metal1 touches as covered,
+    /// which reads ota's metal1 as 69 % (291/420 tiles), so 40 % fills nothing.
+    #[test]
+    fn winner_signoff_matches_its_certificate() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // pair's block is narrower than the window, so ota, on gf180's 3.3 V FETs.
+        let spice = std::fs::read_to_string(root.join("benchmarks/fixtures/ota.spice")).expect("fixture");
+        let spice = spice.replace("fet_01v8", "fet_03v3");
+        let cfg = crate::Config { feedback_iters: 2, outer_iters: 1, starts: 1, ..Default::default() };
+        let pdk = verify::Pdk::builtin("gf180mcu").expect("gf180 loads");
+        let sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(!sol.metadata.post_fill);
+        assert_eq!(crate::signoff(&sol, &pdk).report.hard_violations.len(), sol.stats.drc_hard);
+        let sidecar = std::fs::read_to_string(root.join("pdks/gf180mcu.json")).expect("sidecar");
+        let text = verify::Pdk::deck_text(&sidecar).expect("deck");
+        let text = format!("{text}\nrule TEST.m1_density density(metal1; window: 10um, step: 5um) >= 80%\n");
+        let pdk = verify::Pdk::load(&text, &sidecar).expect("deck loads");
+        let mut sol = crate::run(&spice, &pdk, &Default::default(), &cfg).expect("flow");
+        assert!(sol.metadata.post_fill, "ota's block is filled at a 10 µm window");
+        let post = crate::signoff(&sol, &pdk);
+        assert_eq!(post.report.hard_violations.len(), sol.stats.drc_hard);
+        assert_eq!((&post.caps, post.warnings.len() as u32), (&sol.caps, sol.stats.warnings));
+        // The fill macro is appended last. Fill clears no density window here
+        // (the hard count is the same either way), but grounded fill moves the
+        // extracted caps: the winner's own pre-fill caps would not match.
+        sol.macros.pop();
+        let pre = crate::signoff(&sol, &pdk);
+        assert_ne!(pre.caps, sol.caps, "the shipped caps are re-extracted with fill");
     }
 
     /// PLC-24: the floor is capped by what tiny cells plus their gaps can fill.
@@ -3172,7 +3533,7 @@ mod size_tests {
             crate::deck_models(&mut netlist, &pdk);
             let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
             let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+            let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold, &[]);
             for (i, dev) in netlist.devices.iter().enumerate() {
                 if !matches!(dev.kind, pnr_core::DeviceKind::Nmos | pnr_core::DeviceKind::Pmos) {
                     continue;
@@ -3246,7 +3607,7 @@ mod common_node_tests {
         let bias = crate::Bias { power: Vec::new(), summary: None, currents: None, net_headroom_mv: None, gm_us: Vec::new(), op: None };
         let ann = crate::annotation_with(&pdk, &cfg.annotation, Box::leak(Box::new(crate::elaborate::stack(&pdk))));
         let plan = crate::PerfPlan { rows: Vec::new(), notes: Vec::new(), active: vec![0], tables: Vec::new(), sigma_v: Vec::new(), sens: Vec::new(), sims: 0, evidence: None, r_weight: Vec::new(), pair_weight: Vec::new(), beta_key: false };
-        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, true);
+        let t = crate::topology(&nl, &injected, &pdk, &cfg, &bias, &ann, &Default::default(), &plan, &Default::default(), true).unwrap();
         let n = t.flow.cells.variants.len();
         let layout = pnr_core::Layout {
             x: (0..n).map(|i| i as i32 * 20_000).collect(),
@@ -3310,7 +3671,7 @@ mod spacing_tests {
         crate::deck_models(&mut netlist, pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, pdk, &[], &[]);
-        let cs = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold);
+        let cs = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, pdk, &[], true, &fold, &[]);
         (netlist.devices.iter().map(|d| d.name.clone()).collect(), problem, cs)
     }
 
@@ -3559,7 +3920,7 @@ mod environment_tests {
         crate::deck_models(&mut netlist, &pdk);
         let mut problem = annotator::annotate(&netlist, &crate::annotation(&pdk, &Default::default()));
         let fold = crate::cellgen::folds(&netlist, &pdk, &[], &[]);
-        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold);
+        let cells = crate::CellSpace::new(&netlist, &Default::default(), &mut problem, &pdk, &[], true, &fold, &[]);
         let env = crate::live_environment(&problem, &cells, &pdk);
         let n = cells.variants.len();
         assert!(!env.pairs.is_empty(), "ota has a matched pair");

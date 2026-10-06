@@ -1,0 +1,12 @@
+* Two 5T OTAs, one definition (FLOW-11 bottom-up fixture)
+.subckt ota vinp vinm vout1 vout2 VDD VSS vbias vbn
+XM1 vout1 vinp vtail VSS nfet_01v8 W=10u L=1u nf=2
+XM2 vout2 vinm vtail VSS nfet_01v8 W=10u L=1u nf=2
+XM3 vout1 vbias VDD VDD pfet_01v8 W=20u L=1u
+XM4 vout2 vbias VDD VDD pfet_01v8 W=20u L=1u
+XM5 vtail vbn VSS VSS nfet_01v8 W=40u L=2u m=4
+.ends ota
+.subckt two_ota inp1 inm1 inp2 inm2 o1 o2 o3 o4 VDD VSS vbias vbn
+X1 inp1 inm1 o1 o2 VDD VSS vbias vbn ota
+X2 inp2 inm2 o3 o4 VDD VSS vbias vbn ota
+.ends two_ota

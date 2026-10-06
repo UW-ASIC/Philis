@@ -10,8 +10,9 @@
 //! Tied, not floating: the extractor makes each floating piece a device-less
 //! net (LVS `floating_net`/`unpaired_net`, and an ERC finding on decks that
 //! flag unconnected metal). Fill is grown tile by tile out of routed ground
-//! wires, so every piece touches ground; a layer whose fill makes label-free
-//! ERC worse (a ground wire can be a dangling fragment) is dropped.
+//! wires, so every piece touches ground; a layer whose fill makes any DRC or
+//! ERC rule worse, label-free (a ground wire can be a dangling fragment, a
+//! tile can break a max-width rule), is dropped.
 //!
 //! Keep-outs: every foreign shape by the layer's widest spacing, sensitive-net
 //! wires by [`KEEP_OUT`] times it, matched cells entirely (Hastings 3e §13.3:
@@ -55,7 +56,7 @@ pub fn fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[Rec
     if floors.is_empty() {
         return None;
     }
-    let base = verify::erc(drawn, &[], pdk).len();
+    let base = counts(drawn, pdk);
     let mut out: Vec<Shape> = Vec::new();
     for f in floors {
         let tiles = layer_fill(drawn, ground, sensitive, avoid, pdk, b, &f);
@@ -63,14 +64,25 @@ pub fn fill(drawn: &[Shape], ground: &[Shape], sensitive: &[Shape], avoid: &[Rec
             continue;
         }
         let all: Vec<Shape> = drawn.iter().chain(&out).chain(&tiles).copied().collect();
-        if verify::erc(&all, &[], pdk).len() > base {
-            eprintln!("fill: layer {:?} dropped, its ground is not device-connected", f.layer);
+        // Per rule, not totals: fill removes the density findings it answers,
+        // which would hide a new spacing or width finding in a total.
+        if let Some((rule, _)) = counts(&all, pdk).into_iter().find(|(r, n)| *n > base.get(r).copied().unwrap_or(0)) {
+            eprintln!("fill: layer {:?} dropped, it adds {rule} findings", f.layer);
             continue;
         }
         out.extend(tiles);
     }
     let bbox = bbox(&out)?;
     Some(Macro { shapes: out, pins: Vec::new(), bbox, units: Vec::new(), dummies: Vec::new(), ..Default::default() })
+}
+
+/// Findings per rule id, DRC then ERC, label-free.
+fn counts(shapes: &[Shape], pdk: &Pdk) -> std::collections::BTreeMap<String, usize> {
+    let mut out = std::collections::BTreeMap::new();
+    for f in verify::drc(shapes, &[], pdk).into_iter().chain(verify::erc(shapes, &[], pdk)) {
+        *out.entry(f.rule).or_insert(0) += 1;
+    }
+    out
 }
 
 /// Tiles on `f.layer`, flooded out of the ground wires through free tiles
@@ -199,18 +211,18 @@ mod tests {
 
     /// gf180's real deck plus a windowed metal1 floor (min 30% per 200 um,
     /// step 100 um): the shipped decks state metal density whole-die only.
-    fn deck(name: &str) -> Option<Pdk> {
+    fn deck(name: &str, extra: &str) -> Option<Pdk> {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let sidecar = std::fs::read_to_string(root.join(format!("pdks/{name}.json"))).ok()?;
         let text = Pdk::deck_text(&sidecar).ok()?;
-        let text = format!("{text}\nrule TEST.m1_density density(metal1; window: 200um, step: 100um) >= 30%\n");
+        let text = format!("{text}\nrule TEST.m1_density density(metal1; window: 200um, step: 100um) >= 30%\n{extra}");
         Pdk::load(&text, &sidecar).ok()
     }
 
     /// A block smaller than the window: the rule is chip-level, nothing filled.
     #[test]
     fn a_block_narrower_than_the_window_gets_no_fill() {
-        let Some(pdk) = deck("gf180mcu") else { return };
+        let Some(pdk) = deck("gf180mcu", "") else { return };
         let m1 = pdk.routing_metals[0];
         let rail = Shape { layer: m1, rect: Rect { x: 0, y: 0, w: 20_000, h: 1_000 } };
         assert!(fill(&[rail], &[rail], &[], &[], &pdk).is_none());
@@ -221,7 +233,7 @@ mod tests {
     /// out of the matched cell, and the empty metal2 stays empty.
     #[test]
     fn a_block_wider_than_the_window_is_filled_inside_from_ground() {
-        let Some(pdk) = deck("gf180mcu") else { return };
+        let Some(pdk) = deck("gf180mcu", "") else { return };
         let m1 = pdk.routing_metals[0];
         let side = 200_000;
         let rail = Shape { layer: m1, rect: Rect { x: 0, y: 0, w: side, h: 1_000 } };
@@ -236,5 +248,19 @@ mod tests {
         let clear = spacing(&pdk, m1);
         assert!(m.shapes.iter().all(|s| gap(&s.rect, &signal.rect) >= KEEP_OUT * clear && !overlaps(&s.rect, &cell)));
         assert!(m.bbox.x >= 0 && m.bbox.y >= 0 && m.bbox.x + m.bbox.w <= side, "inside the block");
+    }
+
+    /// The filled-from-ground geometry plus a metal1 max width of 1.5 µm: the
+    /// 1 µm wires meet it, every ≥ 2 µm tile breaks it, so metal1 is dropped
+    /// and nothing is filled (the ERC-only gate kept it).
+    #[test]
+    fn fill_that_adds_a_drc_finding_is_dropped() {
+        let Some(pdk) = deck("gf180mcu", "rule TEST.m1_maxw width(metal1) <= 1.5um\n") else { return };
+        let m1 = pdk.routing_metals[0];
+        let side = 200_000;
+        let rail = Shape { layer: m1, rect: Rect { x: 0, y: 0, w: side, h: 1_000 } };
+        let signal = Shape { layer: m1, rect: Rect { x: 0, y: side - 1_000, w: side, h: 1_000 } };
+        let cell = Rect { x: 50_000, y: 50_000, w: 20_000, h: 20_000 };
+        assert!(fill(&[rail, signal], &[rail], &[signal], &[cell], &pdk).is_none());
     }
 }

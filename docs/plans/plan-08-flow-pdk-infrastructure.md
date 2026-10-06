@@ -721,8 +721,9 @@ Field report: FR-2 (a 100-iteration run never stopped early at DRC 0 and LVS mat
   1. `enum Start<'a> { Cold, Warm(&'a Layout) }` (library-local; PLC's plan defines its own
      `dp::Start { Cold(&Layout), Constructive, Warm { tree, variant, orient } }`, plan-04-placement.md:325, which this maps
      onto); `Layout` gains `#[derive(Clone)]` (kernel/core/src/layout.rs:11; every field is `Vec` or `Arc`; AR-26).
-  2. Schedule [policy, measure]: epoch `k` is **cold** iff there is no incumbent, or `k % COLD_EVERY == 0`
-     (`COLD_EVERY = 4`), or the previous action escalated the assignment; otherwise **warm** from the incumbent's layout
+  2. Schedule [policy, measure]: epoch `k` is **cold** iff there is no incumbent from the current assignment
+     (none yet, or every epoch since the last escalation lost to an older incumbent), or `k % COLD_EVERY == 0`
+     (`COLD_EVERY = 4`); otherwise **warm** from the incumbent's layout
      and variants. Ablation over `COLD_EVERY ∈ {2, 4, 8, ∞}` on the bench decides the default.
   3. `Flow::epoch(&self, assignment, reshape, start: Start, w: &Weights, prices, neg, seed)`:
      - Cold: today's path (`gp::place` → `dp::place(…, dp::Schedule::cold())`).
@@ -764,7 +765,7 @@ Field report: FR-2 (a 100-iteration run never stopped early at DRC 0 and LVS mat
   8. `RunStats` gains `stop: StopReason` (`Converged | FeasibleNotStationary | OuterBudget | EscalationExhausted |
      WallBudget | Patience`) and `Config.max_wall: Option<std::time::Duration>` checked between epochs.
 - Tests (`frontend/library/src/lib.rs`, `frontend/library/src/cellgen.rs`):
-  - `schedule_is_cold_first_then_periodic` (pure fn `epoch_kind(k, has_incumbent, escalated) -> Kind`).
+  - `schedule_is_cold_first_then_periodic` (pure fn `epoch_kind(k, current_incumbent, cold_every) -> Kind`).
   - `feasible_incumbent_is_never_escalated` (pure fn `next_action(feasible, stationary, last_outer) -> Action`).
   - `escalate_blamed_moves_the_most_blamed_cell_first` and `escalate_blamed_never_repeats`.
   - `wall_budget_stops_with_its_reason`: `max_wall = Some(0 s)` → exactly one epoch, `stop == WallBudget`.

@@ -17,8 +17,10 @@
 //! "max"}]}`, the testbench relative to the JSON), `--interface FILE`
 //! (die and boundary pins, checked against the ports), `--out-rs FILE` (emit),
 //! `--constraints FILE` (ALIGN-style JSON sidecar, `annotator::sidecar`).
-//! `--hierarchy` other than `flat` and `--max-wall` are refused (exit 2)
-//! until FLOW-11 / FLOW-08.
+//! `--max-wall SECONDS` (wall budget: the search stops before its next epoch
+//! once spent, keeping its incumbent). `--hierarchy flat|auto|bottom-up:N`
+//! (FLOW-11: each sub-circuit definition with ≥ N devices solved once as a
+//! block; `auto` = `bottom-up:2` past 100 devices, else flat).
 //!
 //! Every run writes `<top>.gds` (the `.subckt` ports as labels on the
 //! deck's text layers), `<top>_ref.spice` (the LVS reference signoff used,
@@ -45,7 +47,7 @@ fn main() -> ExitCode {
 
 const USAGE: &str = "usage: philis [run|emit] <netlist.sp> [<pdk.json | sky130 | gf180mcu | ihp_sg13g2 | generic_finfet>] [out.rs] \
                      [--pdk P] [-o|--out DIR] [--seed N] [--iters N] [--outer N] [--starts N] [--size spice|per-finger] [--top NAME] \
-                     [--op-lib PATH [--corner C] [--vdd V] [--temp C] [--testbench FILE]] [--perf SPECS.json] [--interface FILE] [--constraints FILE] [--out-rs FILE]";
+                     [--op-lib PATH [--corner C] [--vdd V] [--temp C] [--testbench FILE]] [--perf SPECS.json] [--interface FILE] [--constraints FILE] [--hierarchy flat|auto|bottom-up:N] [--out-rs FILE]";
 
 /// `Ok(true)` when signoff is clean: no errors and every device LVS-compared.
 fn cli() -> Result<bool, String> {
@@ -91,12 +93,16 @@ fn cli() -> Result<bool, String> {
             "--interface" => cfg.interface = Some(library::Interface::from_json(&read(&val()?)?)?),
             "--out-rs" => out_rs = Some(val()?),
             "--constraints" => cfg.constraints = Some(read(&val()?).map_err(|e| format!("--constraints: {e}"))?),
-            "--max-wall" => return Err("`--max-wall` needs FLOW-08 (wall-clock stop)".into()),
+            "--max-wall" => cfg.max_wall = Some(std::time::Duration::from_secs_f64(num(&a, &val()?)?)),
             "--hierarchy" => {
                 let h = val()?;
-                if h != "flat" {
-                    return Err(format!("`--hierarchy {h}` needs FLOW-11 (only `flat`)"));
-                }
+                let n = h.strip_prefix("bottom-up:").and_then(|n| n.parse().ok());
+                cfg.hierarchy = match (h.as_str(), n) {
+                    ("flat", _) => library::Hierarchy::Flat,
+                    ("auto", _) => library::Hierarchy::Auto,
+                    (_, Some(min_devices)) => library::Hierarchy::BottomUp { min_devices },
+                    _ => return Err(format!("`--hierarchy {h}`: expected flat, auto or bottom-up:N")),
+                };
             }
             _ if a.starts_with('-') => return Err(format!("unknown flag {a}\n{USAGE}")),
             _ => pos.push(a),
@@ -271,11 +277,13 @@ fn write_outputs(
     let st = &sol.stats;
     let stages: String = library::STAGES.iter().zip(st.stage_ms).map(|(n, ms)| format!(" {n}={ms:.0}")).collect();
     let rep = format!(
-        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
+        "{}\n# signoff hard ({})\n{}\n# run\nconverged\t{}\nstop\t{:?}\nwarm\t{}\niterations\t{}\nouter_iterations\t{}\nsim_failures\t{}\nwarnings\t{}\nstage_ms\t{}\n# diagnostics ({})\n{}",
         sol.metadata,
         report.hard_violations.len(),
         lines(&report.hard_violations),
         st.converged,
+        st.stop,
+        st.warm_epochs,
         st.iterations,
         st.outer_iterations,
         st.sim_failures,
