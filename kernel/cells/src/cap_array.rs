@@ -275,7 +275,7 @@ impl CapArray {
     /// The [`Pattern::Split`] variant of a split DAC whose members are
     /// ordered as that pattern says: `None` unless the stack is MIM, the dummy
     /// ring is drawn, the LSB bank is a binary bank of `lsb` bits, the MSB
-    /// counts are `[1, 2, …, 2^(M-1)]` (M ≥ 1), and the bridge's square half
+    /// counts are `[1, 2, …, 2^(M-1)]` (M ≥ 1), the bridge's count is 1, and its square half
     /// fits between the plate's min width and the unit plate.
     /// [`Cell::enumerate`] never offers it: it cannot see which bank is which.
     #[must_use]
@@ -284,7 +284,7 @@ impl CapArray {
         crate::builder::unitization(group, c)?.dummy_required.then_some(())?;
         let s = group_sizing(group, c, process);
         let l = usize::from(lsb);
-        (s.dev_nf.len() >= l + 3 && bits(&s.dev_nf[..=l]) == Some(lsb)).then_some(())?;
+        (s.dev_nf.len() >= l + 3 && bits(&s.dev_nf[..=l]) == Some(lsb) && *s.dev_nf.last()? == 1).then_some(())?;
         let msb = &s.dev_nf[l + 1..s.dev_nf.len() - 1];
         msb.iter().enumerate().all(|(i, &u)| u32::from(u) == 1 << i).then_some(())?;
         let half = ca_half_side(process, s.unit_w, s.unit_l, lsb, msb.len() as u8)?;
@@ -365,7 +365,7 @@ impl CapArray {
                 b.rect(cut, Rect { x: x0 + i * pitch, y: y0 + j * pitch, w: v, h: v });
             }
         }
-        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(cell.w) * i64::from(cell.h), phi: (0, 0), sa: 0, sb: 0 });
+        b.unit(Unit { owner, x: cell.x + cell.w / 2, y: cell.y + cell.h / 2, weight: i64::from(plate.w) * i64::from(plate.h), phi: (0, 0), sa: 0, sb: 0 });
         b.drawn(Drawn { owner, device: None, kind: DrawnKind::Capacitor, nodes: [Node::Pin("P"), Node::Pin("N"), Node::Unused], w: plate.w, l: plate.h });
         b.keepout(plate, KeepWhy::CapPlate { owner });
         plate
@@ -1038,7 +1038,7 @@ mod tests {
     }
 
     /// CELL-21: every member draws its count (the bridge two halves), every
-    /// even-count cap but the bridge's own is point-symmetric about the
+    /// even-count cap, the bridge's halves included, is point-symmetric about the
     /// units' centre (exact common centroid), the array is DRC/ERC-clean with
     /// one top net per bank, and the deck extracts one capacitor per unit on
     /// exactly two top nodes.
