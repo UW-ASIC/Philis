@@ -37,7 +37,9 @@ pub struct Parasitics {
 
 /// `SA = SB = S` (µm) at which BSIM4's multi-finger average `(1/nf)·Σᵢ
 /// 1/(S + L/2 + i·L)` (SD = 0) gives `target/2`: an equivalent card for the
-/// layout's measured stress. `None` when no finite `S` reaches it.
+/// layout's measured stress. `None` when no `S` in `[1e-3, 1e4]` µm reaches
+/// it (a non-positive or NaN target, or stress beyond what abutting fingers
+/// give). `nf < 1` reads as 1.
 fn equivalent_sa_um(target_inv_um: f64, l_um: f64, nf: i64) -> Option<f64> {
     let f = |s: f64| (0..nf.max(1)).map(|i| 1.0 / (s + l_um / 2.0 + i as f64 * l_um)).sum::<f64>() / nf.max(1) as f64;
     let want = target_inv_um / 2.0;
@@ -59,8 +61,11 @@ fn equivalent_sa_um(target_inv_um: f64, l_um: f64, nf: i64) -> Option<f64> {
 /// One requirement on a measured metric (a `.measure` name).
 #[derive(Clone, Debug)]
 pub struct Spec {
+    /// The `.measure` name, matched case-insensitively.
     pub metric: String,
+    /// Floor, metric units; `None` (or non-finite) = no floor.
     pub min: Option<f64>,
+    /// Ceiling, metric units; `None` (or non-finite) = no ceiling.
     pub max: Option<f64>,
 }
 
@@ -68,9 +73,13 @@ pub struct Spec {
 /// values the testbenches read (e.g. `Vdd vdd 0 {vdd}`).
 #[derive(Clone, Debug)]
 pub struct Scenario {
+    /// Label for reports.
     pub name: String,
+    /// Corner inside [`OpConfig::model_lib`].
     pub corner: String,
+    /// Simulation temperature, °C.
     pub temp_c: f64,
+    /// `.param name=value` lines, in order.
     pub params: Vec<(String, f64)>,
 }
 
@@ -84,6 +93,7 @@ pub struct PerfConfig {
     /// schematic's net names, no `.end`; a spec's metric comes from exactly
     /// one of them.
     pub testbenches: Vec<String>,
+    /// The requirements, in report order; indices into this are "spec `j`".
     pub specs: Vec<Spec>,
     /// Index 0 is nominal. Empty = one scenario from `sim.corner` /
     /// `sim.temp_c`.
@@ -105,6 +115,7 @@ impl PerfConfig {
 /// A finite bound's worst value over the evaluated scenarios.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundResult {
+    /// Index into the scored specs.
     pub spec: usize,
     /// The ceiling (`max`); `false` = the floor (`min`).
     pub upper: bool,
@@ -141,17 +152,39 @@ impl PerfResult {
 }
 
 /// Normalised miss of `v` against `spec`: the overshoot past the violated
-/// bound over that bound's magnitude (`1` when the bound is zero).
+/// bound over that bound's magnitude (`1` when the bound is zero). `≥ 0`;
+/// an unmeasured (`None`) or NaN value is a full miss, `1`.
 #[must_use]
 pub fn miss(spec: &Spec, v: Option<f64>) -> f64 {
+    miss_bounds(spec.min, spec.max, v)
+}
+
+/// [`miss`] of one side of `spec`: its ceiling when `upper`, else its floor.
+#[must_use]
+pub(crate) fn side_miss(spec: &Spec, upper: bool, v: Option<f64>) -> f64 {
+    if upper {
+        miss_bounds(None, spec.max, v)
+    } else {
+        miss_bounds(spec.min, None, v)
+    }
+}
+
+/// [`miss`] against a bare floor and ceiling.
+fn miss_bounds(min: Option<f64>, max: Option<f64>, v: Option<f64>) -> f64 {
     let Some(v) = v else { return 1.0 };
     let over = |excess: f64, bound: f64| (excess / if bound == 0.0 { 1.0 } else { bound.abs() }).max(0.0);
-    spec.min.map_or(0.0, |lo| over(lo - v, lo)) + spec.max.map_or(0.0, |hi| over(v - hi, hi))
+    min.map_or(0.0, |lo| over(lo - v, lo)) + max.map_or(0.0, |hi| over(v - hi, hi))
 }
 
 /// Score `measured[i][j]` (spec `j` at `scenarios[i]`): per finite bound the
 /// scenario with the smallest margin (`v − lo` / `hi − v`), the first
-/// unmeasured one if any; ties go to the earlier scenario.
+/// unmeasured one if any; ties go to the earlier scenario. A NaN measurement
+/// is unmeasured. Rows past `scenarios.len()` are ignored, except that
+/// `metrics` always reads `measured[0]`; no rows at all leave every spec
+/// unmeasured (a full miss).
+///
+/// # Panics
+/// If a row of `measured` is shorter than `specs`.
 #[must_use]
 pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize]) -> PerfResult {
     let metrics = specs.iter().enumerate().map(|(j, s)| (s.metric.clone(), measured.first().and_then(|m| m[j]))).collect();
@@ -172,10 +205,8 @@ pub fn score(specs: &[Spec], measured: &[Vec<Option<f64>>], scenarios: &[usize])
                 bounds.push(BoundResult { spec: j, upper, value, scenario });
             }
         }
-        let floor = Spec { max: None, ..s.clone() };
-        let ceiling = Spec { min: None, ..s.clone() };
         misses.push(match (lo, hi) {
-            (Some((Some(a), _)), Some((Some(b), _))) => miss(&floor, Some(a)) + miss(&ceiling, Some(b)),
+            (Some((Some(a), _)), Some((Some(b), _))) => side_miss(s, false, Some(a)) + side_miss(s, true, Some(b)),
             _ => 1.0,
         });
     }
@@ -290,7 +321,7 @@ pub(crate) fn run_jobs<J: Sync, T: Send>(jobs: &[J], f: impl Fn(&J) -> T + Sync)
     out.into_inner().expect("a job panicked").into_iter().map(|r| r.expect("every job ran")).collect()
 }
 
-/// One deck's `.measure` results. One dir per run (`run_deck`): decks go in
+/// One deck's `.measure` results (testbench `tb` of `cfg` at `sc`). One dir per run (`run_deck`): decks go in
 /// parallel and must not share a deck or the ngspice cwd (`bsim4v5.out`). A
 /// panicking deck is `Err` (a sim failure), not a panic through [`run_jobs`].
 fn measure(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: usize, sc: &Scenario) -> Result<Vec<(String, f64)>, String> {
@@ -305,7 +336,8 @@ fn measure(netlist: &Netlist, par: &Parasitics, cfg: &PerfConfig, tb: usize, sc:
 /// Every spec's metric from one scenario's per-testbench measures.
 ///
 /// # Errors
-/// A metric measured by two testbenches.
+/// A metric measured by two testbenches. Within one testbench the last
+/// `name = value` line wins.
 fn assemble(cfg: &PerfConfig, per_tb: &[Vec<(String, f64)>]) -> Result<Vec<Option<f64>>, String> {
     let mut row = Vec::with_capacity(cfg.specs.len());
     for s in &cfg.specs {
@@ -365,6 +397,7 @@ pub enum Param {
 /// One parameter's derivative of every spec's metric.
 #[derive(Clone, Debug)]
 pub struct SensRow {
+    /// The perturbed quantity.
     pub param: Param,
     /// Δ, in the parameter's unit.
     pub step: f64,
@@ -381,9 +414,11 @@ pub struct SensRow {
 pub struct SensTable {
     /// Index into [`PerfConfig::scenarios`].
     pub scenario: usize,
+    /// The operating parasitics every perturbation is applied to.
     pub at: Parasitics,
     /// [`score`] of the unperturbed run at `scenario` alone.
     pub base: PerfResult,
+    /// One per perturbed parameter, in request order.
     pub rows: Vec<SensRow>,
     /// ngspice decks run for this table.
     pub sims: u32,
@@ -396,11 +431,15 @@ pub struct SensTable {
 /// `|s₁ − s₂| ≤ lin_tol·max(|s₁|, |s₂|)` over the two quotients.
 #[derive(Clone, Copy, Debug)]
 pub struct StepPolicy {
+    /// Smallest C step, aF.
     pub c_min_af: f64,
+    /// C step as a fraction of the net's gate capacitance.
     pub c_frac: f64,
     /// Gate capacitance, aF/µm²; `0` = unknown (every C step is `c_min_af`).
     pub gate_af_um2: f64,
+    /// R step, Ω.
     pub r_ohm: f64,
+    /// Relative agreement of the two quotients for a row to read `linear`.
     pub lin_tol: f64,
 }
 
@@ -410,13 +449,22 @@ impl Default for StepPolicy {
     }
 }
 
+/// Index of the `caps` entry between nets `a` and `b` (`None` = ground), in
+/// either order.
+fn cap_entry(caps: &verify::CapMatrix, a: &str, b: Option<&str>) -> Option<usize> {
+    caps.iter().position(|(x, y, _)| (x == a && y.as_deref() == b) || (Some(x.as_str()) == b && y.as_deref() == Some(a)))
+}
+
 /// `at` with `v` added to `p` (aF / Ω / V; may be negative).
+///
+/// # Panics
+/// If `p` names a net, device or terminal `netlist` does not have.
 fn perturb(netlist: &Netlist, at: &Parasitics, p: Param, v: f64) -> Parasitics {
     let mut out = at.clone();
-    let name = |n: pnr_core::NetId| netlist.nets[n.0 as usize].name.clone();
-    let mut cap = |a: String, b: Option<String>| match out.caps.iter_mut().find(|(x, y, _)| (*x == a && *y == b) || (Some(x) == b.as_ref() && y.as_ref() == Some(&a))) {
-        Some(e) => e.2 += v / 1000.0,
-        None => out.caps.push((a, b, v / 1000.0)),
+    let name = |n: pnr_core::NetId| netlist.nets[n.0 as usize].name.as_str();
+    let mut cap = |a: &str, b: Option<&str>| match cap_entry(&out.caps, a, b) {
+        Some(k) => out.caps[k].2 += v / 1000.0,
+        None => out.caps.push((a.to_string(), b.map(str::to_string), v / 1000.0)),
     };
     match p {
         Param::GroundC { net } => cap(name(net), None),
@@ -439,11 +487,12 @@ fn perturb(netlist: &Netlist, at: &Parasitics, p: Param, v: f64) -> Parasitics {
 }
 
 /// `p`'s value in `at` (aF / Ω / V), `0` when absent.
+///
+/// # Panics
+/// As [`perturb`].
 fn base_value(netlist: &Netlist, at: &Parasitics, p: Param) -> f64 {
     let name = |n: pnr_core::NetId| netlist.nets[n.0 as usize].name.as_str();
-    let cap = |a: &str, b: Option<&str>| {
-        at.caps.iter().find(|(x, y, _)| (x == a && y.as_deref() == b) || (Some(x.as_str()) == b && y.as_deref() == Some(a))).map_or(0.0, |e| e.2 * 1000.0)
-    };
+    let cap = |a: &str, b: Option<&str>| cap_entry(&at.caps, a, b).map_or(0.0, |k| at.caps[k].2 * 1000.0);
     match p {
         Param::GroundC { net } => cap(name(net), None),
         Param::CouplingC { a, b } => cap(name(a), Some(name(b))),
@@ -455,7 +504,8 @@ fn base_value(netlist: &Netlist, at: &Parasitics, p: Param) -> f64 {
     }
 }
 
-/// Δ for `p` under `steps` ([`StepPolicy`]).
+/// Δ for `p` under `steps` ([`StepPolicy`]); a coupling step reads the
+/// gate capacitance on its `a` net.
 fn step(netlist: &Netlist, p: Param, sigma_v: &[Option<f64>], steps: &StepPolicy) -> f64 {
     let c = |net: pnr_core::NetId| {
         let gates: f64 = netlist.devices.iter().filter(|d| d.terminals.iter().any(|(t, n)| t == "G" && *n == net)).map(pnr_core::Device::gate_area_um2).sum();
@@ -469,7 +519,10 @@ fn step(netlist: &Netlist, p: Param, sigma_v: &[Option<f64>], steps: &StepPolicy
 }
 
 /// The rows of `params` around `at` at `scenario`, and the base metrics
-/// (simulated unless given). Returns `(base, rows, sims)`.
+/// (simulated unless given). Returns `(base, rows, sims)`, `sims` the decks run.
+///
+/// # Errors
+/// No scenario `scenario`, or the base run fails (as [`evaluate`]).
 #[allow(clippy::too_many_arguments)]
 fn sens_rows(
     netlist: &Netlist,
@@ -536,6 +589,9 @@ fn sens_rows(
 ///
 /// # Errors
 /// As [`evaluate`], for the base run.
+///
+/// # Panics
+/// If a `param` names a net, device or terminal `netlist` does not have.
 pub fn sensitivities(
     netlist: &Netlist,
     cfg: &PerfConfig,
@@ -565,7 +621,7 @@ pub fn add_coupling(t: &mut SensTable, netlist: &Netlist, cfg: &PerfConfig, nets
 
 /// Steps 1–3 of the selection: `GroundC` per `nets`; `SeriesR` for FET S/D,
 /// BJT E/C, resistor P/N terminals on nets with ≥ 2 device pins;
-/// `GateOffset` per FET.
+/// `GateOffset` per FET. In that order, each group in device / terminal order.
 #[must_use]
 pub fn default_params(netlist: &Netlist, nets: &[pnr_core::NetId]) -> Vec<Param> {
     use pnr_core::DeviceKind as K;
@@ -593,7 +649,8 @@ pub fn default_params(netlist: &Netlist, nets: &[pnr_core::NetId]) -> Vec<Param>
 /// coupling is the `GroundC` row), unordered, ranked by `max_j (|∂f_j/∂C_a| +
 /// |∂f_j/∂C_b|) / s_j` from `t`'s `GroundC` rows (a net without one counts
 /// 0), `s_j` = |base metric j| (1 when 0 or unmeasured) so no spec's unit
-/// dominates; ties by `(a, b)`; at most `max`.
+/// dominates; ties by `(a, b)`; at most `max`. A ground net in `nets` pairs
+/// with nothing. Each is `CouplingC { a, b }` with `a < b`.
 #[must_use]
 pub fn coupling_params(t: &SensTable, netlist: &Netlist, nets: &[pnr_core::NetId], max: usize) -> Vec<Param> {
     let scale: Vec<f64> = t.base.metrics.iter().map(|m| m.1.map_or(1.0, f64::abs)).map(|s| if s == 0.0 { 1.0 } else { s }).collect();
@@ -621,6 +678,9 @@ pub fn coupling_params(t: &SensTable, netlist: &Netlist, nets: &[pnr_core::NetId
 /// `d_c`/`d_cc` per aF from linear `GroundC`/`CouplingC` rows; `d_r` per Ω, linear `SeriesR` rows summed per net
 /// of the terminal; `d_vt` per mV from every `GateOffset` row (σ_f's rule, [`crate::robust`]): `−d/1000` NMOS,
 /// `+d/1000` PMOS; `d_t` empty.
+///
+/// # Panics
+/// If a row names a device or terminal `netlist` does not have.
 #[must_use]
 pub fn to_evidence(
     cfg: &PerfConfig,
@@ -687,7 +747,12 @@ pub fn to_evidence(
 /// RTE-21's router weights. `bounds[k] = (spec, h_b, scenario)`, `h_b > 0`. `r_weight[n]` (len `netlist.nets`)
 /// = Σ_b Σ_{linear SeriesR rows on n} |d_b| / h_b, scaled so the max is 1 (all 0 if none);
 /// `pair_weight` = `(a, b, Σ_b ½·|d_b| / h_b)` per linear `CouplingC` row, unscaled. Row `d` read in the table
-/// whose `scenario` is the bound's.
+/// whose `scenario` is the bound's. A bound with `h_b ≤ 0` or non-finite, or
+/// without a table, contributes nothing.
+///
+/// # Panics
+/// If a row's `d` is shorter than a bound's spec index + 1, or a row names a
+/// device or terminal `netlist` does not have.
 #[must_use]
 pub fn router_weights(
     tables: &[SensTable],

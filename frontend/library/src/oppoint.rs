@@ -109,7 +109,8 @@ impl OpPoint {
     /// Per net, the smallest positive saturation headroom among devices whose
     /// source or drain sits on it, mV: the drop that net's wiring may spend
     /// without pushing a device out of saturation. `None` when no saturated
-    /// device touches the net.
+    /// device touches the net. Length `netlist.nets`; a terminal on a net
+    /// past it is ignored.
     #[must_use]
     pub fn net_headroom_mv(&self, netlist: &Netlist) -> Vec<Option<f64>> {
         let mut out: Vec<Option<f64>> = vec![None; netlist.nets.len()];
@@ -124,7 +125,7 @@ impl OpPoint {
         out
     }
 
-    /// Total dissipation, µW.
+    /// Total dissipation, µW (summed in `i64`: no overflow).
     #[must_use]
     pub fn total_power_uw(&self) -> i64 {
         self.power_uw.iter().map(|&p| i64::from(p)).sum()
@@ -134,7 +135,9 @@ impl OpPoint {
 /// DC current each net carries, µA, from per-device terminal draws
 /// ([`OpPoint::terminal_ua`]): the larger of what its terminals draw and what
 /// they supply (a rail's port makes up the difference). `None` when a device
-/// on the net is unresolved — unknown, never zero.
+/// on the net is unresolved — unknown, never zero. `draws` is per device, as
+/// [`OpPoint::terminal_ua`] returns it; a device past its end adds nothing.
+/// Rounded to the nearest µA, saturating at `i32::MAX`.
 #[must_use]
 pub fn net_current_ua(netlist: &Netlist, draws: &[Option<Vec<(String, f64)>>]) -> Vec<Option<i32>> {
     let mut acc: Vec<Option<(f64, f64)>> = vec![Some((0.0, 0.0)); netlist.nets.len()];
@@ -165,9 +168,10 @@ pub struct OpConfig {
     pub rails_v: Vec<(String, f64)>,
     /// Supply voltage of the synthesised bench, volts.
     pub vdd: f64,
-    /// NMOS / PMOS library model names overriding the schematic's own
-    /// (empty: each device simulates as the model it was drawn as).
+    /// NMOS library model name overriding the schematic's own (empty: each
+    /// device simulates as the model it was drawn as).
     pub nmos_model: String,
+    /// PMOS counterpart of [`OpConfig::nmos_model`].
     pub pmos_model: String,
     /// ngspice binary.
     pub ngspice: String,
@@ -212,7 +216,7 @@ impl OpConfig {
     }
 }
 
-/// The last `n` characters of `s`: ngspice puts the fatal line last.
+/// The last `n` characters of `s` (lossy UTF-8): ngspice puts the fatal line last.
 fn tail(s: &[u8], n: usize) -> String {
     let s = String::from_utf8_lossy(s);
     let k = s.chars().count().saturating_sub(n);
@@ -263,8 +267,9 @@ pub(crate) fn check_exit(out: &std::process::Output) -> Result<(), String> {
 ///
 /// # Errors
 /// ngspice missing, the deck unwritable, a device the deck cannot express or
-/// ngspice rejects ("cannot simulate: …"), or no device data in the output —
-/// all of which the caller treats as "bias unknown".
+/// ngspice rejects ("cannot simulate: …"), or no device data in the output
+/// ("no device operating points: <stderr tail>") — all of which the caller
+/// treats as "bias unknown".
 pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     let (deck, provenance) = build_deck(netlist, cfg).map_err(|e| format!("cannot simulate: {e}"))?;
     let out = run_deck(&cfg.ngspice, "op", &deck)?;
@@ -273,11 +278,7 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     let table = parse_show(&stdout);
     let nodes = parse_nodes(&stdout);
     if table.is_empty() {
-        let tail: String = String::from_utf8_lossy(&out.stderr)
-            .chars()
-            .take(400)
-            .collect();
-        return Err(format!("no device operating points: {tail}"));
+        return Err(format!("no device operating points: {}", tail(&out.stderr, 400)));
     }
     let n = netlist.devices.len();
     let mut o = OpPoint {
@@ -337,19 +338,24 @@ pub fn extract(netlist: &Netlist, cfg: &OpConfig) -> Result<OpPoint, String> {
     Ok(o)
 }
 
-/// One device's operating point as `show` reports it.
+/// One device's operating point as `show` reports it, SI units (A, V, S, W);
+/// a column the block did not print reads `0`.
 #[derive(Default, Clone, Copy)]
 struct DevOp {
+    /// MOSFET drain current, A (PMOS positive out of the drain).
     id: f64,
     vds: f64,
     vdsat: f64,
     gm: f64,
     vgs: f64,
     vbs: f64,
+    /// BJT collector, base, emitter currents, A.
     ic: f64,
     ib: f64,
     ie: f64,
+    /// Resistor current, A.
     i: f64,
+    /// Dissipated power, W.
     p: f64,
 }
 
@@ -549,7 +555,10 @@ pub fn testbench_sources(netlist: &Netlist, tb: &str) -> (Vec<pnr_core::NetId>, 
     (switching, dc)
 }
 
-/// A SPICE number with an optional scale suffix (`1.8`, `900m`, `1e-3`).
+/// A SPICE number with an optional scale suffix (`1.8`, `900m`, `1e-3`,
+/// `2meg`; `t g meg k m u n p f`) and an optional trailing `v` unit;
+/// lowercase input (callers lowercase the card). `None` for an unknown
+/// suffix or no number.
 fn spice_number(t: &str) -> Option<f64> {
     let t = t.trim_end_matches('v');
     let split = t.find(|c: char| c.is_ascii_alphabetic() && c != 'e').unwrap_or(t.len());

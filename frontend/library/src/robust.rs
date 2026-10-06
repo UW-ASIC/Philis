@@ -10,7 +10,7 @@ use pnr_core::Netlist;
 
 use crate::perf::{Param, PerfResult, SensTable, Spec};
 
-/// β a bound is designed to ("three-sigma design").
+/// β a bound is designed to ("three-sigma design", GRAEB-16).
 pub const BETA_TARGET: f64 = 3.0;
 
 /// Device random V_T σ, V: `A_VT/√(2·A_gate)` with `A_gate` =
@@ -41,14 +41,17 @@ pub fn device_sigma_v(netlist: &Netlist, avt_mv_um: [Option<f32>; 2]) -> Vec<Opt
 pub struct BoundStat {
     /// Index into [`PerfResult::bounds`].
     pub bound: usize,
-    /// Metric units.
+    /// σ_f, metric units; `≥ 0`.
     pub sigma_f: Option<f64>,
+    /// Worst-case distance `margin/σ_f`, in σ: negative when the bound is
+    /// already missed; `±∞` when σ_f = 0 (no spread), `+∞` for a zero margin.
     pub beta: Option<f64>,
     /// Φ(β).
     pub yield_part: Option<f64>,
     /// `margin − BETA_TARGET·σ_f`, metric units.
     pub headroom_stat: Option<f64>,
-    /// `(device, s²σ²/σ_f²)`, largest first, at most 3.
+    /// `(device, s²σ²/σ_f²)`, largest first, at most 3; every share `0` when
+    /// σ_f = 0.
     pub shares: Vec<(u16, f64)>,
 }
 
@@ -73,6 +76,9 @@ fn terms(t: &SensTable, sigma_v: &[Option<f64>], j: usize) -> Option<Vec<(u16, f
 /// table has a `GateOffset` row whose FET has no σ, `"unmeasured"` when the
 /// bound has no value, else `"no sensitivities"` (no table for its scenario,
 /// no `GateOffset` row, or a derivative missing).
+///
+/// # Panics
+/// If `b >= post.bounds.len()`.
 #[must_use]
 pub fn unknown_reason(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfResult, b: usize) -> &'static str {
     let bound = &post.bounds[b];
@@ -102,7 +108,18 @@ fn margin(post: &PerfResult, specs: &[Spec], b: usize, sys: &[f64]) -> Option<f6
 /// Per bound of `post` (spec `specs[bound.spec]`): σ_f² = Σ_i s_i²σ_i² +
 /// Σ_(p,q,σ_g)∈grad ((s_p − s_q)/2)²σ_g², s_i the `GateOffset` derivative in
 /// the table whose `scenario` is the bound's; β = margin/σ_f with `sys[b]` =
-/// Δf_sys added to the post-layout value (empty = none).
+/// Δf_sys added to the post-layout value (empty = none). A `grad` entry
+/// `(p, q, σ_g)` is a gradient term shared by devices `p` and `q` (a device
+/// without a row reads `s = 0`).
+///
+/// A bound is all-unknown when its scenario has no table, any FET's σ or
+/// derivative is unknown ([`unknown_reason`] says which), or it has no value.
+/// σ_f = 0 (every derivative zero) is known: β is `+∞` for a margin `≥ 0`
+/// and `−∞` below, Φ(β) is 1 or 0, and every share is 0.
+///
+/// # Panics
+/// If a bound's `spec` is out of `specs`, or a `GateOffset` row's `d` is
+/// shorter than the spec count.
 #[must_use]
 pub fn bound_stats(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfResult, specs: &[Spec], sys: &[f64], grad: &[(u16, u16, f64)]) -> Vec<BoundStat> {
     (0..post.bounds.len())
@@ -123,8 +140,8 @@ pub fn bound_stats(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfRes
         .collect()
 }
 
-/// PERF-14's spec tiers `(failed, shortfall)` of `post`. `beta_key`: failed = #bounds with β < 0 or β unknown,
-/// shortfall = max_b max(0, [`BETA_TARGET`] − β_b), +∞ when any β is unknown. Otherwise (σ unknown for the run):
+/// PERF-14's spec tiers `(failed, shortfall)` of `post`. `beta_key`: failed = #bounds with β < 0 or β unknown
+/// (NaN reads as unknown), shortfall = max_b max(0, [`BETA_TARGET`] − β_b), +∞ when any β is unknown. Otherwise (σ unknown for the run):
 /// failed = #bounds unmeasured or missing their side ([`crate::perf::miss`] of the one-sided spec > 0), shortfall =
 /// `post.residual` (the pre-PERF-14 tier).
 #[must_use]
@@ -134,28 +151,25 @@ pub fn key_tiers(stats: &[BoundStat], post: &PerfResult, specs: &[Spec], beta_ke
         let shortfall = stats.iter().map(|s| s.beta.map_or(f64::INFINITY, |b| (BETA_TARGET - b).max(0.0))).fold(0.0, f64::max);
         return (failed, shortfall);
     }
-    let failed = post
-        .bounds
-        .iter()
-        .filter(|b| {
-            let s = &specs[b.spec];
-            let side = if b.upper { Spec { min: None, ..s.clone() } } else { Spec { max: None, ..s.clone() } };
-            crate::perf::miss(&side, b.value) > 0.0
-        })
-        .count() as u32;
+    let failed = post.bounds.iter().filter(|b| crate::perf::side_miss(&specs[b.spec], b.upper, b.value) > 0.0).count() as u32;
     (failed, post.residual)
 }
 
-/// Smallest β over `stats`; `None` if empty or any is unknown.
+/// Smallest β over `stats`; `None` if empty or any is unknown (NaN reads as
+/// unknown).
 #[must_use]
 pub fn min_beta(stats: &[BoundStat]) -> Option<f64> {
-    stats.iter().map(|s| s.beta).collect::<Option<Vec<_>>>()?.into_iter().reduce(f64::min)
+    stats.iter().try_fold(None, |acc: Option<f64>, s| {
+        let b = s.beta?;
+        Some(Some(acc.map_or(b, |a| a.min(b))))
+    })?
 }
 
 /// Fraction of `samples` normal draws `t_i ~ N(0, 1)` (one per device, shared
 /// by every bound) for which every bound holds under the linear model `f_b =
-/// f_post,b + Δf_sys,b + Σ_i s_bi σ_i t_i`. `None` if any bound's σ_f is
-/// unknown. Deterministic for `seed`.
+/// f_post,b + Δf_sys,b + Σ_i s_bi σ_i t_i`. `None` if `samples` is 0 or any
+/// bound's σ_f is unknown; `Some(1.0)` with no bounds. Deterministic for
+/// `seed`. Cost O(samples · (devices + Σ_b terms_b)).
 #[must_use]
 pub fn linear_joint_yield(tables: &[SensTable], sigma_v: &[Option<f64>], post: &PerfResult, specs: &[Spec], sys: &[f64], samples: usize, seed: u64) -> Option<f64> {
     // Per bound: margin and (device, s·σ) signed so a positive sum eats margin.
@@ -172,6 +186,7 @@ pub fn linear_joint_yield(tables: &[SensTable], sigma_v: &[Option<f64>], post: &
     let mut t = vec![0.0; sigma_v.len()];
     let mut pass = 0usize;
     for _ in 0..samples {
+        // Box–Muller: two independent N(0, 1) draws per pair of uniforms.
         for pair in t.chunks_mut(2) {
             let (u1, u2) = (rng.f64(), rng.f64());
             let r = (-2.0 * (1.0 - u1).ln()).sqrt();

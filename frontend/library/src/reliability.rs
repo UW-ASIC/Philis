@@ -15,10 +15,15 @@ const FORWARD_TOL_V: f64 = 1e-3;
 /// only: no source gives a threshold, H05-33/35).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PairAging {
+    /// First member, as the pair was given.
     pub a: DeviceId,
+    /// Second member.
     pub b: DeviceId,
+    /// `|V_DS,a − V_DS,b|`, mV.
     pub dvds_mv: f64,
+    /// `|V_GS,a − V_GS,b|`, mV.
     pub dvgs_mv: f64,
+    /// `|V_BS,a − V_BS,b|`, mV.
     pub dvbs_mv: f64,
 }
 
@@ -32,6 +37,10 @@ pub struct PairAging {
 /// With `probe` (the op came from a synthesised mid-rail probe, not a
 /// testbench) every row's rule ends ` (probe)`, so a signoff report never
 /// passes probe voltages off as a testbench finding.
+///
+/// A voltage that is not finite (NaN, ±∞) reads as unresolved: the FET counts
+/// as unknown and no row or pair entry is built from it. A device index past
+/// `op`'s columns is unresolved too; a pair naming one is left out.
 #[must_use]
 pub fn voltage_findings(
     netlist: &Netlist,
@@ -41,6 +50,7 @@ pub fn voltage_findings(
     probe: bool,
 ) -> (Vec<Violation>, Vec<PairAging>, usize) {
     let src = if probe { " (probe)" } else { "" };
+    // `(V_GS, V_DS, V_BS)` of device `i`, V, when all three are resolved.
     let v3 = |i: usize| Some((*op.vgs_v.get(i)?.as_ref()?, *op.vds_v.get(i)?.as_ref()?, *op.vbs_v.get(i)?.as_ref()?));
     let (mut rows, mut unknown) = (Vec::new(), 0);
     for (i, d) in netlist.devices.iter().enumerate() {
