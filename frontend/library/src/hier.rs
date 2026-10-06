@@ -348,3 +348,143 @@ mod tests {
         assert!(n.insts.is_empty() && n.device_inst.iter().all(Option::is_none));
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::{KeepWhy, Keepout, LayerId, Shape};
+
+    const NESTED: &str = ".subckt inner a b c\nM1 a b c c nfet W=1u L=1u\nM2 c b a a nfet W=1u L=1u\n.ends inner\n\
+                          .subckt outer p q r\nXI p q r inner\nM3 p q r r nfet W=1u L=1u\n.ends outer\n\
+                          .subckt top x y z\nXO x y z outer\n.ends top\n";
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn pin(name: &str, at: Rect) -> Pin {
+        Pin { name: name.into(), net: NetId(0), at, layer: LayerId(0) }
+    }
+
+    fn block(subckt: &str, ports: usize) -> Block {
+        Block {
+            subckt: subckt.into(),
+            mac: Macro { pins: (0..ports).map(|k| pin(&format!("p{k}"), rect(0, 0, 1, 1))).collect(), ..Default::default() },
+            ref_cards: Vec::new(),
+            i0_path: "XO".into(),
+            i0_ports: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn to_origin_moves_everything_with_the_shapes() {
+        let s = |x, y, w, h| Shape { layer: LayerId(0), rect: rect(x, y, w, h) };
+        let mut m = Macro {
+            shapes: vec![s(10, 20, 5, 5), s(30, 40, 10, 10)],
+            pins: vec![pin("p0", rect(12, 22, 1, 1))],
+            keepouts: vec![Keepout { rect: rect(10, 20, 1, 1), why: KeepWhy::Gate { owner: 0 } }],
+            ..Default::default()
+        };
+        to_origin(&mut m);
+        assert_eq!(m.shapes[0].rect, rect(0, 0, 5, 5));
+        assert_eq!(m.shapes[1].rect, rect(20, 20, 10, 10));
+        assert_eq!(m.pins[0].at, rect(2, 2, 1, 1));
+        assert_eq!(m.keepouts[0].rect, rect(0, 0, 1, 1));
+        assert_eq!(m.bbox, rect(0, 0, 30, 30));
+    }
+
+    /// A macro with no shapes has no bbox to move to the origin: nothing
+    /// moves (no `i32::MAX` shift), and its bbox is empty.
+    #[test]
+    fn to_origin_of_no_shapes_moves_nothing() {
+        let mut m = Macro { pins: vec![pin("p0", rect(-5, 7, 1, 1))], ..Default::default() };
+        to_origin(&mut m);
+        assert_eq!(m.pins[0].at, rect(-5, 7, 1, 1));
+        assert_eq!(m.bbox, rect(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn eligible_of_a_flat_netlist_is_empty() {
+        let nl = crate::parse("R1 a b 1\n").unwrap();
+        assert!(eligible(&nl, 0).is_empty());
+    }
+
+    #[test]
+    fn a_global_touching_instance_is_not_eligible() {
+        let deck = ".global vdd\n.subckt c a b\nM1 a b vdd vdd nfet W=1u L=1u\n.ends\n.subckt t n m\nX1 n m c\n.ends\n";
+        let nl = crate::parse(deck).unwrap();
+        assert!(eligible(&nl, 0).is_empty());
+    }
+
+    #[test]
+    fn local_reparents_nested_instances() {
+        let nl = crate::parse(NESTED).unwrap();
+        let i = nl.insts.iter().position(|x| x.path == "XO").unwrap() as u32;
+        let (n, devs, _) = local(&nl, i);
+        assert_eq!(devs.len(), 3);
+        assert_eq!(n.insts.len(), 1);
+        assert_eq!((n.insts[0].path.as_str(), n.insts[0].parent), ("XO/XI", None));
+        assert_eq!(n.device_inst.iter().filter(|d| **d == Some(0)).count(), 2);
+        assert_eq!(n.device_inst.iter().filter(|d| d.is_none()).count(), 1);
+        assert!(n.sources.is_empty());
+        // Ports are the instance's actuals, first in the local net order.
+        assert_eq!(n.ports, [NetId(0), NetId(1), NetId(2)]);
+    }
+
+    #[test]
+    fn instantiate_without_blocks_places_nothing() {
+        let nl = crate::parse(NESTED).unwrap();
+        let p = instantiate(&nl, &[]);
+        assert!(p.cells.is_empty() && p.refs.cards.is_empty() && p.refs.members.is_empty());
+    }
+
+    #[test]
+    fn instantiate_places_only_outermost_instances() {
+        let nl = crate::parse(NESTED).unwrap();
+        let p = instantiate(&nl, &[block("inner", 3), block("outer", 3)]);
+        assert_eq!(p.cells.len(), 1, "XO/XI sits inside the XO block");
+        let (members, mac) = &p.cells[0];
+        assert_eq!(members.len(), 3);
+        assert_eq!(p.refs.members, *members);
+        let xo = nl.insts.iter().find(|x| x.path == "XO").unwrap();
+        assert_eq!(mac.pins.iter().map(|q| q.net).collect::<Vec<_>>(), xo.ports);
+    }
+
+    #[test]
+    #[should_panic(expected = "block pins are `p{k}`")]
+    fn instantiate_panics_on_a_foreign_pin_name() {
+        let nl = crate::parse(NESTED).unwrap();
+        let mut b = block("outer", 0);
+        b.mac.pins.push(pin("q", rect(0, 0, 1, 1)));
+        let _ = instantiate(&nl, &[b]);
+    }
+
+    #[test]
+    fn rename_does_not_strip_a_path_that_only_shares_a_prefix() {
+        let mut b = block("s", 0);
+        b.i0_path = "X1".into();
+        assert_eq!(rename("X10/n", &b, "X2", &[]), "X2/X10/n");
+        assert_eq!(rename("X1", &b, "X2", &[]), "X2/X1");
+    }
+
+    #[test]
+    fn restrict_reindexes_per_device_and_per_net_tables() {
+        let bias = Bias {
+            power: vec![10, 20, 30],
+            summary: None,
+            currents: Some(vec![None, Some(vec![("D".to_string(), 1.0)]), None]),
+            net_headroom_mv: Some(vec![Some(1.0), None, Some(3.0)]),
+            gm_us: Vec::new(),
+            op: None,
+        };
+        let r = bias.restrict(&[DeviceId(2), DeviceId(1)], &[NetId(2), NetId(0)]);
+        assert_eq!(r.power, [30, 20]);
+        assert_eq!(r.currents.as_ref().map(Vec::len), Some(2));
+        assert!(r.currents.as_ref().unwrap()[0].is_none() && r.currents.as_ref().unwrap()[1].is_some());
+        assert_eq!(r.net_headroom_mv, Some(vec![Some(3.0), Some(1.0)]));
+        assert!(r.gm_us.is_empty(), "an empty table stays empty");
+        let none = Bias::uniform(Vec::new()).restrict(&[DeviceId(0)], &[]);
+        assert!(none.power.is_empty() && none.currents.is_none() && none.net_headroom_mv.is_none());
+    }
+}

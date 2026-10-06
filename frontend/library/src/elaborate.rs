@@ -826,3 +826,284 @@ mod tests {
         assert_eq!(i.currents, vec![("vss".to_string(), 10.0)], "vdd unknown: no current, never a partial sum");
     }
 }
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use analog::cell::{SeriesParallel, Unitization};
+    use analog::metadata::{NetClass, NetClassification};
+    use pnr_core::{DeviceId, DeviceKind, Keepout, KeepWhy, MatchClass, Net, NetId, Rect};
+
+    fn sky() -> Pdk {
+        Pdk::builtin("sky130").unwrap()
+    }
+
+    fn unit(devices: &[u16], class: Option<MatchClass>) -> Unitization {
+        Unitization {
+            devices: devices.iter().map(|&d| DeviceId(d)).collect(),
+            device_type: DeviceKind::Nmos,
+            dev_nf: vec![1; devices.len()],
+            target_ratio: vec![1; devices.len()],
+            unit_w: 1_000,
+            unit_l: 150,
+            series_parallel: SeriesParallel::Parallel,
+            dummy_required: false,
+            route_matching_required: true,
+            class,
+            kind: None,
+            series: Vec::new(),
+            style: None,
+        }
+    }
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    #[test]
+    fn elab_config_defaults_to_four_epochs() {
+        assert_eq!(ElabConfig::default().epochs, 4);
+    }
+
+    #[test]
+    fn low_bits_masks() {
+        assert_eq!(low_bits(0), 0);
+        assert_eq!(low_bits(1), 1);
+        assert_eq!(low_bits(4), 0b1111);
+        assert_eq!(low_bits(15), 0x7fff);
+        assert_eq!(low_bits(16), u16::MAX);
+        assert_eq!(low_bits(40), u16::MAX);
+        assert_eq!(low_bits(usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn match_class_needs_a_multi_device_set_holding_every_member() {
+        let units = [unit(&[0], Some(MatchClass::Exceptional)), unit(&[1, 2], Some(MatchClass::Exceptional))];
+        assert_eq!(match_class(&units, &[DeviceId(0)]), None, "a one-device unitization is no matched set");
+        assert_eq!(match_class(&units, &[]), None, "a cell drawing nothing is in no set");
+        assert_eq!(match_class(&units, &[DeviceId(1), DeviceId(3)]), None, "partly covered");
+        assert_eq!(match_class(&units, &[DeviceId(2)]), Some(MatchClass::Exceptional));
+        assert_eq!(match_class(&[], &[DeviceId(0)]), None);
+    }
+
+    #[test]
+    fn layer_specs_of_no_layers_is_an_empty_lattice() {
+        let pdk = sky();
+        let (p0, specs) = layer_specs(&pdk, &[], &[], None);
+        assert!(specs.is_empty());
+        assert!(p0 > 0 && p0 % (2 * pdk.grid.max(1)) == 0, "p0 {p0} stays a positive multiple of 2·grid");
+    }
+
+    #[test]
+    fn a_zero_or_one_top_keeps_one_metal() {
+        let pdk = sky();
+        for top in [0, 1] {
+            let s = routing_stack(&pdk, Some(top)).unwrap();
+            assert_eq!(s.layers.len(), 1, "top {top}");
+            assert!(s.cuts.is_empty());
+            assert_eq!(s.specs.len(), 1);
+        }
+    }
+
+    #[test]
+    fn routing_stack_invariants_hold_on_every_builtin() {
+        for deck in ["sky130", "gf180mcu", "ihp_sg13g2", "generic_finfet"] {
+            let pdk = Pdk::builtin(deck).unwrap();
+            let s = routing_stack(&pdk, None).unwrap();
+            assert!(!s.layers.is_empty(), "{deck}");
+            assert_eq!(s.cuts.len(), s.layers.len() - 1, "{deck}");
+            assert_eq!(s.specs.len(), s.layers.len(), "{deck}");
+            assert!(s.specs.iter().all(|x| x.stride <= gr::MAX_STRIDE), "{deck}");
+        }
+    }
+
+    #[test]
+    fn em_limits_without_a_temperature_are_the_rated_values() {
+        let p = sky();
+        let m1 = p.layers.iter().find(|(n, _)| n == "met1").unwrap().1;
+        assert_eq!(em_limits(&p, &[m1], &[], None)[0].1.ua_per_um, 2800.0);
+        assert!(em_limits(&p, &[], &[], Some(400.0)).is_empty());
+    }
+
+    #[test]
+    fn parasitic_stack_interleaves_metals_and_cuts() {
+        let pdk = sky();
+        let s = stack(&pdk);
+        let want = pdk.routing_metals.len() + pdk.routing_cuts.len().min(pdk.routing_metals.len());
+        assert_eq!(s.layers.len(), want);
+        assert!(!s.layers[0].cut);
+        for l in &s.layers {
+            assert_eq!(l.cut, pdk.routing_cuts.iter().any(|c| c.0 == l.id));
+            if l.cut {
+                assert_eq!(l.latent_merge_nm, 0, "a cut is no lateral conductor");
+            }
+        }
+        let ids: Vec<u16> = s.layers.iter().map(|l| l.id).collect();
+        let mut dedup = ids.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(dedup.len(), ids.len(), "ids are unique");
+    }
+
+    #[test]
+    fn detailed_router_has_one_enclosure_row_per_cut() {
+        let pdk = sky();
+        let s = routing_stack(&pdk, None).unwrap();
+        let cfg = detailed_router(&pdk, &s).cfg;
+        let (_, mcon) = s.pin_access.unwrap();
+        assert_eq!(cfg.cut_enclosure.len(), s.cuts.len() + 1);
+        assert_eq!(cfg.cut_enclosure_pair.len(), s.cuts.len() + 1);
+        assert_eq!(cfg.cut_enclosure[0].0, mcon.0, "the pin-access cut comes first");
+        assert_eq!(cfg.layers.len(), s.layers.len());
+        let gf = Pdk::builtin("gf180mcu").unwrap();
+        let s = routing_stack(&gf, None).unwrap();
+        let cfg = detailed_router(&gf, &s).cfg;
+        assert_eq!(cfg.cut_enclosure.len(), s.cuts.len());
+        assert_eq!(cfg.pin_access, None);
+    }
+
+    #[test]
+    fn antenna_diodes_need_a_ground_and_a_violation() {
+        let pdk = sky();
+        let reqs = Requirements::<Routes>::default();
+        assert!(antenna_diodes(&pdk, &reqs, &Routes::default(), &[], &[], None, 0).is_empty());
+        assert!(antenna_diodes(&pdk, &reqs, &Routes::default(), &[], &[], Some(NetId(0)), 0).is_empty());
+    }
+
+    fn keepout_cell(why: KeepWhy, extra: Vec<Shape>) -> Macro {
+        Macro { shapes: extra, keepouts: vec![Keepout { rect: rect(0, 0, 1_000, 1_000), why }], ..Default::default() }
+    }
+
+    #[test]
+    fn resistor_body_at_moderate_is_one_hard_foreign_blockage() {
+        let pdk = sky();
+        let layers = routing_stack(&pdk, None).unwrap().layers;
+        let cell = keepout_cell(KeepWhy::ResistorBody { owner: 0 }, Vec::new());
+        let b = blockages(&[cell], &pdk, |_| Some(MatchClass::Moderate), &layers);
+        assert_eq!(b.len(), 1);
+        assert!(b[0].hard && !b[0].gate && b[0].own_exempt && !b[0].only_aggressors);
+        assert_eq!(b[0].layers, low_bits(layers.len()));
+    }
+
+    #[test]
+    fn an_explicit_gate_keepout_replaces_poly_diff_gates() {
+        use pnr_core::Process;
+        let pdk = sky();
+        let layers = routing_stack(&pdk, None).unwrap().layers;
+        let (poly, diff) = (Process::layer(&pdk, "poly").unwrap(), Process::layer(&pdk, "diff").unwrap());
+        let shapes = vec![Shape { layer: diff, rect: rect(0, 0, 2_000, 1_000) }, Shape { layer: poly, rect: rect(500, -200, 150, 1_400) }];
+        let cell = keepout_cell(KeepWhy::Gate { owner: 0 }, shapes);
+        let b = blockages(&[cell], &pdk, |_| Some(MatchClass::Exceptional), &layers);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].rect, rect(0, 0, 1_000, 1_000));
+        assert!(b[0].hard && b[0].gate && !b[0].own_exempt);
+        assert!(blockages(&[keepout_cell(KeepWhy::Gate { owner: 0 }, Vec::new())], &pdk, |_| None, &layers).is_empty());
+    }
+
+    #[test]
+    fn cap_plate_blockages_by_class_and_top_conductor() {
+        let pdk = sky();
+        let layers = routing_stack(&pdk, None).unwrap().layers;
+        let s = pdk.route_spacing(layers[0].0).unwrap_or(0);
+        let all = low_bits(layers.len());
+        // Minimal: soft everywhere, plus the aggressor ring.
+        let b = blockages(&[keepout_cell(KeepWhy::CapPlate { owner: 0 }, Vec::new())], &pdk, |_| Some(MatchClass::Minimal), &layers);
+        assert_eq!(b.len(), 2);
+        assert!(!b[0].hard && b[0].layers == all);
+        assert!(b[1].hard && b[1].only_aggressors && b[1].halo == PLATE_AGGRESSOR_NM + s && b[1].layers == all);
+        // Moderate, top plate conductor on routed layer 1: hard below it, soft above.
+        let over = vec![Shape { layer: layers[1], rect: rect(100, 100, 200, 200) }];
+        let b = blockages(&[keepout_cell(KeepWhy::CapPlate { owner: 0 }, over)], &pdk, |_| Some(MatchClass::Moderate), &layers);
+        assert_eq!(b.len(), 3);
+        assert!(b[0].hard && b[0].layers == 0b1);
+        assert!(!b[1].hard && b[1].layers == all & !0b1);
+        assert!(b[2].only_aggressors);
+    }
+
+    /// More routed layers than the 16-bit mask holds never overflows a shift.
+    #[test]
+    fn blockages_with_more_than_sixteen_layers_do_not_overflow() {
+        let pdk = sky();
+        let layers: Vec<LayerId> = (0..20).map(LayerId).collect();
+        let over = vec![Shape { layer: LayerId(18), rect: rect(100, 100, 200, 200) }];
+        let b = blockages(&[keepout_cell(KeepWhy::CapPlate { owner: 0 }, over)], &pdk, |_| Some(MatchClass::Moderate), &layers);
+        assert!(b.iter().all(|x| x.layers != 0));
+    }
+
+    fn rails() -> Netlist {
+        let dev = |name: &str, terminals: &[(&str, u16)]| pnr_core::Device {
+            name: name.into(),
+            kind: DeviceKind::Resistor,
+            model: String::new(),
+            terminals: terminals.iter().map(|&(t, n)| (t.into(), NetId(n))).collect(),
+            params: vec![],
+        };
+        Netlist {
+            devices: vec![dev("R0", &[("P", 0), ("N", 2)]), dev("R1", &[("P", 2), ("N", 1)])],
+            nets: ["vdd", "vss", "x"].iter().map(|n| Net { name: (*n).into() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn class(n: u16, class: NetClass) -> NetClassification {
+        NetClassification { net: NetId(n), class, c_budget_af: None, max_coupling_af: None }
+    }
+
+    #[test]
+    fn intent_without_an_operating_point_is_empty() {
+        let i = intent(&rails(), &[class(0, NetClass::Supply)], None, 1_800.0, &[(NetId(0), 1, 5_000)]);
+        assert!(i.supplies.is_empty() && i.currents.is_empty() && i.max_drop_mv.is_empty());
+    }
+
+    #[test]
+    fn intent_declares_rails_currents_and_ir_budgets() {
+        let draws = [Some(vec![("P".to_string(), 5.0), ("N".to_string(), -5.0)]), Some(vec![("P".to_string(), 5.0), ("N".to_string(), -5.0)])];
+        let classes = [class(0, NetClass::Supply), class(1, NetClass::Ground), class(2, NetClass::Signal)];
+        let i = intent(&rails(), &classes, Some(&draws), 1_800.0, &[(NetId(0), 5, 5_000), (NetId(2), 5, 9_000)]);
+        assert_eq!(i.supplies, [("vdd".to_string(), 1_800.0, false), ("vss".to_string(), 1_800.0, true)]);
+        assert_eq!(i.currents, [("vdd".to_string(), 5.0), ("vss".to_string(), 5.0)]);
+        assert_eq!(i.max_drop_mv, [("vdd".to_string(), 5.0)], "a signal net's budget is not written");
+    }
+
+    /// A non-finite simulated current is unknown, never a NaN/∞ current.
+    #[test]
+    fn intent_treats_a_non_finite_draw_as_unknown() {
+        for bad in [f64::NAN, f64::INFINITY] {
+            let draws = [Some(vec![("P".to_string(), bad), ("N".to_string(), 0.0)]), Some(vec![("P".to_string(), 0.0), ("N".to_string(), 0.0)])];
+            let i = intent(&rails(), &[class(0, NetClass::Supply)], Some(&draws), 1_800.0, &[]);
+            assert!(i.currents.is_empty(), "{bad}: {:?}", i.currents);
+        }
+    }
+
+    #[test]
+    fn elaborated_geometry_is_cells_then_wires() {
+        let pdk = sky();
+        let l = routing_stack(&pdk, None).unwrap().layers[0];
+        let cell = Shape { layer: l, rect: rect(0, 0, 10, 10) };
+        let wire = Shape { layer: l, rect: rect(20, 0, 10, 2) };
+        let e = Elaborated {
+            layout: Layout {
+                x: vec![5],
+                y: vec![5],
+                hw: vec![5],
+                hh: vec![5],
+                axis: vec![0],
+                groups: Vec::new(),
+                orient: vec![Orient::default()],
+                variant: vec![0],
+                branch: Vec::new(),
+                power_uw: vec![0],
+                temp_mc: vec![0],
+                units: Default::default(),
+            },
+            macros: vec![Macro { shapes: vec![cell], ..Default::default() }],
+            routes: Routes { wires: vec![vec![], vec![wire]], ..Default::default() },
+            nets: vec!["a".into(), "b".into()],
+            ports: vec![],
+            report: Report::default(),
+            schematic: None,
+        };
+        assert_eq!(e.geometry(), [cell, wire]);
+        assert!(e.signoff(&pdk).is_none(), "no schematic, no full signoff");
+    }
+}
