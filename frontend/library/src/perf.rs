@@ -1174,3 +1174,335 @@ mod tests {
         assert_eq!(r.spread, vec![None]);
     }
 }
+
+/// Step-2 coverage: scoring, the deck, the perturbation helpers, parameter
+/// selection and the exports, without ngspice. Oracles: the doc contracts,
+/// hand-worked values, and round trips (`base_value ∘ perturb`).
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::{Device, DeviceKind, Net, NetId};
+
+    fn spec(min: Option<f64>, max: Option<f64>) -> Spec {
+        Spec { metric: "m".into(), min, max }
+    }
+
+    fn nets(names: &[&str]) -> Vec<Net> {
+        names.iter().map(|n| Net { name: (*n).into() }).collect()
+    }
+
+    /// `M1`: D=out(0) G=in(1) S=B=vss(2).
+    fn one_fet() -> Netlist {
+        Netlist {
+            devices: vec![Device {
+                name: "M1".into(),
+                kind: DeviceKind::Nmos,
+                model: String::new(),
+                terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+                params: vec![("w".into(), 2000), ("l".into(), 500)],
+            }],
+            nets: nets(&["out", "in", "vss"]),
+            ..Default::default()
+        }
+    }
+
+    fn cfg(specs: Vec<Spec>, testbenches: Vec<String>) -> PerfConfig {
+        PerfConfig { sim: OpConfig::default(), testbenches, specs, scenarios: Vec::new() }
+    }
+
+    #[test]
+    fn miss_of_a_window_and_of_nan() {
+        let w = spec(Some(10.0), Some(20.0));
+        assert_eq!(miss(&w, Some(15.0)), 0.0);
+        assert_eq!(miss(&w, Some(10.0)), 0.0, "on the bound is met");
+        assert!((miss(&w, Some(5.0)) - 0.5).abs() < 1e-12);
+        assert!((miss(&w, Some(30.0)) - 0.5).abs() < 1e-12);
+        assert_eq!(miss(&spec(None, None), Some(1e9)), 0.0, "no bound, no miss");
+        assert_eq!(miss(&spec(None, None), None), 1.0, "unmeasured is a full miss even unbounded");
+        assert!((miss(&spec(Some(-10.0), None), Some(-15.0)) - 0.5).abs() < 1e-12, "a negative floor scales by its magnitude");
+        assert_eq!(miss(&w, Some(f64::NAN)), 1.0, "NaN is unmeasured");
+    }
+
+    #[test]
+    fn side_miss_reads_one_bound() {
+        let w = spec(Some(10.0), Some(20.0));
+        assert_eq!(side_miss(&w, true, Some(5.0)), 0.0, "the ceiling ignores a floor miss");
+        assert!((side_miss(&w, false, Some(5.0)) - 0.5).abs() < 1e-12);
+        assert!((side_miss(&w, true, Some(30.0)) - 0.5).abs() < 1e-12);
+        assert_eq!(side_miss(&w, false, None), 1.0);
+    }
+
+    #[test]
+    fn score_of_no_scenarios_is_unmeasured() {
+        let specs = [spec(Some(1.0), None), spec(None, None)];
+        let r = score(&specs, &[], &[]);
+        assert_eq!(r.metrics, vec![("m".to_string(), None), ("m".to_string(), None)]);
+        assert!(r.bounds.is_empty());
+        assert_eq!(r.miss, vec![1.0, 1.0]);
+        assert_eq!(r.residual, 2.0);
+        assert!(!r.met());
+        assert_eq!(r.spread, vec![None, None]);
+    }
+
+    #[test]
+    fn an_infinite_bound_is_not_a_bound_result() {
+        let r = score(&[spec(Some(f64::NEG_INFINITY), Some(5.0))], &[vec![Some(1.0)]], &[0]);
+        assert_eq!(r.bounds.len(), 1);
+        assert!(r.bounds[0].upper);
+        assert!(r.met());
+    }
+
+    #[test]
+    fn ties_go_to_the_earlier_scenario() {
+        let r = score(&[spec(Some(0.0), Some(10.0))], &[vec![Some(5.0)], vec![Some(5.0)]], &[3, 7]);
+        assert_eq!((r.bounds[0].scenario, r.bounds[1].scenario), (3, 3));
+    }
+
+    /// A NaN measurement is unmeasured wherever it sits: the bound's worst
+    /// is that scenario, the spec a full miss, no spread.
+    #[test]
+    fn a_nan_measurement_is_unmeasured() {
+        for rows in [vec![vec![Some(f64::NAN)], vec![Some(5.0)]], vec![vec![Some(5.0)], vec![Some(f64::NAN)]]] {
+            let r = score(&[spec(Some(0.0), None)], &rows, &[0, 1]);
+            assert_eq!(r.bounds[0].value, None, "{rows:?}");
+            assert_eq!(r.miss, vec![1.0]);
+            assert_eq!(r.spread, vec![None]);
+        }
+    }
+
+    #[test]
+    fn met_is_a_zero_residual() {
+        assert!(PerfResult::default().met());
+        assert!(!PerfResult { residual: 1e-12, ..Default::default() }.met());
+    }
+
+    #[test]
+    fn scenarios_default_to_the_sim_corner() {
+        let mut c = cfg(Vec::new(), Vec::new());
+        c.sim.corner = "ff".into();
+        c.sim.temp_c = -40.0;
+        let s = c.scenarios();
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].name.as_str(), s[0].corner.as_str(), s[0].temp_c), ("ff", "ff", -40.0));
+        assert!(s[0].params.is_empty());
+        c.scenarios = vec![Scenario { name: "a".into(), corner: "ss".into(), temp_c: 125.0, params: Vec::new() }];
+        assert_eq!(c.scenarios()[0].name, "a");
+    }
+
+    #[test]
+    fn parse_measures_rejects_what_is_not_a_measure() {
+        let m = parse_measures("GAIN = 4.0\n = 1\na b = 2\nx = failed\ny=3e-3 at= 1\nno equals here\n");
+        assert_eq!(m, vec![("gain".to_string(), 4.0), ("y".to_string(), 3e-3)]);
+        assert!(parse_measures("").is_empty());
+    }
+
+    #[test]
+    fn assemble_takes_the_last_line_and_refuses_two_benches() {
+        let c = cfg(vec![Spec { metric: "Gain".into(), min: None, max: None }, Spec { metric: "pm".into(), min: None, max: None }], Vec::new());
+        let row = assemble(&c, &[vec![("gain".into(), 1.0), ("gain".into(), 2.0)], Vec::new()]).unwrap();
+        assert_eq!(row, vec![Some(2.0), None]);
+        let e = assemble(&c, &[vec![("gain".into(), 1.0)], vec![("gain".into(), 2.0)]]).unwrap_err();
+        assert!(e.contains("metric Gain measured by testbenches 0 and 1"), "{e}");
+        assert_eq!(assemble(&c, &[]).unwrap(), vec![None, None]);
+    }
+
+    /// No testbench: nothing runs (no ngspice needed) and every spec is an
+    /// unmeasured full miss; an unknown scenario index is an error.
+    #[test]
+    fn evaluate_without_testbenches_and_with_a_bad_scenario() {
+        let c = cfg(vec![spec(Some(1.0), None)], Vec::new());
+        let r = evaluate(&one_fet(), &Parasitics::default(), &c, &[0]).unwrap();
+        assert_eq!((r.residual, r.bounds.len(), r.bounds[0].value), (1.0, 1, None));
+        let r = evaluate(&one_fet(), &Parasitics::default(), &c, &[]).unwrap();
+        assert!(r.bounds.is_empty() && r.residual == 1.0);
+        let c = cfg(vec![spec(Some(1.0), None)], vec![String::new()]);
+        let e = evaluate(&one_fet(), &Parasitics::default(), &c, &[5]).unwrap_err();
+        assert!(e.contains("no scenario 5"), "{e}");
+    }
+
+    #[test]
+    fn sensitivities_without_testbenches_are_unmeasured() {
+        let c = cfg(vec![spec(Some(1.0), None)], Vec::new());
+        let p = [Param::GateOffset { device: 0 }, Param::GroundC { net: NetId(0) }];
+        let t = sensitivities(&one_fet(), &c, 0, &p, &[], &StepPolicy::default(), &Parasitics::default()).unwrap();
+        assert_eq!(t.rows.len(), 2);
+        assert!(t.rows.iter().all(|r| r.d == vec![None] && r.linear), "no quotient: vacuously linear");
+        assert_eq!(t.sims, 0);
+        assert_eq!(t.base.metrics[0].1, None);
+        assert!(sensitivities(&one_fet(), &c, 2, &p, &[], &StepPolicy::default(), &Parasitics::default()).unwrap_err().contains("no scenario 2"));
+    }
+
+    #[test]
+    fn equivalent_sa_corners() {
+        assert_eq!(equivalent_sa_um(0.0, 0.5, 1), None);
+        assert_eq!(equivalent_sa_um(-1.0, 0.5, 1), None);
+        assert_eq!(equivalent_sa_um(f64::NAN, 0.5, 1), None);
+        assert_eq!(equivalent_sa_um(1e9, 0.5, 1), None, "more stress than any S gives");
+        assert_eq!(equivalent_sa_um(1.0, 0.5, 0), equivalent_sa_um(1.0, 0.5, 1), "nf < 1 reads as 1");
+        // One finger: 1/(S + L/2) = target/2 ⇒ S = 2/target − L/2.
+        let s = equivalent_sa_um(0.5, 1.0, 1).unwrap();
+        assert!((s - 3.5).abs() < 1e-9, "{s}");
+    }
+
+    #[test]
+    fn the_deck_skips_degenerate_capacitors() {
+        let caps = vec![
+            ("out".to_string(), None, 0.0),
+            ("out".to_string(), Some("in".to_string()), -1.0),
+            ("out".to_string(), Some("out".to_string()), 1.0),
+            ("vss".to_string(), None, 1.0),
+            ("in".to_string(), None, f64::NAN),
+            ("in".to_string(), Some("vss".to_string()), 2.0),
+        ];
+        let c = cfg(Vec::new(), vec![String::new()]);
+        let d = deck(&one_fet(), &Parasitics { caps, ..Parasitics::default() }, &c, "", &c.scenarios()[0]).unwrap();
+        let pex: Vec<&str> = d.lines().filter(|l| l.starts_with("Cpex")).collect();
+        assert_eq!(pex, ["Cpex5 in 0 2.000000e0f"], "{d}");
+    }
+
+    #[test]
+    fn the_deck_drops_non_positive_resistance_and_a_non_finite_offset() {
+        let par = Parasitics {
+            series: vec![vec![("D".into(), -5.0), ("S".into(), 0.0)]],
+            gate_ohm: vec![Some(-3.0)],
+            gate_offset_v: vec![f64::NAN],
+            ..Parasitics::default()
+        };
+        let c = cfg(Vec::new(), vec![String::new()]);
+        let d = deck(&one_fet(), &par, &c, "", &c.scenarios()[0]).unwrap();
+        assert!(!d.contains("Rpex"), "{d}");
+        assert!(!d.contains("Vgo"), "a NaN offset is no source: {d}");
+        assert!(d.lines().any(|l| l.starts_with("XM1 out in 0 0 ")), "{d}");
+    }
+
+    /// A gate with both a branch R and an offset: net → R → offset → gate.
+    #[test]
+    fn the_deck_chains_gate_resistance_and_offset() {
+        let par = Parasitics { gate_ohm: vec![Some(10.0)], gate_offset_v: vec![2e-3], ..Parasitics::default() };
+        let c = cfg(Vec::new(), vec![String::new()]);
+        let d = deck(&one_fet(), &par, &c, "", &c.scenarios()[0]).unwrap();
+        assert!(d.contains("Rpex_0_G in__0_G in 10.0000"), "{d}");
+        assert!(d.contains("Vgo0 in__0_G__o0 in__0_G 2.000000e-3"), "{d}");
+        assert!(d.lines().any(|l| l.starts_with("XM1 out in__0_G__o0 0 0 ")), "{d}");
+    }
+
+    #[test]
+    fn the_deck_leaves_out_capacitor_cards_when_extracted() {
+        let mut nl = one_fet();
+        nl.devices.push(Device { name: "C1".into(), kind: DeviceKind::Capacitor, model: String::new(), terminals: vec![("P".into(), NetId(0)), ("N".into(), NetId(2))], params: vec![("c_af".into(), 500)] });
+        let c = cfg(Vec::new(), vec![String::new()]);
+        let sc = &c.scenarios()[0];
+        assert!(deck(&nl, &Parasitics::default(), &c, "", sc).unwrap().contains("CXC1 out 0 500a"));
+        assert!(!deck(&nl, &Parasitics { extracted: true, ..Parasitics::default() }, &c, "", sc).unwrap().contains("CXC1"));
+    }
+
+    #[test]
+    fn perturb_then_read_back_adds_the_step() {
+        let nl = one_fet();
+        let at = Parasitics { caps: vec![("in".into(), Some("out".into()), 0.5)], ..Parasitics::default() };
+        let params = [
+            Param::GroundC { net: NetId(0) },
+            Param::CouplingC { a: NetId(0), b: NetId(1) },
+            Param::SeriesR { device: 0, terminal: 2 },
+            Param::GateOffset { device: 0 },
+        ];
+        for p in params {
+            let before = base_value(&nl, &at, p);
+            let after = base_value(&nl, &perturb(&nl, &at, p, 250.0), p);
+            assert!((after - before - 250.0).abs() < 1e-9, "{p:?}: {before} → {after}");
+            let twice = perturb(&nl, &perturb(&nl, &at, p, 250.0), p, -250.0);
+            assert!((base_value(&nl, &twice, p) - before).abs() < 1e-9, "{p:?}");
+        }
+        // The coupling entry is found in either order: no second entry.
+        assert_eq!(base_value(&nl, &at, Param::CouplingC { a: NetId(0), b: NetId(1) }), 500.0);
+        assert_eq!(perturb(&nl, &at, Param::CouplingC { a: NetId(0), b: NetId(1) }, 1.0).caps.len(), 1);
+    }
+
+    #[test]
+    fn steps_follow_the_policy() {
+        let nl = one_fet();
+        let pol = StepPolicy { c_min_af: 10.0, c_frac: 0.5, gate_af_um2: 100.0, r_ohm: 7.0, lin_tol: 0.1 };
+        // Gate area on `in`: 2 µm × 0.5 µm = 1 µm² → 100 aF → half is 50.
+        assert!((step(&nl, Param::GroundC { net: NetId(1) }, &[], &pol) - 50.0).abs() < 1e-9);
+        assert_eq!(step(&nl, Param::GroundC { net: NetId(0) }, &[], &pol), 10.0, "no gate: the minimum");
+        assert_eq!(step(&nl, Param::SeriesR { device: 0, terminal: 0 }, &[], &pol), 7.0);
+        assert_eq!(step(&nl, Param::GateOffset { device: 0 }, &[Some(4e-3)], &pol), 4e-3);
+        assert_eq!(step(&nl, Param::GateOffset { device: 0 }, &[None], &pol), 1e-3);
+        assert_eq!(step(&nl, Param::GateOffset { device: 3 }, &[], &pol), 1e-3);
+    }
+
+    #[test]
+    fn default_params_in_order() {
+        let mut nl = one_fet();
+        nl.devices.push(Device { name: "R1".into(), kind: DeviceKind::Resistor, model: String::new(), terminals: vec![("P".into(), NetId(0)), ("N".into(), NetId(3))], params: Vec::new() });
+        nl.nets.push(Net { name: "lonely".into() });
+        let p = default_params(&nl, &[NetId(1)]);
+        assert_eq!(
+            p,
+            vec![
+                Param::GroundC { net: NetId(1) },
+                Param::SeriesR { device: 0, terminal: 0 },
+                Param::SeriesR { device: 0, terminal: 2 },
+                Param::SeriesR { device: 1, terminal: 0 },
+                Param::GateOffset { device: 0 },
+            ],
+            "R1's N sits alone on `lonely`; the FET's S shares vss with its own B"
+        );
+        assert!(default_params(&Netlist::default(), &[]).is_empty());
+    }
+
+    fn empty_table() -> SensTable {
+        SensTable { scenario: 0, at: Parasitics::default(), base: PerfResult::default(), rows: Vec::new(), sims: 0 }
+    }
+
+    #[test]
+    fn coupling_params_skip_ground_and_respect_max() {
+        let nl = one_fet(); // out, in, vss (ground)
+        let t = empty_table();
+        assert!(coupling_params(&t, &nl, &[NetId(0)], 0).is_empty());
+        assert_eq!(coupling_params(&t, &nl, &[NetId(0), NetId(1)], 9), vec![Param::CouplingC { a: NetId(0), b: NetId(1) }], "one pair, not two");
+        assert!(coupling_params(&t, &nl, &[NetId(2)], 9).is_empty(), "the ground net couples through GroundC only");
+    }
+
+    fn row(param: Param, d: Option<f64>, linear: bool) -> SensRow {
+        SensRow { param, step: 1.0, d: vec![d], linear }
+    }
+
+    #[test]
+    fn router_weights_skip_bounds_without_headroom_or_table() {
+        let nl = one_fet();
+        let t = SensTable { rows: vec![row(Param::SeriesR { device: 0, terminal: 0 }, Some(2.0), true)], ..empty_table() };
+        for h in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let (r, pairs) = router_weights(std::slice::from_ref(&t), &[(0, h, 0)], &nl);
+            assert!(r.iter().all(|&w| w == 0.0) && pairs.is_empty(), "h = {h}: {r:?}");
+        }
+        let (r, _) = router_weights(std::slice::from_ref(&t), &[(0, 1.0, 4)], &nl);
+        assert!(r.iter().all(|&w| w == 0.0), "no table at scenario 4");
+        let (r, _) = router_weights(&[], &[], &nl);
+        assert_eq!(r, vec![0.0; 3]);
+        let (r, _) = router_weights(std::slice::from_ref(&t), &[(0, 1.0, 0)], &nl);
+        assert_eq!(r, vec![1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn evidence_skips_unbounded_and_unmeasured_specs() {
+        let c = PerfConfig { scenarios: vec![Scenario { name: "a".into(), corner: "tt".into(), temp_c: 27.0, params: Vec::new() }; 2], ..cfg(vec![spec(None, None), spec(Some(1.0), None), spec(Some(1.0), None)], Vec::new()) };
+        let start = score(&c.specs, &[vec![Some(5.0), Some(5.0), None], vec![Some(6.0), Some(4.0), Some(2.0)]], &[0, 1]);
+        let t0 = SensTable { base: score(&c.specs, &[vec![Some(5.0), Some(5.0), None]], &[0]), ..empty_table() };
+        let t1 = SensTable { scenario: 1, base: score(&c.specs, &[vec![Some(6.0), Some(4.0), Some(2.0)]], &[1]), ..empty_table() };
+        let ev = to_evidence(&c, &[t0, t1], &start, &[], &one_fet());
+        // Spec 0 has no bound; spec 2's tightest bound is the unmeasured scenario 0, whose base is None.
+        assert_eq!(ev.specs.len(), 1, "{ev:?}");
+        let s = &ev.specs[0];
+        assert_eq!(s.f0, 4.0, "read at the worst scenario (1)");
+        assert_eq!(s.proc, Some((4.0, 5.0)), "two scenarios: the spread is the process term");
+        assert_eq!(s.sigma_f, None, "no stats");
+    }
+
+    #[test]
+    fn run_jobs_of_nothing_is_nothing() {
+        let out: Vec<u8> = run_jobs(&[] as &[u8], |&x| x);
+        assert!(out.is_empty());
+        assert_eq!(run_jobs(&[3u8], |&x| x + 1), vec![4]);
+    }
+}

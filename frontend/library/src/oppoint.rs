@@ -1190,3 +1190,283 @@ mod tests {
         assert!(!marker.exists(), "extract must not leave bsim4v5.out in the cwd");
     }
 }
+
+/// Step-2 coverage: the parsers, the card writer, the probe bench and the
+/// per-device / per-net views, without ngspice. Oracles: SPICE semantics,
+/// KCL, and the doc contracts.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::{Device, DeviceKind, Net, NetId};
+
+    fn nets(names: &[&str]) -> Vec<Net> {
+        names.iter().map(|n| Net { name: (*n).into() }).collect()
+    }
+
+    fn dev(name: &str, kind: DeviceKind, terms: &[(&str, u16)], params: &[(&str, i64)]) -> Device {
+        Device {
+            name: name.into(),
+            kind,
+            model: String::new(),
+            terminals: terms.iter().map(|&(t, n)| (t.into(), NetId(n))).collect(),
+            params: params.iter().map(|&(k, v)| (k.into(), v)).collect(),
+        }
+    }
+
+    #[test]
+    fn spice_numbers_take_every_scale_suffix() {
+        for (t, want) in [
+            ("1.8", 1.8),
+            ("1.8v", 1.8),
+            ("900m", 0.9),
+            ("900mv", 0.9),
+            ("1e-3", 1e-3),
+            ("2u", 2e-6),
+            ("3n", 3e-9),
+            ("4k", 4e3),
+            ("2meg", 2e6),
+            ("1g", 1e9),
+            ("1t", 1e12),
+            ("5p", 5e-12),
+            ("7f", 7e-15),
+            ("-0.5", -0.5),
+        ] {
+            let got = spice_number(t).unwrap_or_else(|| panic!("{t} unread"));
+            assert!((got - want).abs() <= 1e-12 * want.abs(), "{t}: {got} vs {want}");
+        }
+        for t in ["", "v", "x", "1q", "dc"] {
+            assert_eq!(spice_number(t), None, "{t}");
+        }
+    }
+
+    #[test]
+    fn testbench_sources_corner_cases() {
+        // nets: vdd, vss, a, b
+        let nl = Netlist { nets: nets(&["vdd", "vss", "a", "b"]), ..Default::default() };
+        let tb = "\
+Vg 0 vss 1\n\
+Vab a b 1\n\
+Vghost ghost 0 1\n\
+Vs a 0 SIN(0 1 1meg)\n\
+Vp b 0 pwl (0 0 1n 1)\n\
+Vr 0 vdd dc 3.3\n\
+Vshort a\n\
+Vnone vdd 0\n\
+R1 a 0 1k\n";
+        let (sw, dc) = testbench_sources(&nl, tb);
+        assert_eq!(sw, [NetId(2), NetId(3)]);
+        assert_eq!(dc.len(), 1, "{dc:?}");
+        assert_eq!(dc[0].0, NetId(0), "reference on either side");
+        assert!((dc[0].1 - 3300.0).abs() < 1e-9);
+        assert_eq!(testbench_sources(&nl, ""), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn instance_names_prefix_once_and_flatten_hierarchy() {
+        let d = |n: &str| dev(n, DeviceKind::Nmos, &[], &[]);
+        assert_eq!(instance_name(&d("M1")), "XM1");
+        assert_eq!(instance_name(&d("xm1")), "xm1");
+        assert_eq!(instance_name(&d("X1/M2")), "X1__M2");
+        assert_eq!(instance_name(&d("a/b/c")), "Xa__b__c");
+    }
+
+    #[test]
+    fn node_names_sanitise_and_name_missing_nets() {
+        let nl = Netlist { nets: nets(&["X1/Out.p<0>", "AVSS"]), ..Default::default() };
+        assert_eq!(node_name(&nl, NetId(0)), "x1_out_p_0_");
+        assert_eq!(node_name(&nl, NetId(1)), "0");
+        assert_eq!(node_name(&nl, NetId(7)), "n7");
+    }
+
+    #[test]
+    fn lib_lines_carry_the_library_and_params() {
+        assert_eq!(OpConfig::default().lib_lines(), "");
+        let c = OpConfig { model_lib: Some("/l.lib".into()), corner: "ss".into(), params: vec![("a".into(), 1.5)], ..Default::default() };
+        assert_eq!(c.lib_lines(), ".lib /l.lib ss\n.param a=1.5\n");
+    }
+
+    #[test]
+    fn tail_keeps_the_last_chars() {
+        assert_eq!(tail(b"abcdef", 3), "def");
+        assert_eq!(tail(b"ab", 5), "ab");
+        assert_eq!(tail("héllo".as_bytes(), 4), "éllo", "chars, not bytes");
+        assert_eq!(tail(b"", 3), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_exit_passes_success_and_reports_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, err: &str| std::process::Output { status: std::process::ExitStatus::from_raw(code << 8), stdout: Vec::new(), stderr: err.as_bytes().to_vec() };
+        assert!(check_exit(&out(0, "")).is_ok());
+        let e = check_exit(&out(1, "Error: unknown subckt")).unwrap_err();
+        assert!(e.starts_with("cannot simulate: ngspice") && e.ends_with("Error: unknown subckt"), "{e}");
+    }
+
+    #[test]
+    fn scratch_dirs_are_distinct() {
+        let (a, b) = (scratch_dir("cleanup").unwrap(), scratch_dir("cleanup").unwrap());
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        let _ = std::fs::remove_dir_all(a);
+        let _ = std::fs::remove_dir_all(b);
+    }
+
+    #[test]
+    fn parse_show_needs_its_markers_and_skips_bad_values() {
+        assert!(parse_show("     device m.xm1.m\n id 1e-3\n").is_empty(), "outside the markers");
+        let t = parse_show("@@PHILIS_OP\n device m.xm1.mx m.xm2.mx\n id nan? 2e-3 9\n\n@@PHILIS_END\n id 5\n");
+        assert!(!t.contains_key("xm1"), "an unparseable value leaves no entry");
+        assert_eq!(t["xm2"].id, 2e-3);
+        assert_eq!(t.len(), 1, "a value past the columns is dropped");
+        assert!(parse_show("@@PHILIS_OP\n id 1 2\n@@PHILIS_END\n").is_empty(), "values before any header");
+    }
+
+    #[test]
+    fn parse_nodes_without_markers_is_empty() {
+        assert!(parse_nodes("vdd = 1.8\n").is_empty());
+        let m = parse_nodes("@@PHILIS_NV\nVOUT = 0.5\nbad = x\nab = 1 2\n@@PHILIS_NV_END\nafter = 1\n");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["vout"], 0.5);
+    }
+
+    #[test]
+    fn instance_device_reads_each_prefix() {
+        assert_eq!(instance_device("q.xq1.qnpn").as_deref(), Some("xq1"));
+        assert_eq!(instance_device("m.xm1").as_deref(), None, "no closing dot");
+        assert_eq!(instance_device("rxr1").as_deref(), Some("xr1"));
+        assert_eq!(instance_device("").as_deref(), None);
+    }
+
+    #[test]
+    fn evidence_needs_all_three_device_facts() {
+        let nl = Netlist { devices: vec![dev("M1", DeviceKind::Nmos, &[], &[]), dev("M2", DeviceKind::Nmos, &[], &[])], nets: nets(&["a", "b"]), ..Default::default() };
+        let op = OpPoint {
+            power_uw: vec![7],
+            id_ua: vec![Some(1.0), Some(1.0)],
+            headroom_mv: vec![Some(2.0), None],
+            gm_us: vec![Some(3.0), Some(3.0)],
+            vgs_v: vec![Some(0.8)],
+            net_v: vec![Some(1.2)],
+            ..Default::default()
+        };
+        let e = op.evidence(&nl, true);
+        assert!(e.probe_bias);
+        let f = e.op.expect("op facts");
+        assert_eq!(f.dev.len(), 2);
+        let d0 = f.dev[0].expect("all three resolved");
+        assert_eq!((d0.id_ua, d0.headroom_mv, d0.gm_us, d0.power_uw), (1.0, 2.0, 3.0, 7.0));
+        assert!((d0.vgs_mv.unwrap() - 800.0).abs() < 1e-9);
+        assert_eq!(d0.vbs_mv, None);
+        assert!(f.dev[1].is_none(), "headroom unresolved");
+        assert_eq!(f.net_mv.len(), 2);
+        assert!((f.net_mv[0].unwrap() - 1200.0).abs() < 1e-9);
+        assert_eq!(f.net_mv[1], None, "past net_v: unknown");
+    }
+
+    #[test]
+    fn terminal_currents_of_bjts_and_unsimulated_kinds() {
+        let nl = Netlist {
+            devices: vec![
+                dev("Q1", DeviceKind::Npn, &[("C", 0), ("B", 1), ("E", 2), ("S", 2)], &[]),
+                dev("D1", DeviceKind::Diode, &[("P", 0), ("N", 2)], &[]),
+                dev("L1", DeviceKind::Inductor, &[("P", 0), ("N", 2)], &[]),
+                dev("Q2", DeviceKind::Pnp, &[("C", 0), ("B", 1), ("E", 2)], &[]),
+            ],
+            nets: nets(&["c", "b", "e"]),
+            ..Default::default()
+        };
+        let op = OpPoint { bjt_ua: vec![Some([10.0, 0.1, -10.1])], ..Default::default() };
+        let t = op.terminal_ua(&nl);
+        assert_eq!(t[0], Some(vec![("C".into(), 10.0), ("B".into(), 0.1), ("E".into(), -10.1), ("S".into(), 0.0)]));
+        assert_eq!((t[1].clone(), t[2].clone(), t[3].clone()), (None, None, None), "diode, inductor, unresolved BJT");
+        // KCL on the BJT alone: the terminal currents sum to zero.
+        let sum: f64 = t[0].as_ref().unwrap().iter().map(|x| x.1).sum();
+        assert!(sum.abs() < 1e-12);
+    }
+
+    #[test]
+    fn net_current_ignores_out_of_range_terminals_and_missing_draws() {
+        let nl = Netlist {
+            devices: vec![dev("R1", DeviceKind::Resistor, &[("P", 0), ("N", 9)], &[]), dev("R2", DeviceKind::Resistor, &[("P", 0), ("N", 1)], &[])],
+            nets: nets(&["a", "b"]),
+            ..Default::default()
+        };
+        let i = net_current_ua(&nl, &[Some(vec![("P".into(), 2.6), ("N".into(), -2.6)])]);
+        assert_eq!(i, vec![Some(3), Some(0)], "R2 has no draw entry: adds nothing; 2.6 rounds to 3");
+        assert!(net_current_ua(&Netlist::default(), &[]).is_empty());
+    }
+
+    #[test]
+    fn net_headroom_takes_the_minimum_positive() {
+        let nl = Netlist {
+            devices: vec![
+                dev("M1", DeviceKind::Nmos, &[("D", 0), ("G", 1), ("S", 2)], &[]),
+                dev("M2", DeviceKind::Nmos, &[("D", 0), ("G", 1), ("S", 9)], &[]),
+                dev("M3", DeviceKind::Nmos, &[("D", 0)], &[]),
+            ],
+            nets: nets(&["d", "g", "s"]),
+            ..Default::default()
+        };
+        let op = OpPoint { headroom_mv: vec![Some(300.0), Some(100.0), Some(0.0)], ..Default::default() };
+        assert_eq!(op.net_headroom_mv(&nl), vec![Some(100.0), None, Some(300.0)], "zero headroom gives nothing; net 9 ignored");
+        assert_eq!(OpPoint::default().net_headroom_mv(&nl), vec![None; 3]);
+    }
+
+    #[test]
+    fn total_power_does_not_overflow() {
+        let op = OpPoint { power_uw: vec![i32::MAX, i32::MAX, -1], ..Default::default() };
+        assert_eq!(op.total_power_uw(), 2 * i64::from(i32::MAX) - 1);
+        assert_eq!(OpPoint::default().total_power_uw(), 0);
+    }
+
+    #[test]
+    fn flat_cards_for_every_kind() {
+        let mut nl = Netlist { nets: nets(&["a", "b", "vss"]), ..Default::default() };
+        let mut p = dev("M1", DeviceKind::Pmos, &[("D", 0), ("G", 1), ("S", 2), ("B", 2)], &[("w", 1500), ("l", 150), ("nf", 3)]);
+        p.model = "drawn".into();
+        let mut d = dev("D1", DeviceKind::Diode, &[("P", 0), ("N", 1)], &[("w", 2000), ("l", 3000)]);
+        d.model = "dio".into();
+        let mut c = dev("C1", DeviceKind::Capacitor, &[("P", 0), ("N", 1)], &[("w", 1000), ("l", 2000), ("m", 2)]);
+        c.model = "mim".into();
+        nl.devices = vec![p, d, c, dev("D2", DeviceKind::Diode, &[("P", 0)], &[])];
+        let cfg = OpConfig { pmos_model: "forced".into(), ..Default::default() };
+        let s = flat_circuit(&nl, &cfg).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines, ["XM1 a b 0 0 forced W=1.5 L=0.15 nf=3 m=1", "DXD1 a b dio area=6", "DXD2 a 0 "], "{s}");
+        let all = flat_circuit_with(&nl, &cfg, |_, _, n| n, |_| String::new(), true).unwrap();
+        assert!(all.lines().any(|l| l == "XC1 a b mim w=1 l=2 m=2"), "{all}");
+    }
+
+    #[test]
+    fn flat_circuit_refuses_what_it_cannot_express() {
+        let nl = |d: Device| Netlist { devices: vec![d], nets: nets(&["a", "b"]), ..Default::default() };
+        let e = flat_circuit(&nl(dev("R1", DeviceKind::Resistor, &[("P", 0), ("N", 1)], &[])), &OpConfig::default()).unwrap_err();
+        assert!(e.contains("resistor has no model or value"), "{e}");
+        let c = dev("C1", DeviceKind::Capacitor, &[("P", 0), ("N", 1)], &[]);
+        assert!(flat_circuit(&nl(c.clone()), &OpConfig::default()).is_ok(), "a capacitor is open at DC: dropped");
+        let e = flat_circuit_with(&nl(c), &OpConfig::default(), |_, _, n| n, |_| String::new(), true).unwrap_err();
+        assert!(e.contains("capacitor has no model or value"), "{e}");
+        let mut r = dev("R1", DeviceKind::Resistor, &[("P", 0), ("N", 1)], &[("w", 1000)]);
+        r.model = "rpoly".into();
+        assert!(flat_circuit(&nl(r), &OpConfig::default()).unwrap_err().contains("no W/L"));
+    }
+
+    #[test]
+    fn the_probe_note_counts_the_driven_nodes() {
+        let nl = Netlist { nets: nets(&["vdd", "gnd", "free"]), ..Default::default() };
+        let (bench, note) = probe_bench(&nl, &OpConfig { vdd: 3.3, ..Default::default() });
+        assert_eq!(bench, "Vvdd vdd 0 3.3\n");
+        assert!(note.contains("1 nodes forced") && note.contains("rails at 3.3V") && note.contains("gate-only nets at 1.65V"), "{note}");
+    }
+
+    #[test]
+    fn an_empty_netlist_has_an_empty_deck_body() {
+        assert_eq!(flat_circuit(&Netlist::default(), &OpConfig::default()).unwrap(), "");
+        let (bench, _) = probe_bench(&Netlist::default(), &OpConfig::default());
+        assert!(bench.is_empty());
+        let (deck, prov) = build_deck(&Netlist::default(), &OpConfig { testbench: Some("Vx a 0 1".into()), ..Default::default() }).unwrap();
+        assert_eq!(prov, "user testbench");
+        assert!(deck.contains("Vx a 0 1\n") && deck.contains(".temp 27\n") && deck.trim_end().ends_with(".end"), "{deck}");
+    }
+}

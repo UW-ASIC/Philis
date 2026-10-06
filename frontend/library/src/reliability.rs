@@ -172,3 +172,149 @@ mod tests {
         assert_eq!(aging[0].dvgs_mv, 0.0);
     }
 }
+
+/// Step-2 coverage of [`voltage_findings`]: every branch, boundary and the
+/// unresolved / non-finite paths. Oracles are the doc contract and the
+/// physics of a forward-biased junction.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use pnr_core::Device;
+
+    const NFET: &str = "sky130_fd_pr__nfet_01v8";
+
+    fn dev(name: &str, kind: DeviceKind, model: &str) -> Device {
+        Device { name: name.into(), kind, model: model.into(), terminals: Vec::new(), params: Vec::new() }
+    }
+
+    fn op(v: &[Option<(f64, f64, f64)>]) -> OpPoint {
+        OpPoint {
+            vgs_v: v.iter().map(|t| t.map(|t| t.0)).collect(),
+            vds_v: v.iter().map(|t| t.map(|t| t.1)).collect(),
+            vbs_v: v.iter().map(|t| t.map(|t| t.2)).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn lim(vgs: Option<f32>, vds: Option<f32>) -> verify::FetLimit {
+        verify::FetLimit { model: NFET.into(), vgs_max_mv: vgs, vds_max_mv: vds }
+    }
+
+    fn find(devs: Vec<Device>, v: &[Option<(f64, f64, f64)>], l: &[verify::FetLimit], pairs: &[(DeviceId, DeviceId)]) -> (Vec<Violation>, Vec<PairAging>, usize) {
+        let nl = Netlist { devices: devs, ..Default::default() };
+        voltage_findings(&nl, &op(v), l, pairs, false)
+    }
+
+    #[test]
+    fn an_empty_netlist_has_no_findings() {
+        let (rows, aging, unknown) = find(Vec::new(), &[], &[], &[]);
+        assert!(rows.is_empty() && aging.is_empty());
+        assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn non_fets_are_neither_checked_nor_unknown() {
+        let devs = vec![dev("R1", DeviceKind::Resistor, ""), dev("C1", DeviceKind::Capacitor, ""), dev("Q1", DeviceKind::Npn, "")];
+        let (rows, _, unknown) = find(devs, &[Some((9.0, 9.0, 9.0)); 3], &[lim(Some(1.0), Some(1.0))], &[]);
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn an_unresolved_or_out_of_range_fet_is_unknown() {
+        let devs = vec![dev("M1", DeviceKind::Nmos, NFET), dev("M2", DeviceKind::Nmos, NFET)];
+        // M1 unresolved, M2 past op's columns.
+        let (rows, _, unknown) = find(devs, &[None], &[lim(Some(1950.0), Some(1950.0))], &[]);
+        assert!(rows.is_empty());
+        assert_eq!(unknown, 2);
+    }
+
+    #[test]
+    fn a_partially_resolved_fet_is_unknown() {
+        let nl = Netlist { devices: vec![dev("M1", DeviceKind::Nmos, NFET)], ..Default::default() };
+        let o = OpPoint { vgs_v: vec![Some(3.0)], vds_v: vec![Some(3.0)], vbs_v: vec![None], ..Default::default() };
+        let (rows, _, unknown) = voltage_findings(&nl, &o, &[lim(Some(1950.0), Some(1950.0))], &[], false);
+        assert!(rows.is_empty());
+        assert_eq!(unknown, 1);
+    }
+
+    #[test]
+    fn a_none_limit_field_is_not_checked_and_not_unknown() {
+        let (rows, _, unknown) = find(vec![dev("M1", DeviceKind::Nmos, NFET)], &[Some((5.0, 5.0, 0.0))], &[lim(None, Some(1950.0))], &[]);
+        let rules: Vec<_> = rows.iter().map(|r| r.rule.as_str()).collect();
+        assert_eq!(rules, ["rel/vds:M1"]);
+        assert_eq!(rows[0].margin, 3050);
+        assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn exactly_at_the_rating_passes_and_a_hair_over_fails_by_one_mv() {
+        let m = |v: f64| find(vec![dev("M1", DeviceKind::Nmos, NFET)], &[Some((v, 0.0, 0.0))], &[lim(Some(1950.0), Some(1950.0))], &[]).0;
+        assert!(m(1.95).is_empty());
+        let rows = m(1.9501);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].margin, 1, "margin rounds up");
+    }
+
+    #[test]
+    fn the_rating_is_on_the_magnitude() {
+        let rows = find(vec![dev("M1", DeviceKind::Nmos, NFET)], &[Some((-2.5, 0.0, 0.0))], &[lim(Some(1950.0), Some(1950.0))], &[]).0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rule, "rel/vgs:M1");
+        assert_eq!(rows[0].margin, 550);
+    }
+
+    /// V_BD = V_BS − V_DS: an NMOS with its drain 0.2 V below a grounded bulk
+    /// forward-biases the drain junction.
+    #[test]
+    fn a_forward_drain_junction_is_a_violation() {
+        let rows = find(vec![dev("M1", DeviceKind::Nmos, "x")], &[Some((0.5, -0.2, 0.0))], &[], &[]).0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].rule.as_str(), rows[0].margin), ("rel/bulk_forward:M1", 200));
+    }
+
+    #[test]
+    fn the_forward_tolerance_is_a_strict_threshold() {
+        let rows = |vbs: f64| find(vec![dev("M1", DeviceKind::Nmos, "x")], &[Some((0.5, 0.5, vbs))], &[], &[]).0;
+        assert!(rows(FORWARD_TOL_V).is_empty());
+        let r = rows(0.0015);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].margin, 2, "1.5 mV rounds up to 2");
+    }
+
+    /// NaN is not a voltage: the FET is unresolved, never silently passing.
+    #[test]
+    fn a_non_finite_voltage_is_unresolved() {
+        for bad in [f64::NAN, f64::INFINITY] {
+            let (rows, aging, unknown) = find(
+                vec![dev("M1", DeviceKind::Nmos, NFET), dev("M2", DeviceKind::Nmos, NFET)],
+                &[Some((bad, 0.5, 0.0)), Some((0.5, 0.5, 0.0))],
+                &[lim(Some(1950.0), Some(1950.0))],
+                &[(DeviceId(0), DeviceId(1))],
+            );
+            assert!(rows.is_empty(), "{rows:?}");
+            assert_eq!(unknown, 1, "{bad}");
+            assert!(aging.is_empty(), "a non-finite member has no asymmetry");
+        }
+    }
+
+    #[test]
+    fn pair_aging_skips_unresolved_and_out_of_range_members() {
+        let devs = vec![dev("M1", DeviceKind::Nmos, NFET), dev("M2", DeviceKind::Nmos, NFET), dev("M3", DeviceKind::Nmos, NFET)];
+        let v = [Some((0.8, 0.9, -0.1)), Some((0.7, 0.9, 0.0)), None];
+        let pairs = [(DeviceId(0), DeviceId(1)), (DeviceId(0), DeviceId(2)), (DeviceId(0), DeviceId(9))];
+        let (_, aging, _) = find(devs, &v, &[], &pairs);
+        assert_eq!(aging.len(), 1);
+        let a = &aging[0];
+        assert_eq!((a.a, a.b), (DeviceId(0), DeviceId(1)));
+        assert!((a.dvgs_mv - 100.0).abs() < 1e-9 && a.dvds_mv == 0.0 && (a.dvbs_mv - 100.0).abs() < 1e-9, "{a:?}");
+    }
+
+    #[test]
+    fn the_first_matching_limit_names_the_model() {
+        let l = [verify::FetLimit { model: "other".into(), vgs_max_mv: Some(1.0), vds_max_mv: Some(1.0) }, lim(Some(1950.0), Some(1950.0))];
+        let (rows, _, unknown) = find(vec![dev("M1", DeviceKind::Nmos, NFET)], &[Some((1.0, 1.0, 0.0))], &l, &[]);
+        assert!(rows.is_empty(), "the other model's limit must not apply: {rows:?}");
+        assert_eq!(unknown, 0);
+    }
+}
