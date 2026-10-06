@@ -133,3 +133,103 @@ pub fn leaves(blocks: &[Block]) -> Vec<&Block> {
     walk(blocks, &mut out);
     out
 }
+
+/// Step-2 coverage: template → kind, sensitivity, match → hierarchy, leaves.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::catalog::{CASCODED_DIFF_PAIR_WITH_TAIL, DIFF_PAIR, DIFF_PAIR_WITH_TAIL, SERIES_STACK};
+    use crate::pattern::Pattern;
+
+    fn ids(b: &Block) -> Vec<u16> {
+        b.devices.iter().map(|d| d.0).collect()
+    }
+
+    fn matched(p: &'static Pattern, instances: &[u32]) -> PatternMatch {
+        PatternMatch { template: p.name, pattern: p, instances: instances.to_vec(), priority: p.priority }
+    }
+
+    fn leaf(kind: BlockKind, devices: &[u16]) -> Block {
+        Block { kind, template: "t", devices: devices.iter().map(|&d| DeviceId(d)).collect(), injected: false, sub_blocks: Vec::new(), selfs: Vec::new() }
+    }
+
+    #[test]
+    fn from_template_names_two_device_primitives_only() {
+        use BlockKind::*;
+        let cases = [
+            ("diff_pair", DiffPair),
+            ("nmos_diff_switch", DiffPair),
+            ("cross_coupled_split_source", DiffPair),
+            ("current_mirror", CurrentMirror),
+            ("diode_load_pair", Load),
+            // `load` is tested before `cascode`: a cascode load is a load.
+            ("cascode_load", Load),
+            ("cascode", Stack),
+            ("source_follower", Stack),
+            ("series_stack", Stack),
+            ("inverter", Group),
+            ("", Group),
+        ];
+        for (t, k) in cases {
+            assert_eq!(BlockKind::from_template(t, 2), k, "{t}");
+        }
+        for n in [0, 1, 3, usize::MAX] {
+            assert_eq!(BlockKind::from_template("diff_pair", n), Group, "n = {n}");
+        }
+        // `cross_coupled` must lead the name; elsewhere it is not a pair.
+        assert_eq!(BlockKind::from_template("x_cross_coupled", 2), Group);
+    }
+
+    #[test]
+    fn only_gate_reference_kinds_are_sensitive() {
+        use BlockKind::*;
+        for (k, s) in [(DiffPair, true), (CurrentMirror, true), (Load, true), (CascodePair, false), (Stack, false), (Group, false), (Glue, false)] {
+            assert_eq!(k.is_sensitive(), s, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn a_two_device_match_is_its_own_leaf() {
+        let b = Block::from_match(&matched(&DIFF_PAIR, &[7, 3]));
+        assert_eq!((b.kind, b.template, ids(&b)), (BlockKind::DiffPair, "diff_pair", vec![7, 3]));
+        assert!(b.sub_blocks.is_empty() && b.selfs.is_empty() && !b.injected);
+        let s = Block::from_match(&matched(&SERIES_STACK, &[1, 2]));
+        assert_eq!((s.kind, s.sub_blocks.len()), (BlockKind::Stack, 0));
+    }
+
+    #[test]
+    fn a_composite_is_a_group_of_its_declared_roles() {
+        let b = Block::from_match(&matched(&DIFF_PAIR_WITH_TAIL, &[5, 7, 9]));
+        assert_eq!((b.kind, ids(&b)), (BlockKind::Group, vec![5, 7, 9]));
+        assert_eq!(b.selfs, [DeviceId(9)]);
+        assert_eq!(b.sub_blocks.len(), 1);
+        assert_eq!((b.sub_blocks[0].kind, ids(&b.sub_blocks[0]), b.sub_blocks[0].template), (BlockKind::DiffPair, vec![5, 7], "diff_pair_with_tail"));
+
+        // Pairs first, then prox couples as Stack children.
+        let c = Block::from_match(&matched(&CASCODED_DIFF_PAIR_WITH_TAIL, &[10, 11, 12, 13, 14]));
+        let kids: Vec<(BlockKind, Vec<u16>)> = c.sub_blocks.iter().map(|k| (k.kind, ids(k))).collect();
+        assert_eq!(
+            kids,
+            [
+                (BlockKind::DiffPair, vec![10, 11]),
+                (BlockKind::CascodePair, vec![12, 13]),
+                (BlockKind::Stack, vec![10, 12]),
+                (BlockKind::Stack, vec![11, 13]),
+            ]
+        );
+        assert_eq!(c.selfs, [DeviceId(14)]);
+        assert!(c.sub_blocks.iter().all(|k| k.sub_blocks.is_empty() && k.selfs.is_empty()));
+    }
+
+    #[test]
+    fn leaves_walk_depth_first_and_skip_glue() {
+        assert!(leaves(&[]).is_empty());
+        let glue = leaf(BlockKind::Glue, &[9]);
+        assert!(leaves(std::slice::from_ref(&glue)).is_empty());
+        let composite = Block { sub_blocks: vec![leaf(BlockKind::DiffPair, &[1, 2]), leaf(BlockKind::Stack, &[1, 3])], ..leaf(BlockKind::Group, &[1, 2, 3]) };
+        let nested = Block { sub_blocks: vec![composite], ..leaf(BlockKind::Group, &[1, 2, 3]) };
+        let blocks = [leaf(BlockKind::CurrentMirror, &[4, 5]), nested, glue, leaf(BlockKind::Group, &[6])];
+        let got: Vec<Vec<u16>> = leaves(&blocks).into_iter().map(ids).collect();
+        assert_eq!(got, [vec![4, 5], vec![1, 2], vec![1, 3], vec![6]]);
+    }
+}

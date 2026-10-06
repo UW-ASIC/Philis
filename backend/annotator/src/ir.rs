@@ -71,3 +71,70 @@ mod tests {
         assert_eq!(b.into_iter().map(r_max_ohm).collect::<Vec<_>>(), [20.0, 36.0], "R_max = ΔV/I");
     }
 }
+
+/// Step-2 coverage: selection thresholds, fallbacks and degenerate inputs.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::policy::Policy;
+
+    fn class(net: u16, class: NetClass) -> NetClassification {
+        NetClassification { net: NetId(net), class, c_budget_af: None, max_coupling_af: None }
+    }
+
+    #[test]
+    fn empty_inputs_no_budgets() {
+        assert!(budgets(&[], &[], &[], 1_800.0, &Policy::default()).is_empty());
+        // Classes but no currents at all.
+        assert!(budgets(&[class(0, NetClass::Supply)], &[], &[], 1_800.0, &Policy::default()).is_empty());
+    }
+
+    /// A rail is budgeted at any current; zero current never is.
+    #[test]
+    fn rails_need_only_some_current() {
+        let c = [class(0, NetClass::Ground), class(1, NetClass::Signal), class(2, NetClass::Supply)];
+        let b = budgets(&c, &[Some(1), Some(1_000_000), Some(0)], &[None; 3], 1_000.0, &Policy::default());
+        assert_eq!(b, [(NetId(0), 1, 10_000), (NetId(1), 1_000_000, 10_000)]);
+    }
+
+    /// The high-current share is inclusive.
+    #[test]
+    fn signal_share_threshold_is_inclusive() {
+        let c = [class(0, NetClass::Signal), class(1, NetClass::Signal), class(2, NetClass::Sensitive)];
+        let b = budgets(&c, &[Some(1_000), Some(100), Some(99)], &[], 1_000.0, &Policy::default());
+        assert_eq!(b.iter().map(|r| r.0).collect::<Vec<_>>(), [NetId(0), NetId(1)]);
+    }
+
+    /// A net past the current table has no current, so no budget; a net past
+    /// the headroom table falls back to the rail share.
+    #[test]
+    fn short_tables_read_as_absent() {
+        let c = [class(0, NetClass::Supply), class(5, NetClass::Supply)];
+        let b = budgets(&c, &[Some(10)], &[], 2_000.0, &Policy::default());
+        assert_eq!(b, [(NetId(0), 10, 20_000)]);
+    }
+
+    /// `i32::MIN` saturates to `i32::MAX` instead of overflowing.
+    #[test]
+    fn the_most_negative_current_saturates() {
+        let b = budgets(&[class(0, NetClass::Supply)], &[Some(i32::MIN)], &[Some(100.0)], 1_000.0, &Policy::default());
+        assert_eq!(b, [(NetId(0), i32::MAX, 10_000)]);
+    }
+
+    /// A device already out of saturation (negative headroom) leaves no drop
+    /// to spend: the allowance is 0, never negative.
+    #[test]
+    fn negative_or_nan_headroom_allows_no_drop() {
+        let c = [class(0, NetClass::Supply), class(1, NetClass::Supply)];
+        let b = budgets(&c, &[Some(10), Some(10)], &[Some(-50.0), Some(f64::NAN)], 1_000.0, &Policy::default());
+        assert_eq!(b, [(NetId(0), 10, 0), (NetId(1), 10, 0)]);
+    }
+
+    /// Output follows `classes` order, not net order.
+    #[test]
+    fn rows_follow_class_order() {
+        let c = [class(2, NetClass::Supply), class(0, NetClass::Ground)];
+        let b = budgets(&c, &[Some(5), None, Some(5)], &[], 1_000.0, &Policy::default());
+        assert_eq!(b.iter().map(|r| r.0).collect::<Vec<_>>(), [NetId(2), NetId(0)]);
+    }
+}

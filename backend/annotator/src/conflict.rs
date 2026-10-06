@@ -146,3 +146,77 @@ mod tests {
         assert!(c[0].message.starts_with("ids 4294967294,4294967295:"), "{}", c[0].message);
     }
 }
+
+/// Step-2 coverage: message format and `check`'s counting rules on a fixed
+/// `Problem` (the netlist varies, the annotation does not).
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::tests::{fet, ota};
+    use pnr_core::ids::NetId;
+    use pnr_core::netlist::DeviceKind;
+
+    #[test]
+    fn diag_lists_ids_in_order() {
+        let d = diag(&[ConstraintId(7), ConstraintId(2)], vec![DeviceId(1)], "pull vs isolation");
+        assert_eq!((d.kind, d.message.as_str(), d.devices.as_slice()), ("conflict", "ids 7,2: pull vs isolation", &[DeviceId(1)][..]));
+        assert_eq!(diag(&[], vec![], 3).message, "ids : 3");
+    }
+
+    fn messages(p: &Problem, nl: &Netlist) -> Vec<String> {
+        check(p, nl).into_iter().map(|d| {
+            assert_eq!(d.kind, "asymmetric_net_pair");
+            assert!(d.devices.is_empty());
+            d.message
+        }).collect()
+    }
+
+    /// `ota()` annotated: one Differential batch mating vout1/vout2.
+    fn problem() -> Problem {
+        crate::annotate(&ota(), &crate::AnnotationConfig::default())
+    }
+
+    #[test]
+    fn a_balanced_ota_reports_nothing() {
+        assert!(messages(&problem(), &ota()).is_empty());
+    }
+
+    /// A device on both of its terminals' same net counts once.
+    #[test]
+    fn devices_count_once_per_net() {
+        let p = problem();
+        let mut nl = ota();
+        // vout1 gains a gate (3 devices); vout2 a device whose D and S both sit on it (3, not 4).
+        nl.devices.push(fet("XG", DeviceKind::Nmos, 0, 8, 3, 3, 1_000, 1_000));
+        nl.devices.push(fet("XDS", DeviceKind::Nmos, 8, 4, 4, 3, 1_000, 1_000));
+        let vout = |m: Vec<String>| m.into_iter().filter(|m| m.contains("vout")).collect::<Vec<_>>();
+        assert!(vout(messages(&p, &nl)).is_empty(), "{:?}", messages(&p, &nl));
+        nl.devices.pop();
+        let m = vout(messages(&p, &nl));
+        assert!(m.iter().any(|m| m.contains("vout1/vout2 3 vs 2 devices") || m.contains("vout2/vout1 2 vs 3 devices")), "{m:?}");
+    }
+
+    /// Rails and self-pairs are never compared.
+    #[test]
+    fn rails_and_self_pairs_are_skipped() {
+        let mut p = problem();
+        let (vout1, vss, vdd) = (NetId(0), NetId(3), NetId(7));
+        assert!(!p.intent.compounds.is_empty(), "ota has a compound");
+        for c in &mut p.intent.compounds {
+            c.net_pairs = vec![(vout1, vout1), (vss, vdd), (vout1, vdd)];
+        }
+        let mut nl = ota();
+        nl.devices.push(fet("XG", DeviceKind::Nmos, 0, 8, 3, 3, 1_000, 1_000));
+        assert!(messages(&p, &nl).is_empty());
+    }
+
+    /// Without a Differential batch there is no id to name: nothing is reported.
+    #[test]
+    fn no_differential_batch_no_report() {
+        let mut nl = ota();
+        nl.devices.truncate(1);
+        let p = crate::annotate(&nl, &crate::AnnotationConfig::default());
+        assert!(p.routing.budget.iter().all(|b| !b.kind().ends_with("::Differential")));
+        assert!(check(&p, &nl).is_empty());
+    }
+}

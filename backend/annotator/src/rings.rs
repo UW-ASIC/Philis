@@ -142,3 +142,188 @@ fn note_once(missing: &mut Vec<(&'static str, &'static str)>, why: (&'static str
         missing.push(why);
     }
 }
+
+/// Step-2 coverage: every row of [`plan`], its fallbacks and notes.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::tests::{fet, nets};
+
+    const NO_SUPPLY: (&str, &str) = ("GuardRing", "injector ring: no supply/ground net");
+    const NO_ECGR: (&str, &str) = ("GuardRing", "ECGR not drawable: electron injector has a majority ring only");
+    const NO_WIDTH: (&str, &str) = ("GuardRing", "ECGR width rule not given: collection efficiency unknown");
+    const SUB30: (&str, &str) = ("GuardRing", "victim rings: no quiet ring return (SUB-30)");
+
+    /// N0, N1 NMOS on bulk vss; P2 PMOS on bulk vdd; R3 a resistor (no `B`).
+    /// Nets: 0=x 1=vss 2=vdd 3=quiet.
+    fn nl() -> Netlist {
+        let mut r = fet("R3", DeviceKind::Resistor, 0, 0, 0, 0, 1, 1);
+        r.terminals = vec![("P".into(), NetId(0)), ("N".into(), NetId(1))];
+        Netlist {
+            devices: vec![
+                fet("N0", DeviceKind::Nmos, 0, 0, 1, 1, 1_000, 150),
+                fet("N1", DeviceKind::Nmos, 0, 0, 1, 1, 1_000, 150),
+                fet("P2", DeviceKind::Pmos, 0, 0, 2, 2, 1_000, 150),
+                r,
+            ],
+            nets: nets(&["x", "vss", "vdd", "quiet"]),
+            ..Default::default()
+        }
+    }
+
+    fn base<'a>(nl: &'a Netlist, aggressor: &'a [bool], victim: &'a [bool], injector: &'a [Option<Carrier>]) -> RingInputs<'a> {
+        RingInputs {
+            netlist: nl,
+            aggressor,
+            victim,
+            injector,
+            substrate: SubstrateKind::Bulk,
+            quiet_ring_net: Some(NetId(3)),
+            highest_supply: Some(NetId(2)),
+            ground: Some(NetId(1)),
+            min_ring_width_nm: 300,
+            ecgr_min_width_nm: Some(500),
+            ecgr_drawable: true,
+            hcgr_drawable: true,
+            tubs: &[],
+            tub_drawable: true,
+        }
+    }
+
+    type Row = (u16, GuardRingType, RingRole, u16, i32, bool);
+
+    fn rows(i: &RingInputs) -> (Vec<Row>, Vec<(&'static str, &'static str)>) {
+        let (r, m) = plan(i);
+        (r.iter().map(|r| (r.device.0, r.ring_type, r.role, r.connection_net.0, r.min_width_nm, r.shareable)).collect(), m)
+    }
+
+    #[test]
+    fn nothing_flagged_no_rings() {
+        let nl = nl();
+        assert_eq!(rows(&base(&nl, &[], &[], &[])), (vec![], vec![]), "empty slices read as false/None");
+    }
+
+    #[test]
+    fn a_device_without_a_bulk_gets_no_ring() {
+        let nl = nl();
+        let (r, _) = rows(&base(&nl, &[false, false, false, true], &[], &[None, None, None, Some(Carrier::Electrons)]));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    /// Row 1 with a width rule: the wider of the two, no note; every ring
+    /// carries the 100 Ω resistance cap.
+    #[test]
+    fn an_ecgr_takes_the_wider_width_rule() {
+        let nl = nl();
+        let (r, m) = rows(&base(&nl, &[], &[], &[Some(Carrier::Electrons)]));
+        assert_eq!((r, m), (vec![(0, GuardRingType::Ecgr, RingRole::Injector, 2, 500, false)], vec![]));
+        let narrow = RingInputs { ecgr_min_width_nm: Some(100), ..base(&nl, &[], &[], &[Some(Carrier::Electrons)]) };
+        assert_eq!(rows(&narrow).0[0].4, 300);
+        assert!(plan(&narrow).0.iter().all(|g| g.max_ring_resistance_mohm == 100_000));
+    }
+
+    /// Row 3: no supply → a substrate tap on the bulk, with both notes, once
+    /// however many injectors.
+    #[test]
+    fn an_electron_injector_without_a_supply_gets_a_tap() {
+        let nl = nl();
+        let inj = [Some(Carrier::Electrons), Some(Carrier::Electrons)];
+        let (r, m) = rows(&RingInputs { highest_supply: None, ..base(&nl, &[], &[], &inj) });
+        assert_eq!(r, [(0, GuardRingType::Tap { in_well: false }, RingRole::Injector, 1, 300, false), (1, GuardRingType::Tap { in_well: false }, RingRole::Injector, 1, 300, false)]);
+        assert_eq!(m, [NO_SUPPLY, NO_ECGR]);
+    }
+
+    /// Row 3, deck cannot draw an ECGR: only the drawability note.
+    #[test]
+    fn an_undrawable_ecgr_notes_only_that() {
+        let nl = nl();
+        let (r, m) = rows(&RingInputs { ecgr_drawable: false, ecgr_min_width_nm: None, ..base(&nl, &[], &[], &[Some(Carrier::Electrons)]) });
+        assert_eq!((r[0].1, r[0].3), (GuardRingType::Tap { in_well: false }, 1));
+        assert_eq!(m, [NO_ECGR]);
+    }
+
+    #[test]
+    fn a_hole_injector_gets_a_ground_tied_hcgr() {
+        let nl = nl();
+        let inj = [None, None, Some(Carrier::Holes)];
+        assert_eq!(rows(&base(&nl, &[], &[], &inj)), (vec![(2, GuardRingType::Hcgr, RingRole::Injector, 1, 300, false)], vec![]));
+        // Drawable but no ground: a well tap on the bulk, noted.
+        let (r, m) = rows(&RingInputs { ground: None, ..base(&nl, &[], &[], &inj) });
+        assert_eq!((r, m), (vec![(2, GuardRingType::Tap { in_well: true }, RingRole::Injector, 2, 300, false)], vec![NO_SUPPLY]));
+        // Not drawable: the same tap, nothing to note.
+        assert!(rows(&RingInputs { hcgr_drawable: false, ..base(&nl, &[], &[], &inj) }).1.is_empty());
+    }
+
+    /// An aggressor tap is in the well for a PMOS.
+    #[test]
+    fn aggressor_taps_follow_polarity() {
+        let nl = nl();
+        let (r, m) = rows(&base(&nl, &[true, false, true], &[], &[]));
+        assert_eq!(r, [(0, GuardRingType::Tap { in_well: false }, RingRole::Aggressor, 1, 300, true), (2, GuardRingType::Tap { in_well: true }, RingRole::Aggressor, 2, 300, true)]);
+        assert!(m.is_empty());
+    }
+
+    /// A device both victim and aggressor is treated as a victim.
+    #[test]
+    fn victim_beats_aggressor() {
+        let nl = nl();
+        let (r, _) = rows(&base(&nl, &[true, true], &[false, true], &[]));
+        assert_eq!(r, [(0, GuardRingType::Tap { in_well: false }, RingRole::Aggressor, 1, 300, true), (1, GuardRingType::Tap { in_well: false }, RingRole::Victim, 3, 300, true)]);
+        // Alone, it has nothing to be guarded against.
+        assert_eq!(rows(&base(&nl, &[false, true], &[false, true], &[])), (vec![], vec![]));
+    }
+
+    /// An injector victim is ringed as an injector, not as a victim.
+    #[test]
+    fn injector_beats_victim() {
+        let nl = nl();
+        let (r, _) = rows(&base(&nl, &[], &[true], &[Some(Carrier::Electrons)]));
+        assert_eq!(r.iter().map(|r| r.2).collect::<Vec<_>>(), [RingRole::Injector]);
+    }
+
+    /// Victims need a quiet return; without one they are noted, not ringed.
+    #[test]
+    fn victims_without_a_quiet_return_are_noted() {
+        let nl = nl();
+        let (r, m) = rows(&RingInputs { quiet_ring_net: None, ..base(&nl, &[true], &[false, true], &[]) });
+        assert_eq!(r.len(), 1);
+        assert_eq!(m, [SUB30]);
+    }
+
+    /// Row 0: each tub gets its own id; a drawn tub ring is the member's only ring.
+    #[test]
+    fn tubs_are_numbered_and_exclusive() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(0)], NetId(2)), (vec![DeviceId(1)], NetId(3))];
+        let (r, m) = rows(&RingInputs { tubs: &tubs, ..base(&nl, &[], &[], &[Some(Carrier::Electrons), Some(Carrier::Electrons)]) });
+        assert_eq!(r, [(0, GuardRingType::Tub { id: 0 }, RingRole::Victim, 2, 300, true), (1, GuardRingType::Tub { id: 1 }, RingRole::Victim, 3, 300, true)]);
+        assert!(m.is_empty());
+    }
+
+    /// A tub ring is not a row 1–5 ring: it does not turn victim rings on.
+    #[test]
+    fn a_tub_ring_alone_does_not_ring_victims() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(0)], NetId(2))];
+        let (r, m) = rows(&RingInputs { tubs: &tubs, ..base(&nl, &[], &[false, true], &[]) });
+        assert_eq!((r, m), (vec![(0, GuardRingType::Tub { id: 0 }, RingRole::Victim, 2, 300, true)], vec![]));
+    }
+
+    /// An undrawable tub falls through to the ordinary rows, noted once.
+    #[test]
+    fn undrawable_tubs_fall_through() {
+        let nl = nl();
+        let tubs = [(vec![DeviceId(0), DeviceId(1)], NetId(2))];
+        let (r, m) = rows(&RingInputs { tubs: &tubs, tub_drawable: false, ..base(&nl, &[true, true], &[], &[]) });
+        assert_eq!(r.iter().map(|r| r.2).collect::<Vec<_>>(), [RingRole::Aggressor, RingRole::Aggressor]);
+        assert_eq!(m, [("IsolatedTub", "deck has no deep n-well: tub drawn as an ordinary ring")]);
+    }
+
+    /// On epi, injectors still ring; aggressors and victims do not.
+    #[test]
+    fn epi_keeps_injector_rings() {
+        let nl = nl();
+        let i = RingInputs { substrate: SubstrateKind::EpiOnLowRes, ..base(&nl, &[false, true], &[false, false, true], &[Some(Carrier::Electrons)]) };
+        assert_eq!(rows(&i).0.iter().map(|r| (r.0, r.2)).collect::<Vec<_>>(), [(0, RingRole::Injector)]);
+    }
+}

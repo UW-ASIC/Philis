@@ -82,3 +82,25 @@ impl Default for Policy {
         }
     }
 }
+
+/// Step-2 coverage: the defaults are in their stated ranges.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::Policy;
+
+    #[test]
+    fn defaults_are_in_range() {
+        let p = Policy::default();
+        assert!(p.proximity_nm > 0 && p.shield_gap_spaces > 0 && p.diff_pct10 > 0 && p.pn_max_degree > 0);
+        assert!(p.margin_pct.iter().chain([&p.shield_coverage_pct, &p.antenna_margin_pct]).all(|&m| m <= 100));
+        assert!(p.spacing_multiple.windows(2).all(|w| w[0] >= w[1]), "a more sensitive class never gets less spacing");
+        assert!(p.margin_pct.windows(2).all(|w| w[0] >= w[1]));
+        for share in [p.ir_headroom_share, p.ir_rail_share, p.ir_high_current_share, p.rc_share] {
+            assert!(share > 0.0 && share < 1.0, "{share}");
+        }
+        assert!(p.minor_weight > 0.0 && p.minor_weight < 1.0 && p.max_eta > 0.0);
+        // Cited values (GAP-03, EXT-21).
+        assert_eq!((p.inj_series_ohm, p.beta_target), (50_000.0, 3.0));
+        assert!(!p.credit_helpful, "BAL2-16: helpful credit is off by default");
+    }
+}

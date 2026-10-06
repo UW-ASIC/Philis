@@ -33,3 +33,34 @@ pub fn term_role(kind: DeviceKind, term: &str) -> TermRole {
         _ => TermRole::Passive,
     }
 }
+
+/// Step-2 coverage: the full role table.
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn roles_by_kind_and_name() {
+        use DeviceKind::*;
+        use TermRole::*;
+        let cases = [
+            (Nmos, "G", FetGate),
+            (Pmos, "D", Channel),
+            (Nmos, "S", Channel),
+            (Pmos, "B", Body),
+            (Nmos, "X", Passive),
+            (Nmos, "g", Passive),
+            (Npn, "B", BjtBase),
+            (Pnp, "C", Channel),
+            (Npn, "E", Channel),
+            (Capacitor, "P", Plate),
+            (Capacitor, "B", Plate),
+            (Resistor, "P", Passive),
+            (Diode, "N", Passive),
+            (Resistor, "G", Passive),
+        ];
+        for (k, t, want) in cases {
+            assert_eq!(term_role(k, t), want, "{k:?} {t}");
+        }
+    }
+}
