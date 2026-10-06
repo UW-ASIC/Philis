@@ -1196,4 +1196,239 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn bits_boundaries() {
+        let bank = |n: u8| -> Vec<u16> { (0..=n).map(|i| if i == 0 { 1 } else { 1 << (i - 1) }).collect() };
+        assert_eq!(bits(&[]), None, "empty");
+        assert_eq!(bits(&[1]), None, "C0 alone");
+        assert_eq!(bits(&[1, 1]), None, "N = 1 is below the smallest bank");
+        assert_eq!(bits(&bank(8)), Some(8), "largest bank");
+        assert_eq!(bits(&bank(9)), None, "past MAX_BITS");
+        assert_eq!(bits(&[2, 1, 2]), None, "C0 must be one unit");
+        assert_eq!(bits(&[1, 1, 2, 0]), None);
+    }
+
+    #[test]
+    fn dims_hold_two_to_the_m() {
+        assert_eq!(dims(0, false), (1, 1));
+        assert_eq!(dims(1, false), (1, 2));
+        assert_eq!(dims(1, true), (2, 1));
+        assert_eq!(dims(4, false), (4, 4));
+        assert_eq!(dims(5, false), (4, 8));
+        assert_eq!(dims(5, true), (8, 4));
+        for m in 0..=8 {
+            let (r, c) = dims(m, false);
+            assert_eq!(r * c, 1 << m);
+        }
+    }
+
+    #[test]
+    fn even_up_rounds_to_an_even_lattice_multiple() {
+        assert_eq!(even_up(0, 10), 0);
+        assert_eq!(even_up(1, 10), 20);
+        assert_eq!(even_up(20, 10), 20);
+        assert_eq!(even_up(21, 10), 40);
+    }
+
+    #[test]
+    fn grow_to_area_grows_about_the_centre_and_never_shrinks() {
+        let r = Rect { x: 0, y: 1000, w: 100, h: 100 };
+        assert_eq!(grow_to_area(r, 0, 10), r, "no area rule");
+        assert_eq!(grow_to_area(r, 5_000, 10), r, "already large enough");
+        let g = grow_to_area(r, 100_000, 10);
+        assert_eq!((g.x, g.w, g.h), (0, 100, 1000));
+        assert_eq!(g.y, 1000 - 450, "centred, offset on the lattice");
+        let z = grow_to_area(Rect { w: 0, ..r }, 1_000, 10);
+        assert_eq!(z.h, 1000, "a zero-width rect divides by one, not zero");
+    }
+
+    /// An area no `i32` height can meet saturates instead of overflowing.
+    #[test]
+    fn grow_to_area_saturates() {
+        let r = Rect { x: 0, y: 0, w: 1, h: 10 };
+        let g = grow_to_area(r, i64::MAX / 2, 10);
+        assert!(g.h >= r.h && g.h > 1_000_000_000, "{g:?}");
+    }
+
+    /// A deck with named model rules (and no layers).
+    struct Model(&'static [(&'static str, i32)]);
+    impl Process for Model {
+        fn layer(&self, _: &str) -> Option<pnr_core::LayerId> {
+            None
+        }
+        fn rule(&self, name: &str, d: i32) -> i32 {
+            self.0.iter().find(|(k, _)| *k == name).map_or(d, |r| r.1)
+        }
+        fn grid(&self) -> i32 {
+            5
+        }
+    }
+
+    /// sky130 `cap_mim_m3_1` typical: 2 fF/µm², 0.19 fF/µm, dw −25 nm.
+    const MIM_MODEL: &[(&str, i32)] = &[("c_area_af_um2", 2000), ("c_perim_af_um", 190), ("c_dw_nm", -25)];
+
+    #[test]
+    fn c_u_is_the_area_plus_perimeter_model() {
+        assert_eq!(c_u_af(&Flat, 5000, 5000), None, "a MOM deck states no C");
+        let c = c_u_af(&Model(MIM_MODEL), 5000, 5000).unwrap();
+        // 2000·4.975² + 190·2·(4.975 + 4.975).
+        assert!((c - (2000.0 * 4.975 * 4.975 + 190.0 * 2.0 * 9.95)).abs() < 1e-6, "{c}");
+        let c = c_u_af(&Model(&[("c_area_af_um2", 1000)]), 2000, 3000).unwrap();
+        assert!((c - 6000.0).abs() < 1e-9, "area only: {c}");
+    }
+
+    /// The bridge half is the smallest lattice side whose two halves reach C_A.
+    #[test]
+    fn ca_half_side_is_the_smallest_side_reaching_c_a() {
+        let p = Model(MIM_MODEL);
+        assert_eq!(ca_half_side(&Flat, 3000, 3000, 2, 2), None);
+        let lat = cut_lattice(&p);
+        for (l, m) in [(1u8, 1u8), (2, 2), (3, 3), (2, 4)] {
+            let half = ca_half_side(&p, 3000, 3000, l, m).unwrap();
+            assert_eq!(half % lat, 0, "({l}, {m}) on the lattice");
+            let want = analog::matching::dac::attenuation_cap(1 << l, (1 << m) - 1) * c_u_af(&p, 3000, 3000).unwrap();
+            let c = |t: i32| 2.0 * c_u_af(&p, t, t).unwrap();
+            assert!(c(half) >= want - 1e-6, "({l}, {m}): {} < {want}", c(half));
+            assert!(c(half - lat) < want, "({l}, {m}): {half} is not the smallest");
+        }
+    }
+
+    /// Exact counts and point symmetry hold up to the largest bank.
+    #[test]
+    fn the_largest_bank_is_exact_and_point_symmetric() {
+        let n = MAX_BITS;
+        for v in every_variant(n) {
+            let a = v.assign(n);
+            assert_eq!(a.len(), 1 << n);
+            for s in 0..=n {
+                let want = if s == 0 { 1 } else { 1usize << (s - 1) };
+                assert_eq!(a.iter().filter(|&&x| x == s).count(), want, "{v:?} C{s}");
+            }
+            assert!(a.iter().enumerate().all(|(i, &s)| s < 2 || a[a.len() - 1 - i] == s), "{v:?}");
+        }
+    }
+
+    /// The smallest bank: the spiral puts C0 and C1 diagonally opposite.
+    #[test]
+    fn a_two_bit_spiral_puts_c0_and_c1_diagonally() {
+        let a = CapArray { pattern: Pattern::Spiral, tall: false }.assign(2);
+        let i0 = a.iter().position(|&x| x == 0).unwrap();
+        assert_eq!(a[3 - i0], 1, "{a:?}");
+    }
+
+    #[test]
+    #[should_panic]
+    fn assign_refuses_a_split_pattern() {
+        let _ = CapArray { pattern: Pattern::Split { lsb: 2, bridge_top_lsb: true }, tall: false }.assign(4);
+    }
+
+    /// Nothing is offered without a plate stack, for a lone MOM device, or
+    /// past 256 units.
+    #[test]
+    fn enumerate_refuses_what_it_cannot_draw() {
+        struct Bare;
+        impl Process for Bare {
+            fn layer(&self, _: &str) -> Option<pnr_core::LayerId> {
+                None
+            }
+            fn rule(&self, _: &str, d: i32) -> i32 {
+                d
+            }
+            fn grid(&self) -> i32 {
+                5
+            }
+        }
+        let (g, c) = bank(4);
+        assert!(CapArray::enumerate(&g, &c, &Bare).is_empty(), "no plate stack");
+        let (g, c) = set(&[4]);
+        assert!(CapArray::enumerate(&g, &c, &Flat).is_empty(), "one MOM device");
+        let (g, c) = set(&[200, 57]);
+        assert!(CapArray::enumerate(&g, &c, &Flat).is_empty(), "257 units");
+        let (g, c) = set(&[200, 56]);
+        assert_eq!(CapArray::enumerate(&g, &c, &Flat).len(), 2, "256 units: compact and dispersed");
+    }
+
+    /// Odd N offers tall twins, even N does not; no two variants share an
+    /// assignment; every block chessboard has `N − k` even.
+    #[test]
+    fn enumerate_shapes_the_bank_space() {
+        for n in 2..=7u8 {
+            let (g, c) = bank(n);
+            let vs = CapArray::enumerate(&g, &c, &Flat);
+            assert_eq!(vs.iter().any(|v| v.tall), n % 2 == 1, "n={n}");
+            for (i, a) in vs.iter().enumerate() {
+                if let Pattern::BlockChessboard { k, bs } = a.pattern {
+                    assert!(k >= 2 && k < n && (n - k) % 2 == 0 && bs >= 1, "n={n}: {a:?}");
+                }
+                for b in &vs[i + 1..] {
+                    assert!(a.tall != b.tall || a.assign(n) != b.assign(n), "n={n}: {a:?} duplicates {b:?}");
+                }
+            }
+        }
+    }
+
+    /// One `N` pin per slot; every member's `P`; a general set's dummies get
+    /// a `GND` pin of their own, a bank's join C0.
+    #[test]
+    fn pins_cover_every_slot_once() {
+        let n_pins = |m: &Macro, name: &str| m.pins.iter().filter(|p| p.name == name).count();
+        let (g, c) = bank(3);
+        let m = CapArray { pattern: Pattern::Spiral, tall: false }.draw(&g, &c, &Flat);
+        for s in 0..=3 {
+            assert_eq!((n_pins(&m, &format!("d{s}:N")), n_pins(&m, &format!("d{s}:P"))), (1, 1), "bank slot {s}");
+        }
+        assert_eq!(n_pins(&m, "GND"), 0);
+        let (g, c) = set(&[2, 2]);
+        let m = CapArray { pattern: Pattern::Chessboard, tall: false }.draw(&g, &c, &Flat);
+        for s in 0..2 {
+            assert_eq!((n_pins(&m, &format!("d{s}:N")), n_pins(&m, &format!("d{s}:P"))), (1, 1), "set slot {s}");
+        }
+        assert_eq!(n_pins(&m, "GND"), 1);
+        assert_eq!(m.units.len(), 4, "dummies are not units");
+    }
+
+    /// Route bookkeeping: one entry per slot (the general set's ground slot
+    /// included), every slot routed, two cuts per unit cell plus one per track.
+    #[test]
+    fn routes_are_counted_per_slot() {
+        let (g, c) = bank(3);
+        let (_, routes) = CapArray { pattern: Pattern::Spiral, tall: false }.build(&g, &c, &Flat);
+        assert_eq!(routes.len(), 4);
+        assert!(routes.iter().all(|&(len, vias)| len > 0 && vias >= 3), "{routes:?}");
+        let (g, c) = set(&[3, 5]);
+        let (_, routes) = CapArray { pattern: Pattern::Spiral, tall: false }.build(&g, &c, &Flat);
+        assert_eq!(routes.len(), 3, "two members and the ground dummies");
+    }
+
+    /// Figures of a drawn bank are finite and self-consistent.
+    #[test]
+    fn metrics_are_finite_and_consistent() {
+        let (g, c) = bank(4);
+        for v in every_variant(4) {
+            let m = v.metrics(&g, &c, &Flat, RANK_G_PER_UM);
+            let drawn = v.draw(&g, &c, &Flat);
+            assert_eq!(m.vias.len(), 5, "{v:?}");
+            for x in [m.lin_um, m.second_um2, m.inl_lsb, m.dnl_lsb, m.msys, m.route_spread, m.area_um2] {
+                assert!(x.is_finite() && x >= 0.0, "{v:?}: {m:?}");
+            }
+            assert!((m.area_um2 - f64::from(drawn.bbox.w) * f64::from(drawn.bbox.h) * 1e-6).abs() < 1e-6);
+            assert!(m.order <= 4);
+        }
+    }
+
+    /// Without a gradient there is no mismatch.
+    #[test]
+    fn a_zero_gradient_has_no_inl_or_msys() {
+        let (g, c) = bank(4);
+        let m = CapArray { pattern: Pattern::Chessboard, tall: false }.metrics(&g, &c, &Flat, 0.0);
+        assert!(m.inl_lsb.abs() < 1e-12 && m.dnl_lsb.abs() < 1e-12 && m.msys.abs() < 1e-12, "{m:?}");
+    }
+
+    /// `split` needs a MIM stack, a dummy ring and a bank-shaped set.
+    #[test]
+    fn split_refuses_a_mom_stack() {
+        let (g, c) = set(&[1, 1, 2, 1, 2, 1]);
+        assert!(CapArray::split(&g, &c, &Flat, 2, true).is_none());
+    }
 }
