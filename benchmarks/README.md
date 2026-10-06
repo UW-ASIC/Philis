@@ -102,6 +102,14 @@ mismatch where GPurify said match.
 then checks nothing, reporting 0 (`tests/xcheck_smoke.rs` pins both halves).
 `--drc-only <gds> [--top T]` prints `{"drc": n}` for one GDS.
 
+The reference's ngspice `X` cards are rewritten to element letters
+(`<f>.ref.klayout.spice`, MOS W/L in µm) and the schematic's fingers are
+combined (`schematic_simplify=true`), as sky130.lvs reads them. PEX
+calibration (PERF-16): `bench -- --pex-cal` writes
+`target/bench/pex_cal.json` (per signal net ground C unmerged, merged,
+field-solved, plus PEX-only wall times); the harness then adds `c_magic` and
+|C_field − C_magic|/C_magic to each row.
+
 `cargo run --release -p benchmark --example net_dump <fixture>` prints the
 extraction net by net and which extracted net each routed net lands on — a
 routed net split across two extracted nets is an open.

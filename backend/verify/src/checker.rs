@@ -30,6 +30,13 @@ pub struct Checker {
     /// [`RefInput::external_ports`], interned in `loaded.strings` (the labels'
     /// table, so ids compare equal): the only nets `drop_port_floating` exempts.
     external: Option<Vec<StrId>>,
+    /// Layers `build_store` loads as their union (routing metals, li, nwell);
+    /// emptied by [`crate::ExtractOptions::unmerged`].
+    merge: Vec<u16>,
+    /// Layers this deck merges, for [`Checker::set_extract`] to restore.
+    merge_default: Vec<u16>,
+    /// [`crate::ExtractOptions::field_solve`]: PEX field-solves these nets.
+    field_nets: Vec<String>,
 }
 
 impl Checker {
@@ -79,7 +86,25 @@ impl Checker {
             reference: None,
             intent: None,
         };
-        Ok(Self { loaded, extracted: Extracted::default(), out: Outputs::default(), deferred, external: None })
+        let mut merge: Vec<u16> = pdk
+            .routing_metals
+            .iter()
+            .copied()
+            .chain(["li", "nwell"].iter().filter_map(|r| pnr_core::Process::layer(pdk, r)))
+            .map(|l| l.0)
+            .collect();
+        merge.sort_unstable();
+        merge.dedup();
+        Ok(Self {
+            loaded,
+            extracted: Extracted::default(),
+            out: Outputs::default(),
+            deferred,
+            external: None,
+            merge_default: merge.clone(),
+            merge,
+            field_nets: Vec::new(),
+        })
     }
 
     /// Install the schematic reference LVS compares against. Returns the
@@ -146,9 +171,15 @@ impl Checker {
         Ok(())
     }
 
+    /// Extraction options for the following [`Checker::run`]s.
+    pub fn set_extract(&mut self, o: &crate::ExtractOptions) {
+        self.field_nets.clone_from(&o.field_solve);
+        self.merge = if o.unmerged { Vec::new() } else { self.merge_default.clone() };
+    }
+
     fn load_geometry(&mut self, shapes: &[Shape], pins: &[LabeledPin]) -> Result<(), String> {
         let (store, provenance) =
-            build_store(shapes, pins, &self.loaded.deck, &mut self.loaded.strings)?;
+            build_store(shapes, pins, &self.loaded.deck, &mut self.loaded.strings, &self.merge)?;
         self.loaded.store = store;
         self.loaded.provenance = provenance;
         Ok(())
@@ -179,7 +210,7 @@ impl Checker {
         let options = RunOptions {
             checks,
             lvs: CompareOptions::default(),
-            quasistatic_nets: Vec::new(),
+            quasistatic_nets: self.field_nets.clone(),
             quasistatic_inductance: false,
         };
         let (out, mut summary) =

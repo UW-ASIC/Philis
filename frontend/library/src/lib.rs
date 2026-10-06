@@ -265,6 +265,8 @@ pub struct Solution {
     /// ambiguous symmetry, conflicts), in annotator order; the CLI writes one
     /// line each to `report.txt`.
     pub diagnostics: Vec<analog::intent::Diagnostic>,
+    /// Nets to field-solve (PERF-16, [`field_nets`]); [`signoff`] does not yet.
+    pub field_nets: Vec<String>,
 }
 
 /// How the search went, and the winning epoch's per-stage legality.
@@ -1140,6 +1142,7 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
     // Inserted devices (antenna diodes) join the schematic LVS reads.
     let mut netlist = flow.netlist.clone();
     netlist.devices.extend(best.extra);
+    let field_nets = field_nets(&flow);
     Solution {
         layout: best.layout,
         routes: best.routes,
@@ -1158,7 +1161,61 @@ fn finish(t: Topology, s: Searched, bias: &Bias, pdk: &Pdk) -> Solution {
         route: best.route,
         route_stats: best.route_stats,
         diagnostics: flow.problem.intent.diagnostics,
+        field_nets,
     }
+}
+
+/// Sensitivity-ranked nets [`field_nets`] adds on top of the
+/// structural ones. ponytail: a fixed policy count.
+const FIELD_RANKED: usize = 8;
+
+/// The nets to field-solve (PERF-16): every non-rail net of a
+/// `Differential` routing row (the compounds' mirrored net pairs) and of a
+/// `CommonNode` row, then the [`FIELD_RANKED`] nets of largest
+/// Σ_b |d_b|/scale_b over the `GroundC` rows of every sensitivity table
+/// (scale_b = |bound|, 1 for a zero bound, as [`perf::miss`]). Until PERF-11
+/// (M4) refines the ranking, these rows are the ranking.
+fn field_nets(flow: &Flow) -> Vec<String> {
+    let rail = |n: pnr_core::NetId| {
+        use analog::metadata::NetClass::{Ground, Substrate, Supply};
+        flow.problem.net_classes.get(n.0 as usize).is_some_and(|c| matches!(c.class, Supply | Ground | Substrate))
+    };
+    let intent = &flow.problem.intent;
+    let mut nets: Vec<pnr_core::NetId> = intent
+        .compounds
+        .iter()
+        .flat_map(|c| c.net_pairs.iter().filter(|(x, y)| x != y).flat_map(|&(x, y)| [x, y]))
+        .chain(intent.common_nodes.iter().map(|c| c.net))
+        .filter(|&n| !rail(n))
+        .collect();
+    if let Some(p) = flow.perf {
+        let mut score: Vec<(pnr_core::NetId, f64)> = Vec::new();
+        for row in flow.perf_plan.tables.iter().flat_map(|t| &t.rows) {
+            let perf::Param::GroundC { net } = row.param else { continue };
+            let s: f64 = p
+                .specs
+                .iter()
+                .zip(&row.d)
+                .filter_map(|(spec, d)| d.map(|d| (spec, d.abs())))
+                .flat_map(|(spec, d)| [spec.min, spec.max].into_iter().flatten().map(move |b| d / if b == 0.0 { 1.0 } else { b.abs() }))
+                .sum();
+            match score.iter_mut().find(|(n, _)| *n == net) {
+                Some(e) => e.1 += s,
+                None => score.push((net, s)),
+            }
+        }
+        score.retain(|&(n, s)| s > 0.0 && !rail(n) && !nets.contains(&n));
+        score.sort_by(|a, b| b.1.total_cmp(&a.1));
+        nets.extend(score.iter().take(FIELD_RANKED).map(|&(n, _)| n));
+    }
+    let mut names: Vec<String> = Vec::new();
+    for n in nets {
+        let name = &flow.net_names[n.0 as usize];
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 /// Everything an epoch reads that is fixed for the run.
@@ -2306,10 +2363,23 @@ pub fn parse(spice: &str) -> Result<pnr_core::Netlist, String> {
 
 /// Full DRC/ERC/LVS/PEX signoff of a solution against its own schematic:
 /// errors in `report`, deck warnings and coverage apart ([`verify::Signoff`]).
+/// PEX is analytical over merged metal. ponytail: [`Solution::field_nets`]
+/// are not field-solved here — measured (`bench --pex-cal`, PERF-16) at
+/// 10³–10⁴× the analytical time and 3–10× below magic's ground C; pass
+/// them to [`signoff_with`] once the solve reads near magic.
 #[must_use]
 pub fn signoff(sol: &Solution, pdk: &Pdk) -> verify::Signoff {
+    signoff_with(sol, pdk, &verify::ExtractOptions::default())
+}
+
+/// [`signoff`] with explicit extraction options; `field_solve` is cut to the
+/// nets that carry a label (an unlabelled name would refuse the whole solve).
+#[must_use]
+pub fn signoff_with(sol: &Solution, pdk: &Pdk, opts: &verify::ExtractOptions) -> verify::Signoff {
     let (shapes, pins, reference) = signoff_inputs(sol, pdk);
-    let mut s = verify::signoff_checked(&shapes, &pins, &reference, &sol.intent, pdk);
+    let field_solve = opts.field_solve.iter().filter(|n| pins.iter().any(|p| &p.name == *n)).cloned().collect();
+    let opts = verify::ExtractOptions { field_solve, ..opts.clone() };
+    let mut s = verify::signoff_extract(&shapes, &pins, &reference, &sol.intent, &opts, pdk);
     s.report.hard_violations.extend(undrawable(&sol.macros[..sol.layout.x.len()], &sol.devices_of, &sol.netlist));
     if let Some(op) = &sol.op {
         let probe = sol.metadata.bias.as_ref().is_some_and(|b| b.probe);

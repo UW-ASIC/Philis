@@ -168,6 +168,9 @@ def main() -> int:
         return 0
     routing = routing_layers()
     summary, bad = {}, []
+    # PERF-16: `bench --pex-cal` rows gain magic's ground C and |C_field − C_magic|/C_magic.
+    cal_path = ROOT / "target/bench/pex_cal.json"
+    cal = json.loads(cal_path.read_text()) if cal_path.is_file() else {}
     for d in sorted((ROOT / "target/bench_debug").iterdir()):
         top = d.name
         if not (d / f"{top}.gds").is_file():
@@ -181,6 +184,10 @@ def main() -> int:
         summary[top] = {"drc": {"foundry": len(items), "magic": mg["drc"], "gpurify": gp["drc"]},
                         "lvs": {"foundry": lvs, "gpurify": gp["lvs"]},
                         "foundry_findings": findings, "caps": caps}
+        for row in cal.get(top, {}).get("nets", []):
+            cm = mg["ground"].get(row["net"])
+            row["c_magic"] = cm
+            row["field_vs_magic"] = abs(row["c_field"] - cm) / cm if cm and row.get("c_field") is not None else None
         if items:
             bad.append(f"{top}: {len(items)} foundry DRC errors")
         if lvs != "match" and gp["lvs"] == "match":
@@ -188,6 +195,14 @@ def main() -> int:
     out = ROOT / "target/xcheck"
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.json").write_text(json.dumps(summary, indent=1))
+    if cal:
+        cal_path.write_text(json.dumps(cal, indent=1))
+        print("pex_cal (signal nets, fF): net unmerged merged field magic |field-magic|/magic")
+        for top, c in cal.items():
+            for r in c["nets"]:
+                e = r.get("field_vs_magic")
+                print(f"  {top}:{r['net']} {r['c_unmerged']} {r['c_merged']} {r['c_field']} {r.get('c_magic')} "
+                      f"{'-' if e is None else f'{e:.0%}'}")
     print(f"{'fixture':<18}{'DRC fdry':>9}{'magic':>7}{'GP':>5}  {'LVS fdry':<10}{'GP':<9}findings by origin/rule")
     for top, s in summary.items():
         by = {}
