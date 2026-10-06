@@ -17,8 +17,9 @@ use crate::layout::Layout;
 pub struct Unit {
     /// Member index within the cell's group (the `d{owner}:` pin prefix).
     pub owner: u8,
-    /// Active-area centre, nm.
+    /// Active-area centre x, nm.
     pub x: i32,
+    /// Active-area centre y, nm.
     pub y: i32,
     /// Electrical weight (MOS: gate area W·L, nm²). Moments weight by this,
     /// never by drawn outline.
@@ -29,43 +30,65 @@ pub struct Unit {
     /// (BSIM4's `SA + L/2`, `SB + L/2`: the LOD stress distances). `0` = not a
     /// MOS finger.
     pub sa: i32,
+    /// Far-side counterpart of [`Unit::sa`], nm; `0` = not a MOS finger.
     pub sb: i32,
 }
 
 /// Every (cell, variant)'s units, SoA. Immutable once built; shared by `Arc`.
+///
+/// Layout: cells own consecutive variant *slots*; each slot owns a consecutive
+/// unit range. The unit columns (`owner` … `lod`) are parallel.
 #[derive(Default, Debug)]
 pub struct UnitLib {
     /// `cell_of[device]` = its cell. Empty = no units known (rules fall back).
     pub cell_of: Vec<u16>,
-    /// First slot of each cell; slot = `slot0[cell] + variant`.
+    /// First slot of each cell, plus one sentinel; slot = `slot0[cell] +
+    /// variant`, valid while `< slot0[cell + 1]`.
     slot0: Vec<u32>,
-    /// Per slot: unit range start (`start[slot]..start[slot + 1]`) and the
-    /// macro bbox the local frame is relative to.
+    /// Per slot plus one sentinel: unit range start (`start[slot]..start[slot + 1]`).
     start: Vec<u32>,
+    /// Per slot: the macro bbox the local frame is relative to.
     bbox: Vec<Rect>,
+    /// Per unit: the schematic device that owns it.
     owner: Vec<DeviceId>,
+    /// Per unit: local-frame centre x, nm.
     x: Vec<i32>,
+    /// Per unit: local-frame centre y, nm.
     y: Vec<i32>,
+    /// Per unit: electrical weight ([`Unit::weight`]).
     weight: Vec<i64>,
+    /// Per unit: local-frame S→D direction.
     phi: Vec<(i8, i8)>,
+    /// Per unit: LOD stress term, 1/µm; `NaN` = unknown ([`PlacedUnit::lod`]).
     lod: Vec<f32>,
 }
 
 /// A unit placed in the world: owner is the schematic device.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PlacedUnit {
+    /// Schematic device carrying this unit's current.
     pub owner: DeviceId,
+    /// World centre x, nm.
     pub x: i32,
+    /// World centre y, nm.
     pub y: i32,
+    /// Electrical weight ([`Unit::weight`]).
     pub weight: i64,
+    /// World S→D direction, each component in `{-1, 0, 1}`.
     pub phi: (i8, i8),
     /// LOD stress term `1/(SA+L/2) + 1/(SB+L/2)`, 1/µm; `NaN` = unknown.
     pub lod: f32,
 }
 
 impl UnitLib {
-    /// Build from each cell's variants (`(bbox, units)` per alternative) and
-    /// each cell's member devices (`members[cell][owner]`).
+    /// Builds from each cell's variants (`(bbox, units)` per alternative, cell
+    /// `i` being the `i`-th item of `variants`) and each cell's member devices
+    /// (`members[cell][owner]`). A unit whose `owner` is not a member is
+    /// dropped. A unit's LOD term is known only when both `sa` and `sb` are
+    /// positive.
+    ///
+    /// # Panics
+    /// If `variants` yields more cells than `members` has rows.
     #[must_use]
     pub fn build<'a>(
         cell_of: Vec<u16>,
@@ -94,14 +117,19 @@ impl UnitLib {
         lib
     }
 
-    /// No unit data: rules must fall back or report unknown.
+    /// Returns `true` with no unit data: rules must fall back or report unknown.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.owner.is_empty()
     }
 
-    /// Units of `cell`'s current variant, in world coordinates. Empty when the
-    /// cell or variant is unknown.
+    /// Units of `cell`'s current variant (`l.variant[cell]`, `0` when absent),
+    /// turned by `l.orient[cell]` and placed with the same stamp as
+    /// [`crate::place_macro`], in world coordinates. Empty when the cell or
+    /// variant is unknown to the library.
+    ///
+    /// # Panics
+    /// If the library knows `cell` but `l.x`/`l.y`/`l.hw`/`l.hh` are shorter.
     pub fn placed(&self, l: &Layout, cell: usize) -> impl Iterator<Item = PlacedUnit> + '_ {
         let v = l.variant.get(cell).copied().unwrap_or(0) as usize;
         let slot = (cell < self.slot0.len().saturating_sub(1))
@@ -121,7 +149,8 @@ impl UnitLib {
         })
     }
 
-    /// Every placed unit owned by `device`.
+    /// Every placed unit owned by `device`, in its cell's unit order. Empty
+    /// when the device has no cell.
     pub fn of_device(&self, l: &Layout, device: DeviceId) -> impl Iterator<Item = PlacedUnit> + '_ {
         let cell = self.cell_of.get(device.0 as usize).map_or(usize::MAX, |&c| c as usize);
         self.placed(l, cell).filter(move |u| u.owner == device)

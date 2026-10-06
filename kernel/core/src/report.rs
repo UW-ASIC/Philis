@@ -14,14 +14,16 @@ pub struct Report {
 }
 
 impl Report {
-    /// `(|V|, Σ Θ residual, PEX)`; derived tuple ordering gives tier precedence.
+    /// `(|V|, Σ Θ margin, PEX)`, lower is better; compare with tuple ordering
+    /// (`partial_cmp`, the floats may be NaN) so the tiers take precedence in
+    /// order and are never summed.
     #[must_use]
     pub fn lex(&self) -> (usize, f64, f32) {
         let theta = self.budget_violations.iter().map(|v| v.margin as f64).sum();
         (self.hard_violations.len(), theta, self.cost)
     }
 
-    /// Both violation tiers empty.
+    /// Returns `true` when both violation tiers are empty (cost is ignored).
     #[must_use]
     pub fn feasible(&self) -> bool {
         self.hard_violations.is_empty() && self.budget_violations.is_empty()
@@ -39,7 +41,7 @@ pub struct Violation {
 
 impl Violation {
     /// Prefix of a stage row that restates a whole rule batch; the epoch key
-    /// counts those per rule from `metadata`, not per row.
+    /// counts those per rule, not per row.
     pub const BATCH: &'static str = "batch:";
 
     /// `rule` starts with [`Violation::BATCH`].
@@ -50,7 +52,10 @@ impl Violation {
 
     /// From a residual normalised by its own budget (`0.5` = 50% over), stored
     /// in milli-budgets. Every stage must use this so Θ sums in one unit; `ceil`
-    /// so a real violation never rounds to `0`.
+    /// so a real violation never rounds to `0`. A non-finite residual (NaN, ∞)
+    /// means the requirement could not be evaluated and saturates to
+    /// `i64::MAX`, so it is never mistaken for a pass; a residual `≤ 0` gives
+    /// margin `0`.
     #[must_use]
     pub fn from_residual(rule: impl Into<String>, residual: f64) -> Self {
         Self { rule: rule.into(), margin: (residual * 1000.0).ceil() as i64 }

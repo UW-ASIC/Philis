@@ -8,6 +8,7 @@ use crate::layout::Layout;
 /// injects; downstream cannot tell them apart.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Macro {
+    /// Drawn geometry, local frame.
     pub shapes: Vec<Shape>,
     /// Routing entry points.
     pub pins: Vec<Pin>,
@@ -30,10 +31,11 @@ pub struct Macro {
 }
 
 impl Macro {
-    /// Grow `bbox` so its lower-left corner is on `lattice` and both extents are
+    /// Grows `bbox` so its lower-left corner is on `lattice` and both extents are
     /// multiples of `2·lattice`: then `hw`, `hh` and every placed corner are
-    /// lattice multiples (`place_macro` stamps the corner at `x − hw`). Shapes and
-    /// pins are unchanged; idempotent.
+    /// lattice multiples (`place_macro` stamps the corner at `x − hw`). The new
+    /// bbox contains the old one. Shapes and pins are unchanged; idempotent. A
+    /// `lattice` below 1 reads as 1.
     pub fn align_bbox(&mut self, lattice: i32) {
         let l = lattice.max(1);
         let (x0, y0) = (self.bbox.x.div_euclid(l) * l, self.bbox.y.div_euclid(l) * l);
@@ -46,9 +48,11 @@ impl Macro {
 /// One extracted device member `owner` drew, as LVS will see it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Drawn {
+    /// Member index within the cell's group (the `d{owner}:` pin prefix).
     pub owner: u8,
     /// Filled by the caller when it binds pins (`cellgen::bind_pins`).
     pub device: Option<crate::ids::DeviceId>,
+    /// LVS device class of the extracted body.
     pub kind: DrawnKind,
     /// Terminal nodes in the LVS reference's pin order: R/C/D `[P, N]`; BJT
     /// `cellgen::BJT_PINS`, `[C, B, E]` (the order `cellgen::reference` uses, one const so
@@ -57,37 +61,53 @@ pub struct Drawn {
     /// Drawn body, nm: resistor segment W×L, MIM plate W×L, diode junction
     /// W×L, emitter W×L.
     pub w: i32,
+    /// Drawn body length, nm (see [`Drawn::w`]).
     pub l: i32,
 }
 
+/// The device class a [`Drawn`] body extracts as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DrawnKind {
+    /// A resistor segment.
     Resistor,
+    /// A MIM unit plate.
     Capacitor,
+    /// A diode junction.
     Diode,
+    /// An NPN unit.
     Npn,
+    /// A PNP unit.
     Pnp,
 }
 
 /// A member pin by terminal name, or a node internal to the macro.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Node {
+    /// No terminal in this position (two-terminal bodies leave slot 2 unused).
     Unused,
+    /// The owner member's terminal with this name (`"P"`, `"N"`, `"C"`, …).
     Pin(&'static str),
+    /// A net private to the macro, numbered within it.
     Internal(u16),
 }
 
 /// A region foreign metal must respect, and why.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Keepout {
+    /// Protected region, nm (local frame until stamped).
     pub rect: Rect,
+    /// What the region protects.
     pub why: KeepWhy,
 }
 
+/// What a [`Keepout`] protects, and for which member (`owner`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeepWhy {
+    /// A MOS gate (foreign metal over it adds gate coupling).
     Gate { owner: u8 },
+    /// A resistor body (foreign metal over it shifts its value).
     ResistorBody { owner: u8 },
+    /// A capacitor plate (foreign metal over it adds parasitic capacitance).
     CapPlate { owner: u8 },
 }
 
@@ -109,11 +129,15 @@ pub struct Figures {
 /// per dummy with those nets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Dummy {
+    /// Member whose diffusion carries the dummy.
     pub owner: u8,
+    /// `true` for a PMOS dummy, `false` for NMOS.
     pub pmos: bool,
+    /// The member terminal the near side ties to: `"S"` or `"D"`.
     pub edge: &'static str,
-    /// Channel width and length, nm.
+    /// Channel width, nm.
     pub w: i32,
+    /// Channel length, nm.
     pub l: i32,
 }
 
@@ -121,7 +145,8 @@ pub struct Dummy {
 /// centre the turned bbox on `(l.x[i], l.y[i])` using `l.hw/hh` (the layout is a
 /// centre + half-extent model). Turning about the bbox corner keeps the result
 /// on-grid. `i` past the layout (guard rings) means already absolute: returned
-/// unchanged.
+/// unchanged. `units`, `dummies`, `drawn` and `figures` are copied unstamped.
+/// Allocates a new macro.
 #[must_use]
 pub fn place_macro(m: &Macro, l: &Layout, i: usize) -> Macro {
     if i >= l.x.len() {
@@ -143,6 +168,10 @@ pub fn place_macro(m: &Macro, l: &Layout, i: usize) -> Macro {
 /// `r` (in the macro's local frame, whose bbox is `bbox`) as cell `i` of `l`
 /// places it: turned by `l.orient[i]`, then shifted so the turned bbox's
 /// lower-left lands on `(x − hw, y − hh)`. The one stamp [`place_macro`] applies.
+/// A missing `l.orient[i]` reads as [`crate::Orient::R0`].
+///
+/// # Panics
+/// If `i` is past `l.x`, `l.y`, `l.hw` or `l.hh`.
 #[must_use]
 pub fn place_rect(bbox: Rect, r: Rect, l: &Layout, i: usize) -> Rect {
     let o = l.orient.get(i).copied().unwrap_or_default();
@@ -151,7 +180,7 @@ pub fn place_rect(bbox: Rect, r: Rect, l: &Layout, i: usize) -> Rect {
     Rect { x: r.x + l.x[i] - l.hw[i] - anchor.x, y: r.y + l.y[i] - l.hh[i] - anchor.y, w: r.w, h: r.h }
 }
 
-/// [`place_macro`] over the whole table.
+/// [`place_macro`] over the whole table: macro `i` is stamped at device `i`.
 #[must_use]
 pub fn place_macros(macros: &[Macro], l: &Layout) -> Vec<Macro> {
     macros.iter().enumerate().map(|(i, m)| place_macro(m, l, i)).collect()

@@ -5,26 +5,36 @@ use crate::ids::{DeviceId, NetId};
 /// A device's electrical kind — routes it to the right `cells` generator.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeviceKind {
+    /// n-channel MOSFET; terminals G, D, S, B.
     Nmos,
+    /// p-channel MOSFET; terminals G, D, S, B.
     Pmos,
+    /// Two-terminal resistor.
     Resistor,
+    /// Two-terminal capacitor.
     Capacitor,
     /// BJTs split by polarity: marker, well and LVS device class all differ.
     Npn,
+    /// PNP bipolar transistor (see [`DeviceKind::Npn`]).
     Pnp,
+    /// Junction diode.
     Diode,
+    /// Inductor.
     Inductor,
 }
 
 /// One device instance from the netlist.
 #[derive(Clone)]
 pub struct Device {
+    /// Hierarchical instance name (`X1/X3/M2`).
     pub name: String,
+    /// Electrical kind.
     pub kind: DeviceKind,
     /// The SPICE model name as written (`sky130_fd_pr__res_high_po`, …):
     /// selects the drawn construction and the LVS recogniser. Empty = none.
     pub model: String,
-    /// Terminal name → net it connects to (e.g. `"G" -> NetId`).
+    /// Terminal name → net it connects to (e.g. `"G" -> NetId`), in the
+    /// kind's terminal order (FETs: G, D, S, B).
     pub terminals: Vec<(String, NetId)>,
     /// Parameters (W, L, multiplier…), name → value in `nm`/PDK units. A MOS
     /// `w` is the SPICE instance total over its `nf` fingers ([`MosSize`]).
@@ -37,22 +47,32 @@ pub struct Device {
 /// instance's gate width, split over `nf` fingers; `m` instances in parallel.
 /// Layout, the LVS reference, the annotator and the simulator card all read
 /// this one record, so the drawn channel is the simulated one.
+///
+/// Invariant (guaranteed by [`Device::mos_size`]): `w_total_nm`, `l_nm` > 0
+/// and `nf`, `m` ≥ 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MosSize {
+    /// Gate width of one instance, summed over its fingers, nm.
     pub w_total_nm: i64,
+    /// Drawn gate length, nm.
     pub l_nm: i64,
+    /// Fingers per instance (≥ 1).
     pub nf: u32,
+    /// Parallel instances (≥ 1).
     pub m: u32,
 }
 
 impl MosSize {
     /// Per-finger width, nm (floor; the < nf nm residue is inside LVS's 2 % tolerance).
+    ///
+    /// # Panics
+    /// If `nf == 0` (outside the invariant).
     #[must_use]
     pub fn w_finger_nm(self) -> i64 {
         self.w_total_nm / i64::from(self.nf)
     }
 
-    /// Drawn fingers = nf·m.
+    /// Drawn fingers = nf·m, saturating at `u32::MAX`.
     #[must_use]
     pub fn fingers(self) -> u32 {
         self.nf.saturating_mul(self.m)
@@ -94,12 +114,14 @@ impl Device {
 /// One net (a wire connecting terminals).
 #[derive(Clone)]
 pub struct Net {
+    /// Hierarchical net name (`X1/X3/out`; top-level nets bare).
     pub name: String,
 }
 
 /// A group of devices the annotator has decided belong together (a diff pair,
 /// current mirror, cascode). The unit that `cells` draws and the placer places.
 pub struct DeviceGroup {
+    /// Member devices.
     pub devices: Vec<DeviceId>,
 }
 
@@ -111,7 +133,9 @@ pub struct DeviceGroup {
 /// only; a netlist built elsewhere leaves them empty (every device top level).
 #[derive(Clone, Default)]
 pub struct Netlist {
+    /// Every device, by [`DeviceId`].
     pub devices: Vec<Device>,
+    /// Every net, by [`NetId`].
     pub nets: Vec<Net>,
     /// Top sub-circuit ports in declaration order (empty: no .subckt around the top).
     pub ports: Vec<NetId>,

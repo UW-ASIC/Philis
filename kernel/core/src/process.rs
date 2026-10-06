@@ -4,6 +4,10 @@
 
 use crate::LayerId;
 
+/// A PDK as generators see it: layers by role, rules by name, all lengths in
+/// nm. Every optional query defaults to "not characterised" (`None`), so a
+/// minimal implementation supplies only [`Process::layer`],
+/// [`Process::rule`] and [`Process::grid`].
 pub trait Process {
     /// Layer for a role; `None` when this process omits that (optional) layer.
     fn layer(&self, role: &str) -> Option<LayerId>;
@@ -105,9 +109,12 @@ pub trait Process {
 /// tier arrays.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum MatchClass {
+    /// Loosest matching (tier index 0).
     Minimal = 0,
+    /// Typical precision analog (tier index 1).
     #[default]
     Moderate = 1,
+    /// Tightest matching (tier index 2).
     Exceptional = 2,
 }
 
@@ -119,7 +126,9 @@ pub enum MatchClass {
 /// there is no plateau to budget.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum SubstrateKind {
+    /// Uniform bulk substrate: isolation keeps improving with distance.
     Bulk,
+    /// Lightly doped epi on a low-resistivity p+ substrate: isolation saturates.
     EpiOnLowRes,
     /// The deck does not say: isolation reads unknown.
     #[default]

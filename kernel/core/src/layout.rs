@@ -41,7 +41,8 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Area of the box enclosing every cell, nm² (`0` with no cells).
+    /// Area of the box enclosing every cell's footprint, nm² (`0` with no
+    /// cells). O(n).
     #[must_use]
     pub fn footprint_nm2(&self) -> f64 {
         let n = self.x.len();
@@ -67,7 +68,9 @@ impl Layout {
         a.sqrt().max(1.0) as f32
     }
 
-    /// `(cx, cy, hw, hh)` of a target, nm; a group is its members' bounding box.
+    /// `(cx, cy, hw, hh)` of a target, nm; a group is the smallest
+    /// centre/half-extent box enclosing every member's footprint (an odd-nm
+    /// span rounds the box outward by up to 1 nm). O(members).
     ///
     /// # Panics
     /// On an out-of-range target or an empty group.
@@ -95,6 +98,10 @@ impl Layout {
         }
     }
 
+    /// Centre `(cx, cy)` of [`Layout::bbox`], nm.
+    ///
+    /// # Panics
+    /// As [`Layout::bbox`].
     #[inline]
     #[must_use]
     pub fn centre(&self, t: Target) -> (i32, i32) {
@@ -102,7 +109,10 @@ impl Layout {
         (cx, cy)
     }
 
-    /// Half-extents `(hw, hh)`.
+    /// Half-extents `(hw, hh)` of [`Layout::bbox`], nm.
+    ///
+    /// # Panics
+    /// As [`Layout::bbox`].
     #[inline]
     #[must_use]
     pub fn extent(&self, t: Target) -> (i32, i32) {
@@ -118,7 +128,7 @@ impl Layout {
         self.axis.get(a.0 as usize).copied().unwrap_or_else(|| self.centre_x_estimate())
     }
 
-    /// Mean device centre x, nm (`0` when empty).
+    /// Mean device centre x, nm, truncated toward zero (`0` when empty).
     #[inline]
     #[must_use]
     pub fn centre_x_estimate(&self) -> i32 {
@@ -130,6 +140,10 @@ impl Layout {
 
     /// Debug-only structural check: every column device-length, extents
     /// non-negative, group members in range. `ctx` names the producing stage.
+    /// A no-op in release builds.
+    ///
+    /// # Panics
+    /// In debug builds, on the first violated invariant, naming `ctx`.
     #[inline]
     pub fn debug_check(&self, ctx: &str) {
         if !cfg!(debug_assertions) {
@@ -157,8 +171,12 @@ impl Layout {
         }
     }
 
-    /// Debug-only legality check: no two device footprints overlap at all
-    /// (stacked macros become merged nets / doubled W in LVS).
+    /// Debug-only legality check: [`Layout::debug_check`], then no two device
+    /// footprints overlap with positive area (abutment is legal; stacked macros
+    /// become merged nets / doubled W in LVS). O(n²); a no-op in release builds.
+    ///
+    /// # Panics
+    /// In debug builds, on the first violation, naming `ctx` and the pair.
     #[inline]
     pub fn debug_check_placed(&self, ctx: &str) {
         if !cfg!(debug_assertions) {
@@ -175,7 +193,10 @@ impl Layout {
     }
 
     /// Euclidean edge-to-edge gap between two targets' boxes, nm; `0` when they
-    /// touch or overlap.
+    /// touch or overlap. Symmetric.
+    ///
+    /// # Panics
+    /// As [`Layout::bbox`].
     #[inline]
     #[must_use]
     pub fn edge_gap(&self, a: Target, b: Target) -> f32 {

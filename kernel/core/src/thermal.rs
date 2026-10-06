@@ -13,11 +13,13 @@ use crate::layout::Layout;
 /// rises; read `k` from the PDK when it grows a thermal section.
 pub const K_SI_W_PER_M_K: f32 = 148.0;
 
-/// `ΔT[mK] = P[µW]·1e6 / (2π·k·r[nm])`.
+/// Unit factor: `ΔT[mK] = P[µW]·1e6 / (2π·k[W/(m·K)]·r[nm])`.
 const SCALE_UW_NM_TO_MK: f32 = 1.0e6;
 
 /// Hastings eq. 5.6: the rise of a uniform W×L source over its own area,
-/// `ln(4L/W)·P/(π·k·L)` (L = the longer side), mK. Sides floored at 1 nm.
+/// `ln(4L/W)·P/(π·k·L)` (L = the longer side), mK, for `p_uw` µW on a
+/// `w_nm`×`l_nm` footprint (either order) and conductivity `k_w_per_m_k`.
+/// Sides floored at 1 nm, so it is always finite for `k > 0`. Linear in power.
 #[must_use]
 pub fn self_rise_mc(p_uw: i32, w_nm: i32, l_nm: i32, k_w_per_m_k: f32) -> f32 {
     let (w, l) = (w_nm.min(l_nm).max(1) as f32, w_nm.max(l_nm).max(1) as f32);
@@ -33,8 +35,9 @@ pub fn rise_bound_mc(p_uw: &[i32], footprint_nm: &[(i32, i32)], k_w_per_m_k: f32
     p_uw.iter().zip(footprint_nm).map(|(&p, &(w, l))| self_rise_mc(p, w, l, k_w_per_m_k)).sum()
 }
 
-/// Temperature rise per device, milli-°C. `power_uw[j]` (missing = 0) is
-/// device `j`'s dissipation. O(n²).
+/// Temperature rise per device at its centre, milli-°C, rounded. `power_uw[j]`
+/// (missing = 0) is device `j`'s dissipation; entries past the layout are
+/// ignored. O(n²); allocates the result.
 #[must_use]
 pub fn rises_mc(l: &Layout, power_uw: &[i32]) -> Vec<i32> {
     if power_uw.iter().all(|&p| p == 0) {
@@ -74,7 +77,8 @@ fn rise_at(l: &Layout, power_uw: &[i32], x: i32, y: i32) -> f32 {
 }
 
 impl Layout {
-    /// Recompute [`Layout::temp_mc`] from `power_uw` and current positions.
+    /// Recomputes [`Layout::temp_mc`] from `power_uw` and current positions
+    /// ([`rises_mc`]). O(n²).
     pub fn refresh_temps(&mut self) {
         self.temp_mc = rises_mc(self, &self.power_uw);
     }
