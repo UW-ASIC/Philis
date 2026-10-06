@@ -249,7 +249,8 @@ pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
     let mut total = 0.0f64;
     for ni in 0..nets.count() {
         let (x0, x1, y0, y1) = nets.pin_bbox(ni, l);
-        total += f64::from(nets.weight[ni]) * f64::from((x1 - x0) + (y1 - y0));
+        let span = (f64::from(x1) - f64::from(x0)) + (f64::from(y1) - f64::from(y0));
+        total += f64::from(nets.weight[ni]) * span;
     }
     total
 }
@@ -261,11 +262,8 @@ pub fn hpwl(nets: &Nets, l: &Layout) -> f64 {
 pub fn encroach(l: &Layout, a: usize, b: usize, clearance: i32) -> f64 {
     let ox = (l.hw[a] + l.hw[b] + clearance) - (l.x[a] - l.x[b]).abs();
     let oy = (l.hh[a] + l.hh[b] + clearance) - (l.y[a] - l.y[b]).abs();
-    if ox > 0 && oy > 0 {
-        f64::from(ox) * f64::from(oy)
-    } else {
-        0.0
-    }
+    // Branchless: a non-positive axis zeroes the product.
+    f64::from(ox.max(0)) * f64::from(oy.max(0))
 }
 
 /// [`encroach`] summed over all pairs; `+0.0` with fewer than two cells (an
@@ -412,7 +410,8 @@ pub fn choose_variants(macros: &[Macro], variants: &[VariantSpace], variant: &[u
         .map(|(i, m)| {
             variants
                 .get(i)
-                .and_then(|v| v.alternatives.get(variant[i] as usize))
+                .zip(variant.get(i))
+                .and_then(|(v, &k)| v.alternatives.get(usize::from(k)))
                 .unwrap_or(m)
                 .clone()
         })
@@ -426,12 +425,12 @@ pub fn choose_variants(macros: &[Macro], variants: &[VariantSpace], variant: &[u
 /// whose result fits `i32`.
 #[must_use]
 pub fn canvas_side(hw: &[i32], hh: &[i32], utilization: f32, grid: i32) -> i32 {
-    let total: f64 = hw.iter().zip(hh).map(|(&w, &h)| f64::from(2 * w) * f64::from(2 * h)).sum();
-    let area_side = (total / f64::from(utilization.clamp(0.05, 0.95))).sqrt().ceil() as i32;
-    let largest = hw.iter().zip(hh).map(|(&w, &h)| (2 * w).max(2 * h)).max().unwrap_or(1000);
+    let total: f64 = hw.iter().zip(hh).map(|(&w, &h)| 2.0 * f64::from(w) * 2.0 * f64::from(h)).sum();
+    let area_side = (total / f64::from(utilization.clamp(0.05, 0.95))).sqrt().ceil() as i64;
+    let largest = hw.iter().zip(hh).map(|(&w, &h)| 2 * i64::from(w.max(h))).max().unwrap_or(1000);
     let side = area_side.max(largest).max(1);
-    let g = grid.max(1);
-    (side + g - 1) / g * g
+    let g = i64::from(grid.max(1));
+    i32::try_from((side + g - 1) / g * g).unwrap_or(i32::MAX)
 }
 
 /// Initial layout: devices jittered within `0.15·side` of the die centre
@@ -482,6 +481,9 @@ pub fn clamp_to_die(c: i32, half: i32, side: i32) -> i32 {
 #[inline]
 #[must_use]
 pub fn snap(v: i32, grid: i32) -> i32 {
-    let g = grid.max(1);
-    ((v as f32 / g as f32).round() as i32) * g
+    let g = i64::from(grid.max(1));
+    let v = i64::from(v);
+    // Round the magnitude half-up, then restore the sign: ties away from zero.
+    let q = (2 * v.abs() + g) / (2 * g);
+    (v.signum() * q * g).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }

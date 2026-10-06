@@ -1,0 +1,43 @@
+{
+  "unit": "gp",
+  "commits": [
+    "97132d3 cleanup(gp): step 1 — docs on every pub item and tuning constant, named spacing role indices with a const check against ROLES, Nets::pin_bbox and pair_sum fold duplicated loops",
+    "4a88640 cleanup(gp): step 2 — corner-case tests for every gp function",
+    "cleanup(gp): step 3 — overflow-free hpwl/snap/round_up/gap/keep/halo/canvas_side, choose_variants tolerates a short assignment, NaN-safe dual step, finite net weights, O(b log b) price keys, O(pairs) axis update, branchless encroach"
+  ],
+  "testsAdded": 70,
+  "flaggedFixed": [
+    "mechanics::hpwl subtracted pin extremes in i32 (debug overflow panic for spans > i32::MAX); now in f64",
+    "mechanics::snap rounded through f32 (wrong past 2^24 nm, e.g. 16_777_217 or 2e9); now exact i64 arithmetic, ties away from zero, clamped to the i32 range",
+    "mechanics::choose_variants indexed variant[i] and panicked on a short assignment; now falls back to the base macro",
+    "mechanics::canvas_side computed 2*w and the grid round-up in i32; now i64, saturating at i32::MAX",
+    "spacing::SpacingTable::gap / keep / halo subtracted insets unsaturated (overflow with insets near i32::MAX, which dp's sp.rs can produce via saturating_add); now saturating_sub",
+    "spacing::round_up overflowed for v near i32::MAX (max_gap with a huge fallback); now i64 with the largest fitting multiple",
+    "Prices::settle let a NaN criticality reach lambda (clamp passes NaN through); now g = 0 (price held)",
+    "Prices::settle steps += 1 could overflow; now saturating",
+    "net_weights produced NaN for an infinite sensitivity (inf/inf); non-finite sensitivities are ignored and the mean is taken in f64",
+    "keys() was O(b^2) in budget batches; now one pass with a per-kind ordinal counter",
+    "place re-filtered every mirror pair per axis per iteration (O(axes*pairs)); now pairs validated once and summed per axis in one pass"
+  ],
+  "flaggedOpen": [
+    "No fearless_simd: gp's hot cost is 4n dyn analog_cost evaluations per iteration (finite-difference gradient), which is not a lane loop; the per-cell momentum/density loops run over tens to hundreds of cells and the O(n^2) pair sums are branchy profile lookups. Revisit if a profile shows the momentum update or pair sums hot at thousands of cells",
+    "SplitMix64::below uses modulo (bias <= n/2^64); negligible for cell counts, kept for seed compatibility",
+    "PlaceRules::encroach early-out adds hw_a + hw_b + far in i32; only overflows with a far gap near i32::MAX",
+    "Prices::bind doc still states O(b^2) (now O(b log b)); doc comments are frozen in step 3",
+    "Tests not compiled in this run (no-build rule); the integration agent must run cargo test -p gp"
+  ],
+  "seamRequests": [
+    {
+      "seam": "placement",
+      "item": "gp::mechanics::analog_cost vs augmented_cost",
+      "change": "Decide one priced objective: analog_cost prices the unclamped residual (a slack budget is rewarded), augmented_cost clamps at 0 and adds the rho term; dp and gp use different ones",
+      "why": "Two objectives for the same budget prices can disagree on whether moving into slack helps"
+    }
+  ],
+  "risks": [
+    "snap now exact past 2^24: any caller that relied on f32 rounding of huge coordinates sees different (correct) values",
+    "net_weights now computes in f64 then casts: weights may differ from the f32 path in the last ulp, which can shift seeded placements slightly",
+    "choose_variants no longer panics on a short assignment; a caller bug passing a short slice now silently uses base macros",
+    "Relayed user request mentioned merging branches; this unit worked only on main and created no branches, per the computed task"
+  ]
+}

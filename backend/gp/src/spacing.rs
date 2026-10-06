@@ -268,7 +268,7 @@ impl SpacingTable {
         let Some(c) = m.matched.filter(|_| m.set.is_none() || m.set != o.set) else { return 0 };
         let need = |d: usize, r: usize, k: i32| {
             let on = em.present & (1 << d) != 0 && eo.present & (1 << r) != 0 && k > 0;
-            if on { k - em.inset[d] - eo.inset[r] } else { 0 }
+            if on { k.saturating_sub(em.inset[d]).saturating_sub(eo.inset[r]) } else { 0 }
         };
         let (w, p) = (self.wpe[c as usize], self.foreign_poly[c as usize]);
         need(DIFF_OUT, NWELL, w).max(need(DIFF_IN, POLY, p)).max(need(DIFF_OUT, POLY, p))
@@ -298,7 +298,7 @@ impl SpacingTable {
                 if r <= 0 {
                     continue;
                 }
-                let need = r - ea.inset[i] - eb.inset[j];
+                let need = r.saturating_sub(ea.inset[i]).saturating_sub(eb.inset[j]);
                 g_all = g_all.max(need);
                 let merge = i == j
                     && MERGEABLE.contains(&i)
@@ -331,7 +331,7 @@ impl SpacingTable {
                     _ => 0,
                 };
                 let reach = if i == OTHER { self.fallback } else { self.rule[i][..OTHER].iter().copied().max().unwrap_or(0).max(keep) };
-                h = h.max(reach - e.inset[i]);
+                h = h.max(reach.saturating_sub(e.inset[i]));
             }
         }
         h
@@ -341,8 +341,11 @@ impl SpacingTable {
 /// Smallest multiple of `lattice` (`≤ 0` reads as 1) that is ≥ `v`,
 /// saturating below `i32::MAX`.
 fn round_up(v: i32, lattice: i32) -> i32 {
-    let l = lattice.max(1);
-    (v + l - 1).div_euclid(l) * l
+    let l = i64::from(lattice.max(1));
+    let up = (i64::from(v) + l - 1).div_euclid(l) * l;
+    // Past i32::MAX: the largest multiple that fits.
+    let up = if up > i64::from(i32::MAX) { up - l } else { up };
+    up as i32
 }
 
 /// The role a shape on `layer` plays, by first match over [`DECK_ROLE`];

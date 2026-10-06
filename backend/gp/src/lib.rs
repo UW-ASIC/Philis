@@ -131,6 +131,8 @@ impl Prices {
             } else {
                 b.worst_usage(l).map_or(-(1.0 - b.criticality(l)), |u| (u - 1.0).min(0.0))
             };
+            // A NaN criticality would otherwise reach λ through the clamp.
+            let g = if g.is_nan() { 0.0 } else { g };
             let p = self.priced.entry(key).or_insert(Price {
                 lambda: 0.0,
                 rho: RHO_FLOOR,
@@ -151,7 +153,7 @@ impl Prices {
             }
         }
         self.drift = drift_sq.sqrt();
-        self.steps += 1;
+        self.steps = self.steps.saturating_add(1);
         self.bind(reqs);
     }
 
@@ -185,17 +187,17 @@ impl Prices {
 
 /// [`PriceKey`] of every budget batch, positionally.
 fn keys(reqs: &Requirements<Layout>) -> Vec<PriceKey> {
-    (0..reqs.budget.len())
-        .map(|bi| {
-            if let Some(m) = reqs.budget[bi].meta() {
+    let mut seen: BTreeMap<&'static str, u32> = BTreeMap::new();
+    reqs.budget
+        .iter()
+        .map(|b| {
+            if let Some(m) = b.meta() {
                 return PriceKey::Id(m.id);
             }
-            let kind = reqs.budget[bi].kind();
-            let ord = reqs.budget[..bi]
-                .iter()
-                .filter(|o| o.meta().is_none() && o.kind() == kind)
-                .count() as u32;
-            PriceKey::Ord(kind, ord)
+            let kind = b.kind();
+            let ord = seen.entry(kind).or_insert(0);
+            *ord += 1;
+            PriceKey::Ord(kind, *ord - 1)
         })
         .collect()
 }
@@ -232,11 +234,13 @@ pub const RAIL_MIN: f32 = 0.1;
 /// over seeds whenever routing changes.
 #[must_use]
 pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr_core::NetId, f32)], current_ua: &[Option<i32>]) -> Vec<f32> {
-    let mut raw: Vec<Option<f32>> = classes.iter().map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f32)).collect();
-    let mut from_perf = vec![0.0f32; raw.len()];
+    // f64 throughout: a sum of finite f32 sensitivities cannot overflow it,
+    // and each weight is then at most the count of weighted nets.
+    let mut raw: Vec<Option<f64>> = classes.iter().map(|c| c.c_budget_af.filter(|&b| b > 0).map(|b| 1.0 / b as f64)).collect();
+    let mut from_perf = vec![0.0f64; raw.len()];
     for &(n, w) in sens {
-        if let Some(s) = from_perf.get_mut(usize::from(n.0)) {
-            *s += w.max(0.0);
+        if let (Some(s), true) = (from_perf.get_mut(usize::from(n.0)), w.is_finite()) {
+            *s += f64::from(w.max(0.0));
         }
     }
     for (r, &s) in raw.iter_mut().zip(&from_perf) {
@@ -245,8 +249,8 @@ pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr
         }
     }
     let rail = |i: usize| matches!(classes[i].class, analog::metadata::NetClass::Supply | analog::metadata::NetClass::Ground);
-    let known: Vec<f32> = raw.iter().enumerate().filter(|&(i, _)| !rail(i)).filter_map(|(_, r)| *r).collect();
-    let mean = known.iter().sum::<f32>() / known.len().max(1) as f32;
+    let (sum, count) = raw.iter().enumerate().filter(|&(i, _)| !rail(i)).filter_map(|(_, r)| *r).fold((0.0f64, 0usize), |(s, k), r| (s + r, k + 1));
+    let mean = sum / count.max(1) as f64;
     let ua = |i: usize| current_ua.get(i).copied().flatten();
     let i_ref = (0..classes.len()).filter(|&i| rail(i)).filter_map(ua).max().unwrap_or(0).max(1) as f32;
     raw.iter()
@@ -254,7 +258,7 @@ pub fn net_weights(classes: &[analog::metadata::NetClassification], sens: &[(pnr
         .map(|(i, r)| match (rail(i), ua(i)) {
             (true, Some(c)) => (c as f32 / i_ref).clamp(RAIL_MIN, 1.0),
             (true, None) => RAIL_UNKNOWN,
-            (false, _) => r.map_or(1.0, |w| w / mean),
+            (false, _) => r.map_or(1.0, |w| (w / mean) as f32),
         })
         .collect()
 }
@@ -334,11 +338,7 @@ impl PlaceRules {
         let (gx, gy) = self.gaps(l, a, b);
         let ox = (l.hw[a] + l.hw[b] + gx) - (l.x[a] - l.x[b]).abs();
         let oy = (l.hh[a] + l.hh[b] + gy) - (l.y[a] - l.y[b]).abs();
-        if ox > 0 && oy > 0 {
-            f64::from(ox) * f64::from(oy)
-        } else {
-            0.0
-        }
+        f64::from(ox.max(0)) * f64::from(oy.max(0))
     }
 
     /// [`Self::encroach`] over all pairs; `+0.0` with fewer than two cells. O(n²).
@@ -445,6 +445,10 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
     for b in &reqs.hard {
         b.mirror_pairs(&mut pairs);
     }
+    // Only pairs whose cells and axis exist steer an axis; filtered once.
+    let n_axis = l.axis.len();
+    pairs.retain(|p| (p.0 as usize) < n && (p.1 as usize) < n && usize::from(p.2) < n_axis);
+    let mut axis_sum = vec![(0i64, 0i64); n_axis];
 
     let mut gx = vec![0.0f32; n];
     let mut gy = vec![0.0f32; n];
@@ -537,13 +541,14 @@ pub fn place(inp: &GpInput, prices: &mut Prices, seed: u64) -> (Layout, Report) 
             l.y[i] = clamp_to_die(l.y[i] + vy[i] as i32, l.hh[i], side);
         }
         // Each block's axis follows its pairs (mean midpoint), so two stages are not pinned to one line.
-        for id in 0..l.axis.len() {
-            let (s, k) = pairs
-                .iter()
-                .filter(|p| usize::from(p.2) == id && (p.0 as usize) < n && (p.1 as usize) < n)
-                .fold((0i64, 0i64), |(s, k), p| (s + i64::from(l.x[p.0 as usize]) + i64::from(l.x[p.1 as usize]), k + 2));
+        axis_sum.fill((0, 0));
+        for &(a, b, id) in &pairs {
+            let e = &mut axis_sum[usize::from(id)];
+            *e = (e.0 + i64::from(l.x[a as usize]) + i64::from(l.x[b as usize]), e.1 + 2);
+        }
+        for (axis, &(s, k)) in l.axis.iter_mut().zip(&axis_sum) {
             if k > 0 {
-                l.axis[id] = snap((s / k) as i32, rules.grid);
+                *axis = snap((s / k) as i32, rules.grid);
             }
         }
         if analog_phi(reqs, &l) > before_phi {
