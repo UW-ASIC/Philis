@@ -18,6 +18,7 @@
 use gdsverify::ingest::deck::{Deck, DeviceKind};
 use gdsverify::ingest::netlist::{Netlist, RefNetId, SubcktId};
 use gdsverify::ingest::{StrId, StrTable};
+use std::collections::HashMap;
 
 /// A schematic device kind, polarity included (recognisers are per-polarity).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,20 +92,24 @@ pub fn build(
     n.subckt_name.push(strings.intern("top"));
 
     // Deterministic net numbering: first-seen order over ports then devices.
+    // The map keeps numbering O(1) per terminal; `net_names` keeps the order.
     let mut net_names: Vec<StrId> = Vec::new();
-    let net_of = |name: &str, strings: &mut StrTable, nets: &mut Vec<StrId>| -> RefNetId {
+    let mut net_index: HashMap<StrId, u32> = HashMap::new();
+    let mut net_of = |name: &str, strings: &mut StrTable| -> RefNetId {
         let id = strings.intern(name);
-        let at = nets.iter().position(|&existing| existing == id).unwrap_or_else(|| {
-            nets.push(id);
-            nets.len() - 1
-        });
-        RefNetId(at as u32)
+        RefNetId(*net_index.entry(id).or_insert_with(|| {
+            net_names.push(id);
+            net_names.len() as u32 - 1
+        }))
     };
 
     n.subckt_port_start.push(0);
     for port in &input.ports {
-        let net = net_of(port, strings, &mut net_names);
-        n.port_net.push(net);
+        let net = net_of(port, strings);
+        // A repeated port name is one port.
+        if !n.port_net.contains(&net) {
+            n.port_net.push(net);
+        }
     }
     n.subckt_port_start.push(n.port_net.len() as u32);
 
@@ -133,7 +138,7 @@ pub fn build(
         n.device_model.push(deck.devices.model[row]);
         n.device_kind.push(deck.devices.kind[row]);
         for name in &dev.terminals[..arity] {
-            let net = net_of(name, strings, &mut net_names);
+            let net = net_of(name, strings);
             n.terminal_net.push(net);
         }
         n.device_terminal_start.push(n.terminal_net.len() as u32);
@@ -179,32 +184,53 @@ fn recogniser_for(dev: &RefDeviceIn, deck: &Deck, strings: &StrTable) -> Option<
         RefKind::Capacitor => (DeviceKind::Capacitor, None),
         RefKind::Diode => (DeviceKind::Diode, None),
     };
-    let hinted = dev.model.as_deref().and_then(|m| strings.get(m));
+    let hint = dev.model.as_deref();
+    let hinted = hint.and_then(|m| strings.get(m));
     let mut fallback = None;
     for row in 0..deck.devices.kind.len() {
         if deck.devices.kind[row] != kind {
             continue;
         }
-        if let Some(want_p) = polarity {
-            let marker = strings.resolve(deck.layers.name(deck.devices.marker[row]));
-            if marker.starts_with('p') != want_p {
-                continue;
-            }
+        // MOS/BJT only: `Some(true)` the marker states the wanted polarity,
+        // `Some(false)` the other one, `None` neither (IHP's `esd_vdd`).
+        let stated = polarity.map(|want_p| {
+            marker_polarity(strings.resolve(deck.layers.name(deck.devices.marker[row]))).map(|p| p == want_p)
+        });
+        if stated == Some(Some(false)) {
+            continue;
         }
         let named = strings.resolve(deck.devices.model[row]);
-        let vendor = dev.model.as_deref().is_some_and(|m| named.ends_with(&format!("__{m}")) || m.ends_with(&format!("__{named}")));
-        if hinted.is_none() && dev.model.is_none() || hinted == Some(deck.devices.model[row]) || vendor {
+        let exact = hinted == Some(deck.devices.model[row])
+            || hint.is_some_and(|m| vendor_suffix(named, m) || vendor_suffix(m, named));
+        // R/C/D rows, or a MOS/BJT row that states its polarity.
+        let typed = stated != Some(None);
+        if exact || (hint.is_none() && typed) {
             return Some(row);
         }
         // The hint names no deck model (yet): a MOS/BJT falls back to the
-        // first match whose marker states its polarity (IHP's `esd_vdd` bjt
+        // first row whose marker states its polarity (IHP's `esd_vdd` bjt
         // is an ESD diode, no NPN a schematic may mean).
-        let marker = strings.resolve(deck.layers.name(deck.devices.marker[row]));
-        if polarity.is_some() && (marker.starts_with('n') || marker.starts_with('p')) {
+        if stated == Some(Some(true)) {
             fallback.get_or_insert(row);
         }
     }
     fallback
+}
+
+/// Returns a device marker's polarity: `Some(true)` P-type, `Some(false)`
+/// N-type, from its first `_`-separated segment led by `p` or `n`; `None`
+/// when no segment is.
+fn marker_polarity(marker: &str) -> Option<bool> {
+    marker.split('_').find_map(|seg| match seg.as_bytes().first() {
+        Some(b'p') => Some(true),
+        Some(b'n') => Some(false),
+        _ => None,
+    })
+}
+
+/// Returns whether `full` is `bare` behind a vendor prefix (`<lib>__<bare>`).
+fn vendor_suffix(full: &str, bare: &str) -> bool {
+    full.strip_suffix(bare).is_some_and(|head| head.ends_with("__"))
 }
 
 #[cfg(test)]

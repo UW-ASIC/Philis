@@ -50,12 +50,15 @@ pub fn build_store(
     strings: &mut StrTable,
     merge: &[u16],
 ) -> Result<(GeometryStore, Provenance), String> {
-    let nm = |v: i32| Dbu::new_unchecked(i64::from(v));
+    let nm = Dbu::new_unchecked;
     let mut builder = GeometryStoreBuilder::with_capacity(shapes.len(), shapes.len() * 4);
     let mut provenance = Provenance::default();
     let mut merged: Vec<(u16, GeometryStoreBuilder)> = Vec::new();
-    for s in shapes {
-        let (x0, y0, x1, y1) = (nm(s.rect.x), nm(s.rect.y), nm(s.rect.x + s.rect.w), nm(s.rect.y + s.rect.h));
+    // A non-positive extent draws nothing; as a polygon it would be degenerate.
+    for s in shapes.iter().filter(|s| s.rect.w > 0 && s.rect.h > 0) {
+        // Widened before adding: `x + w` overflows i32 at the coordinate edge.
+        let (x, y) = (i64::from(s.rect.x), i64::from(s.rect.y));
+        let (x0, y0, x1, y1) = (nm(x), nm(y), nm(x + i64::from(s.rect.w)), nm(y + i64::from(s.rect.h)));
         let (b, l) = if merge.contains(&s.layer.0) {
             let i = merged.iter().position(|(l, _)| *l == s.layer.0).unwrap_or_else(|| {
                 merged.push((s.layer.0, GeometryStoreBuilder::default()));
@@ -88,7 +91,7 @@ pub fn build_store(
     for p in pins {
         let name = strings.intern(&p.name);
         let layer = label_layer(deck, p.layer).ok_or_else(|| format!("pin {}: no label layer names a conductor of layer {}", p.name, p.layer))?;
-        provenance.place_label(Point { x: nm(p.x), y: nm(p.y) }, GvLayerId(layer), name);
+        provenance.place_label(Point { x: nm(i64::from(p.x)), y: nm(i64::from(p.y)) }, GvLayerId(layer), name);
     }
     let (mut store, _) = builder.finish(deck.layers.len());
     derive_layers(&mut store, deck, &provenance, strings).map_err(|e| format!("derived layers: {e}"))?;
@@ -107,13 +110,12 @@ pub fn build_store(
 pub fn label_layer(deck: &Deck, drawn: u16) -> Option<u16> {
     let c = &deck.connectivity;
     let d = GvLayerId(drawn);
-    let rows: Vec<usize> = (0..c.label_layer.len())
-        .filter(|&r| c.label_names[r] == d || deck.layers.operands(c.label_names[r]).contains(&d))
-        .collect();
-    rows.iter()
-        .find(|&&r| c.label_layer[r] == d)
-        .or_else(|| rows.first())
-        .map(|&r| c.label_layer[r].0)
+    let reaches = |r: usize| c.label_names[r] == d || deck.layers.operands(c.label_names[r]).contains(&d);
+    let rows = 0..c.label_layer.len();
+    rows.clone()
+        .find(|&r| reaches(r) && c.label_layer[r] == d)
+        .or_else(|| rows.clone().find(|&r| reaches(r)))
+        .map(|r| c.label_layer[r].0)
 }
 
 #[cfg(test)]

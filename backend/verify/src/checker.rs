@@ -123,6 +123,8 @@ impl Checker {
     /// A device stating fewer terminals than its recogniser's arity; the
     /// checker then holds no reference.
     pub fn set_reference(&mut self, input: &RefInput) -> Result<Vec<(RefKind, Option<String>)>, String> {
+        // Cleared first: a refused reference must not leave a stale one for LVS.
+        self.loaded.reference = None;
         let (netlist, skipped) =
             reference::build(input, &self.loaded.deck, &mut self.loaded.strings)?;
         self.loaded.reference = Some(netlist);
@@ -162,7 +164,8 @@ impl Checker {
         }
         // One object per net: gdsverify refuses a net listed twice.
         let mut by_net: std::collections::BTreeMap<&str, serde_json::Map<String, serde_json::Value>> = std::collections::BTreeMap::new();
-        for (net, ua) in intent.currents.iter().filter(|(_, ua)| *ua > 0.0) {
+        // `> 0.0` alone passes +inf, which serde_json writes as `null`.
+        for (net, ua) in intent.currents.iter().filter(|(_, ua)| *ua > 0.0 && ua.is_finite()) {
             by_net.entry(net).or_default().insert("budget_current_ua".into(), serde_json::json!(ua));
         }
         for (net, mv) in intent.max_drop_mv.iter().filter(|(_, mv)| *mv > 0.0 && mv.is_finite()) {
@@ -242,20 +245,24 @@ impl Checker {
         let rules: Vec<StrId> =
             self.loaded.deck.rules.spec.iter().filter(|s| kinds.contains(&s.kind)).map(|s| s.id).collect();
         let v = &self.out.violations;
-        let exempt = |i: usize| {
-            rules.contains(&v.rule[i])
-                && self.extracted.ports.name_of(self.extracted.nets.net_of(v.shape_a[i])).is_some_and(|name| {
-                    self.external.as_ref().is_none_or(|e| e.contains(&name))
-                })
-        };
-        if !(0..v.len()).any(exempt) {
+        // One pass decides each row (the port lookup is the costly part).
+        let exempt: Vec<bool> = (0..v.len())
+            .map(|i| {
+                rules.contains(&v.rule[i])
+                    && self.extracted.ports.name_of(self.extracted.nets.net_of(v.shape_a[i])).is_some_and(|name| {
+                        self.external.as_ref().is_none_or(|e| e.contains(&name))
+                    })
+            })
+            .collect();
+        if !exempt.contains(&true) {
             return;
         }
         let mut kept = Violations::default();
-        for i in (0..v.len()).filter(|&i| !exempt(i)) {
-            kept.push(v.get(i));
-        }
-        for i in (0..v.len()).filter(|&i| exempt(i)) {
+        for (i, &is_exempt) in exempt.iter().enumerate() {
+            if !is_exempt {
+                kept.push(v.get(i));
+                continue;
+            }
             summary.violations -= 1;
             match v.severity[i] {
                 Severity::Error => summary.errors -= 1,

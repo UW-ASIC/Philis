@@ -335,7 +335,9 @@ pub const NON_MOS_VALUES: &str = "lvs.parameter_mismatch(non-MOS values)";
 fn defer_chip_level(checker: &mut Checker, shapes: &[Shape]) {
     let (x0, y0, x1, y1) = shapes.iter().fold((i64::MAX, i64::MAX, i64::MIN, i64::MIN), |(a, b, c, d), s| {
         let r = s.rect;
-        (a.min(i64::from(r.x)), b.min(i64::from(r.y)), c.max(i64::from(r.x + r.w)), d.max(i64::from(r.y + r.h)))
+        let (x, y) = (i64::from(r.x), i64::from(r.y));
+        // Widened before adding: `r.x + r.w` overflows i32 at the coordinate edge.
+        (a.min(x), b.min(y), c.max(x + i64::from(r.w)), d.max(y + i64::from(r.h)))
     });
     if x1 > x0 && y1 > y0 {
         checker.defer_density_wider_than(x1 - x0, y1 - y0);

@@ -160,7 +160,7 @@ pub const KEYS: &[Key] = &[
 
 /// Returns the registry row for `name`.
 fn key(name: &str) -> Option<&'static Key> {
-    KEYS.iter().find(|k| k.name == name)
+    KEYS.binary_search_by(|k| k.name.cmp(name)).ok().map(|i| &KEYS[i])
 }
 
 /// Returns every problem with a sidecar's `cell` object at once, one

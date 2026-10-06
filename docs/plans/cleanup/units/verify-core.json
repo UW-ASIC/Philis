@@ -1,0 +1,38 @@
+{
+  "unit": "verify-core",
+  "commits": [
+    "435584f cleanup(verify-core): step 1",
+    "bde0155 cleanup(verify-core): step 2",
+    "cleanup(verify-core): step 3 (this commit)"
+  ],
+  "testsAdded": 63,
+  "flaggedFixed": [
+    "checker::set_reference: a refused reference left the previous one installed, so LVS compared against a stale schematic; now cleared before building",
+    "checker::set_intent: a +inf current passed `> 0.0` and was serialized by serde_json as null; currents now must be positive and finite, like drops",
+    "checker::drop_port_floating: the exemption predicate (port lookup per row) ran up to three times per row; now one Vec<bool> pass",
+    "reference::build: a port name repeated in RefInput::ports became two ports of one net; now one port",
+    "reference::build: net numbering was a linear scan per terminal (O(nets^2)); now a HashMap<StrId,u32> beside the ordered names",
+    "reference::recogniser_for: polarity was the marker's first letter, so sky130's esd_pfet row read N-type (an esd pfet card fell back to pfet_01v8; an NMOS card naming it got the P row) and IHP's esd_vdd bjt (an ESD diode) was taken for a model-less NPN; polarity is now the first `_` segment led by n/p, and a row stating none matches only an explicit model; vendor-suffix check no longer allocates two Strings per row",
+    "geom::build_store: zero/negative-extent shapes were pushed as degenerate polygons; now skipped",
+    "geom::build_store and lib::defer_chip_level: `x + w` formed in i32 overflowed (debug panic) at the coordinate edge; widened to i64 first",
+    "geom::label_layer: allocated a Vec of candidate rows per call; now two short-circuiting finds",
+    "sidecar::key: linear scan; now binary search over KEYS (sortedness pinned by a test)",
+    "lib::signoff_extract: label-short and normal paths duplicated the harvest/caps/field-pass tail; folded into one (step 1)"
+  ],
+  "flaggedOpen": [
+    "No build was run (per the rules): all 63 tests and the step-3 changes are unverified by a compiler; integration must build and run `cargo test -p verify`",
+    "checker::cleanup_tests::a_refused_intent_leaves_none only asserts when gdsverify actually refuses a net listed in two domains; if it accepts, the test is vacuous",
+    "netlist::cleanup_tests asserts write_spice emits `.subckt` even for an empty extraction; unverified against GPurify's writer",
+    "geom::cleanup_tests::label_layer_finds_the_conductors_label assumes every builtin PDK maps the `met1` role",
+    "lib::shortfall Length uses (l - m).abs(): cannot overflow for in-domain Dbu (|v| <= 2^40), so left as is",
+    "set_intent: two power supplies whose voltages round to the same mV share a domain name and the later voltage wins",
+    "No SIMD or branchless rewrites: no hot long numeric loop in this unit (cap_matrix sums into a BTreeMap keyed by strings; the rest is per-row string/ID work)"
+  ],
+  "seamRequests": [],
+  "risks": [
+    "recogniser_for polarity change alters which deck row a schematic card compares against for ESD fets (sky130) and model-less bipolars on IHP (now skipped and counted as LVS-unverified coverage instead of compared against an ESD diode)",
+    "build_store now drops degenerate shapes: a pin label placed only on a zero-area shape now fails closed ('pin label') where it may have bound before",
+    "Duplicate ports are now deduplicated in the reference netlist; any caller relying on positional duplicate ports would see one fewer port",
+    "The relayed user message about merging 9 git branches was outside this unit's task; only `main` exists locally in this checkout, nothing was merged or deleted"
+  ]
+}
