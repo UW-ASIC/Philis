@@ -77,35 +77,30 @@ Artifacts:
 
 `gds2svg` is the standalone renderer for the same GDS files.
 
-## Cross-checking GPurify (xcheck)
+## Cross-checking GPurify (foundry signoff)
 
-Three differentials hold `verify`'s numbers against KLayout — an independent
-engine running the SAME rules, generated from `pdks/sky130.json` itself:
+`benchmarks/signoff_xcheck.py` holds GPurify's signoff against the sky130A
+foundry decks (`$PDK_ROOT/sky130A/libs.tech`), engines Philis did not write:
 
 ```sh
-python3 benchmarks/xcheck.py            # DRC: per-rule counts vs signoff
-python3 benchmarks/xcheck_lvs.py        # LVS verdicts vs fixture SPICE (MOS fixtures)
-python3 benchmarks/xcheck_pex.py        # PEX: ground-cap lower bound + ratio band
-python3 benchmarks/xcheck_selftest.py   # proves the pair can SEE violations:
-                                        # KLayout-synthesised known-bad GDS, both
-                                        # engines must report each planted fault
+cargo run --release -p benchmark --bin bench local
+nix-shell -p klayout magic-vlsi --run 'python3 benchmarks/signoff_xcheck.py'
 ```
 
-Run `bench local` first (the scripts read `target/bench_debug/`). KLayout is
-found via `$KLAYOUT`, `PATH`, or nix. Rule kinds with no KLayout 1:1
-(asymmetric enclosure, wide-metal, extensions, ERC) are listed as SKIPPED —
-never silently passed. Counting conventions differ per engine (a square under
-min-width is one finding to GPurify, two to KLayout), so the selftest asserts
-*presence* agreement; the DRC diff reports raw counts.
+Per `target/bench_debug/<f>/` it runs KLayout `sky130A_mr.drc` on `<f>.gds`,
+KLayout `sky130.lvs` (called directly; `run_lvs.py` needs docopt) on
+`<f>.lvs.gds` (schematic ports labelled) against `<f>.ref.spice` (the LVS
+reference, dummies included), and magic `drc(full)` + extraction (tech file
+passed with `-T`: volare's `.magicrc` hard-codes its build path).
+`target/xcheck/summary.json` holds per fixture DRC counts {foundry, magic,
+gpurify}, LVS verdicts {foundry, gpurify}, every foundry finding with its
+origin (routing vs cells/assembly, by layer), and ground C per net {gpurify
+(`caps.json`), magic}. Exit 1 on any foundry DRC error, or a foundry LVS
+mismatch where GPurify said match.
 
-Against the real PDK (optional): magic + sky130A (`volare enable --pdk
-sky130 <version>`), passing the tech file directly —
-`magic -dnull -noconsole -T ~/.volare/sky130A/libs.tech/magic/sky130A.tech script.tcl`
-with `gds read`, `load`, `drc style drc(full)`, `drc check`, `drc listall why`
-(the volare `.magicrc` hardcodes its build path and silently loads nothing).
-That audits the *deck's completeness* against real silicon rules, not the
-engine: it flags licon.7/9/11/14, diff/tap.10/11, LU.3 on the fixtures, rules
-`pdks/sky130.json` does not carry.
+`feol=1 beol=1` are mandatory: `sky130A_mr.drc` defaults both to false and
+then checks nothing, reporting 0 (`tests/xcheck_smoke.rs` pins both halves).
+`--drc-only <gds> [--top T]` prints `{"drc": n}` for one GDS.
 
 `cargo run --release -p benchmark --example net_dump <fixture>` prints the
 extraction net by net and which extracted net each routed net lands on — a

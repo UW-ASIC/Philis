@@ -115,8 +115,8 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 ## benchmarks
 - `cargo run --release -p benchmark --bin bench local` — per-circuit DRC/LVS/
   ERC/C/WL/area table + constraint satisfaction. Artifacts in `target/bench_debug/`.
-- `xcheck*.py` cross-check DRC/LVS/PEX against KLayout. Real-sky130 DRC via magic:
-  `magic -dnull -noconsole -T ~/.volare/.../sky130A.tech script.tcl`.
+- `signoff_xcheck.py` cross-checks DRC/LVS/C against the sky130A foundry decks
+  (KLayout DRC + LVS, magic) → `target/xcheck/summary.json` (PERF-19).
 
 ## Stage contracts
 
@@ -141,7 +141,7 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 
 | # | Issue | Status | Owner |
 |---|---|---|---|
-| 1 | bjt_mirror magic violations; `ntap`/`ptap` split | Open: `pdks/decks/sky130.deck` now recognises BJTs and CELL-09 (M1) draws fixed-geometry emitters; the magic count is unmeasured | PERF-19 (foundry signoff) |
+| 1 | bjt_mirror magic violations; `ntap`/`ptap` split | Open: `pdks/decks/sky130.deck` now recognises BJTs and CELL-09 (M1) draws fixed-geometry emitters; measured per fixture by `benchmarks/signoff_xcheck.py` (PERF-19) | owners of the findings it lists |
 | 2 | Routing EM not wired | Closed (REL-01, M0): `supply_nets`, `pin_ua`, `em` set in `library::topology` | — |
 | 3 | Placement net weights | Closed: `gp::net_weights` | — |
 | 4 | Placer grid 10 nm | Closed (PLC-02, M1): cut-lattice-aligned boxes | — |
@@ -157,4 +157,4 @@ signs off; the best epoch (lexicographic |V|, Θ, PEX) wins.
 | 10b | `mosfet.rs` links to `VariantSpace::lock` | Closed (stale) | — |
 | 10c | Unused `Unitization` / `GuardRingRequirement` fields | Closed for `Unitization` (FLOW-15: `same_variant_required`, `SeriesParallel::RepeatedStage` deleted); guard rings: GAP-05 (M1) | REL-07 (ring fields it wires) |
 | 10d | Only `frontend/cli` rustfmt-clean; CI `fmt` advisory | Open | FLOW-14 follow-up (one formatting commit) |
-| 10e | `xcheck_lvs.py` MOS only, not re-run | Open | PERF-19 |
+| 10e | `xcheck_lvs.py` MOS only, not re-run | Closed (PERF-19): deleted; foundry KLayout LVS in `signoff_xcheck.py` | — |

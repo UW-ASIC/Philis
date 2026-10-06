@@ -83,6 +83,8 @@
             ]))
             pkgs.python312
             pkgs.klayout
+            pkgs.magic-vlsi
+            pkgs.netgen-vlsi
             pkgs.ngspice
             pkgs.curl
             pkgs.cmake

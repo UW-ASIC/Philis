@@ -9,7 +9,8 @@
 //! `pdk_path`).
 //!
 //! Debug artifacts (`<name>.gds`, `signoff.txt`, `violations.txt`,
-//! `drc_located.txt`) land in `target/bench_debug/<name>/`; SVGs in `assets/`.
+//! `drc_located.txt`, and for `signoff_xcheck.py` `<name>.lvs.gds`,
+//! `<name>.ref.spice`, `caps.json`) land in `target/bench_debug/<name>/`; SVGs in `assets/`.
 //! `<stem>.interface.json` sidecars are ignored (`library::run` takes none).
 
 mod fixtures;
@@ -356,6 +357,21 @@ fn run_circuit(
     let _ = std::fs::create_dir_all(&debug_dir);
     let gds_bytes = library::export_gds(&sol, pdk, &c.name, &[]).unwrap_or_else(|e| panic!("{}: {e}", c.name));
     let _ = std::fs::write(debug_dir.join(format!("{}.gds", c.name)), &gds_bytes);
+    // Foundry LVS inputs for `signoff_xcheck.py`: a GDS labelling only the schematic
+    // ports (magic/KLayout then see the same pins as the `.subckt`) and the matching
+    // reference with dummies. `<name>.gds` stays all-labelled (DRC, magic C per net).
+    let ports: Vec<String> = sol.netlist.ports.iter().map(|n| sol.netlist.nets[n.0 as usize].name.clone()).collect();
+    let lvs_gds = debug_dir.join(format!("{}.lvs.gds", c.name));
+    match library::export_gds(&sol, pdk, &c.name, &ports) {
+        Ok(b) => drop(std::fs::write(&lvs_gds, b)),
+        Err(e) => {
+            eprintln!("{}.lvs.gds not written: {e}", c.name);
+            let _ = std::fs::remove_file(&lvs_gds);
+        }
+    }
+    let _ = std::fs::write(debug_dir.join(format!("{}.ref.spice", c.name)), library::reference_spice(&sol, pdk, &c.name, &ports));
+    // `[net, other | null, fF]` rows of the signoff extraction.
+    let _ = std::fs::write(debug_dir.join("caps.json"), serde_json::to_string(&signoff.caps).expect("caps serialise"));
     match library::post_layout_spice(&sol, pdk, &c.name) {
         Ok(s) => drop(std::fs::write(debug_dir.join(format!("{}_pex.spice", c.name)), s)),
         Err(e) => {
