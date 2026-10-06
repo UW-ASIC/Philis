@@ -19,6 +19,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
+/// One GPU vertex: world (or, for the overlay, NDC) position and RGBA.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Vertex {
@@ -26,25 +27,38 @@ struct Vertex {
     color: [f32; 4],
 }
 
+/// The camera uniform: NDC = `(world + offset) · scale`, x divided by
+/// `aspect` (width / height).
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct CamUni {
+    /// World translation applied before scaling, database units.
     offset: [f32; 2],
+    /// NDC per database unit.
     scale: f32,
+    /// Window width / height.
     aspect: f32,
 }
 
+/// One flattened polygon on a GDS `(layer, datatype)`.
 #[derive(Clone)]
 pub struct Poly {
+    /// GDS layer number.
     pub layer: u16,
+    /// GDS datatype.
     pub datatype: u16,
+    /// Vertices in database units, open (the closing vertex is not repeated).
     pub pts: Vec<[i32; 2]>,
 }
 
+/// One flattened GDS TEXT label.
 #[derive(Clone)]
 pub struct TextEntry {
+    /// Anchor x, database units.
     pub x: i32,
+    /// Anchor y, database units.
     pub y: i32,
+    /// The label string.
     pub text: String,
 }
 
@@ -76,24 +90,48 @@ fn bounds(polys: &[Poly]) -> Option<(i32, i32, i32, i32)> {
 
 // ── GDS parser: BOUNDARY, BOX, PATH, SREF, AREF, TEXT ──
 
+/// One GDS structure, unflattened (its own frame).
 struct GdsCell {
     polys: Vec<Poly>,
     srefs: Vec<SRef>,
     texts: Vec<TextEntry>,
 }
 
+/// An SREF, or an AREF as a `cols × rows` lattice of SREFs.
 struct SRef {
+    /// Referenced structure name.
     name: String,
+    /// Origin of the first placement, parent frame.
     x: i32,
     y: i32,
+    /// Mirror about x before rotating.
     mirror_x: bool,
+    /// Counter-clockwise rotation, degrees.
     angle_deg: f64,
+    /// Lattice size; 1 × 1 for an SREF.
     cols: u16,
     rows: u16,
+    /// Per-column and per-row step, parent frame.
     col_vec: (i32, i32),
     row_vec: (i32, i32),
 }
 
+/// The GDS element whose records are being read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Element {
+    None,
+    /// BOUNDARY or BOX.
+    Boundary,
+    Path,
+    Sref,
+    Aref,
+    Text,
+}
+
+/// Decodes an 8-byte GDS excess-64 base-16 real.
+///
+/// # Panics
+/// When `b` is shorter than 8 bytes.
 fn gds_real(b: &[u8]) -> f64 {
     let sign = if b[0] & 0x80 != 0 { -1.0 } else { 1.0 };
     let exp = (b[0] & 0x7F) as i32 - 64;
@@ -104,26 +142,30 @@ fn gds_real(b: &[u8]) -> f64 {
     sign * (mant as f64 / (1u64 << 56) as f64) * 16.0f64.powi(exp)
 }
 
+/// Big-endian i16 at `off`. Panics past the end.
 fn read_i16(data: &[u8], off: usize) -> i16 {
     i16::from_be_bytes([data[off], data[off + 1]])
 }
 
+/// Big-endian i32 at `off`. Panics past the end.
 fn read_i32(data: &[u8], off: usize) -> i32 {
     i32::from_be_bytes(data[off..off + 4].try_into().unwrap())
 }
 
+/// `len` bytes at `off` as text, cut at the first NUL (GDS pads to even).
 fn read_string(data: &[u8], off: usize, len: usize) -> String {
     let s = &data[off..off + len];
     let end = s.iter().position(|&b| b == 0).unwrap_or(len);
     String::from_utf8_lossy(&s[..end]).into_owned()
 }
 
-fn path_to_polys(layer: u16, datatype: u16, half_w: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
-    let mut out = Vec::new();
+/// A PATH as one quad per segment, `hw` either side of the centre line;
+/// ends are flush (PATHTYPE 0).
+fn path_to_polys(layer: u16, datatype: u16, hw: i32, pts: &[[i32; 2]]) -> Vec<Poly> {
+    let mut out = Vec::with_capacity(pts.len().saturating_sub(1));
     for seg in pts.windows(2) {
         let [x0, y0] = seg[0];
         let [x1, y1] = seg[1];
-        let hw = half_w;
         let rect = if y0 == y1 {
             let (lx, rx) = (x0.min(x1), x0.max(x1));
             vec![[lx, y0 - hw], [rx, y0 - hw], [rx, y0 + hw], [lx, y0 + hw]]
@@ -146,6 +188,8 @@ fn path_to_polys(layer: u16, datatype: u16, half_w: i32, pts: &[[i32; 2]]) -> Ve
     out
 }
 
+/// Every structure in a GDS stream by name. Reading stops at the first
+/// truncated or malformed record header; unknown records are skipped.
 fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     let mut cells: HashMap<String, GdsCell> = HashMap::new();
     let mut i = 0;
@@ -155,12 +199,7 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     let mut cur_srefs: Vec<SRef> = Vec::new();
     let mut cur_texts: Vec<TextEntry> = Vec::new();
 
-    // Element state
-    let mut in_boundary = false;
-    let mut in_path = false;
-    let mut in_sref = false;
-    let mut in_aref = false;
-    let mut in_text = false;
+    let mut el = Element::None;
     let mut layer: u16 = 0;
     let mut datatype: u16 = 0;
     let mut path_width: i32 = 0;
@@ -204,23 +243,23 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
 
             // Element begin
             0x08 | 0x2D => {
-                in_boundary = true;
+                el = Element::Boundary;
                 layer = 0;
                 datatype = 0;
             }
             0x09 => {
-                in_path = true;
+                el = Element::Path;
                 layer = 0;
                 datatype = 0;
                 path_width = 0;
             }
             0x0A => {
-                in_sref = true;
+                el = Element::Sref;
                 sref_mirror = false;
                 sref_angle = 0.0;
             }
             0x0B => {
-                in_aref = true;
+                el = Element::Aref;
                 sref_mirror = false;
                 sref_angle = 0.0;
                 aref_cols = 1;
@@ -228,50 +267,50 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
             }
             0x0C => {
                 // TEXT
-                in_text = true;
+                el = Element::Text;
                 text_string.clear();
                 text_xy = (0, 0);
             }
 
             // LAYER
-            0x0D if (in_boundary || in_path) && len >= 6 => {
+            0x0D if matches!(el, Element::Boundary | Element::Path) && len >= 6 => {
                 layer = read_i16(data, i + 4) as u16;
             }
 
             // DATATYPE
-            0x0E if (in_boundary || in_path) && len >= 6 => {
+            0x0E if matches!(el, Element::Boundary | Element::Path) && len >= 6 => {
                 datatype = read_i16(data, i + 4) as u16;
             }
 
             // WIDTH (path)
-            0x0F if in_path && len >= 8 => {
+            0x0F if el == Element::Path && len >= 8 => {
                 path_width = read_i32(data, i + 4);
             }
 
             // STRING (text content)
-            0x19 if in_text => {
+            0x19 if el == Element::Text => {
                 text_string = read_string(data, i + 4, len - 4);
             }
 
             // SNAME
-            0x12 if in_sref || in_aref => {
+            0x12 if matches!(el, Element::Sref | Element::Aref) => {
                 sref_name = read_string(data, i + 4, len - 4);
             }
 
             // COLROW (aref)
-            0x13 if in_aref && len >= 8 => {
+            0x13 if el == Element::Aref && len >= 8 => {
                 aref_cols = read_i16(data, i + 4) as u16;
                 aref_rows = read_i16(data, i + 6) as u16;
             }
 
             // STRANS
-            0x1A if (in_sref || in_aref) && len >= 6 => {
+            0x1A if matches!(el, Element::Sref | Element::Aref) && len >= 6 => {
                 let flags = u16::from_be_bytes([data[i + 4], data[i + 5]]);
                 sref_mirror = flags & 0x8000 != 0;
             }
 
             // ANGLE
-            0x1C if (in_sref || in_aref) && len >= 12 => {
+            0x1C if matches!(el, Element::Sref | Element::Aref) && len >= 12 => {
                 sref_angle = gds_real(&data[i + 4..i + 12]);
             }
 
@@ -285,54 +324,50 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
                     pts.push([read_i32(data, o), read_i32(data, o + 4)]);
                 }
 
-                if in_boundary {
-                    if pts.len() > 1 && pts.first() == pts.last() { pts.pop(); }
-                    if pts.len() >= 3 {
-                        cur_polys.push(Poly { layer, datatype, pts });
+                match el {
+                    Element::Boundary => {
+                        if pts.len() > 1 && pts.first() == pts.last() { pts.pop(); }
+                        if pts.len() >= 3 {
+                            cur_polys.push(Poly { layer, datatype, pts });
+                        }
                     }
-                } else if in_path {
-                    if pts.len() >= 2 {
+                    Element::Path if pts.len() >= 2 => {
                         let hw = (path_width / 2).max(1);
                         cur_polys.extend(path_to_polys(layer, datatype, hw, &pts));
                     }
-                } else if in_sref && !pts.is_empty() {
-                    cur_srefs.push(SRef {
+                    Element::Sref if !pts.is_empty() => cur_srefs.push(SRef {
                         name: sref_name.clone(),
                         x: pts[0][0], y: pts[0][1],
                         mirror_x: sref_mirror, angle_deg: sref_angle,
                         cols: 1, rows: 1,
                         col_vec: (0, 0), row_vec: (0, 0),
-                    });
-                } else if in_aref && pts.len() >= 3 {
-                    let (x0, y0) = (pts[0][0], pts[0][1]);
-                    cur_srefs.push(SRef {
-                        name: sref_name.clone(),
-                        x: x0, y: y0,
-                        mirror_x: sref_mirror, angle_deg: sref_angle,
-                        cols: aref_cols, rows: aref_rows,
-                        col_vec: ((pts[1][0] - x0) / aref_cols.max(1) as i32,
-                                  (pts[1][1] - y0) / aref_cols.max(1) as i32),
-                        row_vec: ((pts[2][0] - x0) / aref_rows.max(1) as i32,
-                                  (pts[2][1] - y0) / aref_rows.max(1) as i32),
-                    });
-                } else if in_text && !pts.is_empty() {
-                    text_xy = (pts[0][0], pts[0][1]);
+                    }),
+                    Element::Aref if pts.len() >= 3 => {
+                        let (x0, y0) = (pts[0][0], pts[0][1]);
+                        let (c, r) = (i32::from(aref_cols.max(1)), i32::from(aref_rows.max(1)));
+                        cur_srefs.push(SRef {
+                            name: sref_name.clone(),
+                            x: x0, y: y0,
+                            mirror_x: sref_mirror, angle_deg: sref_angle,
+                            cols: aref_cols, rows: aref_rows,
+                            col_vec: ((pts[1][0] - x0) / c, (pts[1][1] - y0) / c),
+                            row_vec: ((pts[2][0] - x0) / r, (pts[2][1] - y0) / r),
+                        });
+                    }
+                    Element::Text if !pts.is_empty() => text_xy = (pts[0][0], pts[0][1]),
+                    _ => {}
                 }
             }
 
             // ENDEL
             0x11 => {
-                if in_text && !text_string.is_empty() {
+                if el == Element::Text && !text_string.is_empty() {
                     cur_texts.push(TextEntry {
                         x: text_xy.0, y: text_xy.1,
-                        text: text_string.clone(),
+                        text: std::mem::take(&mut text_string),
                     });
                 }
-                in_boundary = false;
-                in_path = false;
-                in_sref = false;
-                in_aref = false;
-                in_text = false;
+                el = Element::None;
             }
             _ => {}
         }
@@ -341,6 +376,8 @@ fn parse_gds_cells(data: &[u8]) -> HashMap<String, GdsCell> {
     cells
 }
 
+/// `(x, y)` mirrored about x (when `mirror_x`), then rotated `angle_deg`
+/// counter-clockwise, rounded to the nearest unit.
 fn transform_point(x: i32, y: i32, mirror_x: bool, angle_deg: f64) -> (i32, i32) {
     let (px, mut py) = (x as f64, y as f64);
     if mirror_x { py = -py; }
@@ -349,6 +386,10 @@ fn transform_point(x: i32, y: i32, mirror_x: bool, angle_deg: f64) -> (i32, i32)
     ((px * c - py * s).round() as i32, (px * s + py * c).round() as i32)
 }
 
+/// Appends `name`'s polygons and labels, and those of everything it
+/// references, under the transform (mirror, rotate, then translate by
+/// `(tx, ty)`). Unknown names and references deeper than 64 are dropped.
+#[allow(clippy::too_many_arguments)]
 fn flatten_cell(
     cells: &HashMap<String, GdsCell>,
     name: &str,
@@ -388,6 +429,7 @@ fn flatten_cell(
     }
 }
 
+/// A structure nothing references, else any structure; `None` when empty.
 fn find_top_cell(cells: &HashMap<String, GdsCell>) -> Option<String> {
     let mut referenced = std::collections::HashSet::new();
     for cell in cells.values() {
@@ -399,7 +441,9 @@ fn find_top_cell(cells: &HashMap<String, GdsCell>) -> Option<String> {
         .or_else(|| cells.keys().next().cloned())
 }
 
-/// Parse a GDS file and return all polygons + text labels (flattened hierarchy).
+/// Parses a GDS stream and returns the top cell's polygons and text labels,
+/// hierarchy flattened, in database units. Malformed input yields what was
+/// read before the damage (possibly nothing); it never panics.
 pub fn parse_gds(data: &[u8]) -> (Vec<Poly>, Vec<TextEntry>) {
     let cells = parse_gds_cells(data);
     let top = match find_top_cell(&cells) {
@@ -462,10 +506,13 @@ impl Poly {
     }
 }
 
+/// The stroke colour for a fill: 1.5× brighter, opaque.
 fn outline_color(fill: [f32; 4]) -> [f32; 4] {
     [(fill[0] * 1.5).min(1.0), (fill[1] * 1.5).min(1.0), (fill[2] * 1.5).min(1.0), 1.0]
 }
 
+/// Filled layers' polygons as a triangle list (ear clipping); polygons
+/// earcut rejects are skipped.
 fn triangulate(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
@@ -481,6 +528,7 @@ fn triangulate(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     verts
 }
 
+/// Every polygon's closed outline as a line list.
 fn outline_vertices(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
     let mut verts = Vec::new();
     for p in polys {
@@ -497,6 +545,7 @@ fn outline_vertices(polys: &[Poly], names: &LayerMap) -> Vec<Vertex> {
 /// Glyphs on a 5×7 grid as line-segment endpoint pairs; a `PEN_UP` pair skips.
 const PEN_UP: (u8, u8) = (255, 255);
 
+/// The stroke pairs for `ch`; unknown characters draw an X.
 fn glyph(ch: char) -> &'static [(u8, u8)] {
     match ch {
         'A' | 'a' => &[(0,0),(0,5),(0,5),(2,7),(2,7),(4,7),(4,7),(4,0), PEN_UP,PEN_UP, (0,3),(4,3)],
@@ -617,6 +666,8 @@ fn build_legend(polys: &[Poly], layer_names: &LayerMap) -> Vec<Vertex> {
     verts
 }
 
+/// The camera that fits every polygon in 90 % of the shorter NDC axis,
+/// centred; the identity when there are none.
 fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
     let Some((x0, y0, x1, y1)) = bounds(polys) else {
         return CamUni { offset: [0.0; 2], scale: 1.0, aspect };
@@ -627,6 +678,9 @@ fn fit_view(polys: &[Poly], aspect: f32) -> CamUni {
 
 // ── SVG export (headless) ──
 
+/// Renders a GDS stream as a standalone 800 × 800 SVG in database units
+/// (y flipped so the layout reads upright), one `<g id="{layer}">` per GDS
+/// layer and the labels on top. An empty layout is an empty `<svg/>`.
 #[must_use]
 pub fn export_svg(gds_bytes: &[u8], layer_names: &LayerMap) -> String {
     let (polys, texts) = parse_gds(gds_bytes);
@@ -717,6 +771,7 @@ struct Mesh {
     n: u32,
 }
 
+/// The window's wgpu state and the three meshes it draws.
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -732,6 +787,7 @@ struct Gpu {
     overlay: Mesh,
 }
 
+/// An alpha-blended pipeline over [`Vertex`] with `vs`/`fs` entry points.
 fn make_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -771,6 +827,10 @@ fn make_pipeline(
 }
 
 impl Gpu {
+    /// Opens a surface on `win`.
+    ///
+    /// # Panics
+    /// When no adapter or device is available.
     fn new(win: std::sync::Arc<Window>) -> Self {
         let sz = win.inner_size();
         let inst = wgpu::Instance::default();
@@ -854,6 +914,7 @@ impl Gpu {
         }
     }
 
+    /// Reconfigures the surface; a zero extent (minimised) is ignored.
     fn resize(&mut self, w: u32, h: u32) {
         if w > 0 && h > 0 {
             self.config.width = w;
@@ -862,6 +923,7 @@ impl Gpu {
         }
     }
 
+    /// Uploads `verts`; an empty slice is a mesh with no buffer.
     fn mesh(&self, verts: &[Vertex]) -> Mesh {
         if verts.is_empty() {
             return Mesh { buf: None, n: 0 };
@@ -876,6 +938,7 @@ impl Gpu {
         Mesh { buf: Some(buf), n: verts.len() as u32 }
     }
 
+    /// Draws one frame; a lost surface is reconfigured and the frame skipped.
     fn draw(&mut self, cam: &CamUni) {
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(cam));
         let Ok(frame) = self.surface.get_current_texture() else {
@@ -920,16 +983,20 @@ impl Gpu {
 
 // ── App: a watched GDS file, or a probe channel ──
 
+/// Where the window's geometry comes from.
 enum Source {
+    /// A GDS file, polled for a new mtime every 500 ms.
     File { path: PathBuf, mtime: Option<SystemTime>, last_poll: Instant },
     Channel(mpsc::Receiver<ProbeMsg>),
 }
 
+/// One update sent to a [`Probe`] window.
 struct ProbeMsg {
     polys: Vec<Poly>,
     title: Option<String>,
 }
 
+/// The winit application: window, GPU, camera and source.
 struct App {
     win: Option<std::sync::Arc<Window>>,
     gpu: Option<Gpu>,
@@ -960,6 +1027,8 @@ impl App {
         }
     }
 
+    /// Displays `polys` (sorted by layer) and `texts`; refits the camera
+    /// when a fit is pending and there is geometry.
     fn show(&mut self, mut polys: Vec<Poly>, texts: Vec<TextEntry>) {
         polys.sort_by_key(Poly::key);
         if self.fit && !polys.is_empty() {
@@ -976,6 +1045,7 @@ impl App {
         self.shown = (polys, texts);
     }
 
+    /// Re-reads the source file; a read error is reported and the view kept.
     fn load_gds(&mut self) {
         let Source::File { path, mtime, .. } = &mut self.source else { return };
         let data = match std::fs::read(&*path) {
@@ -990,6 +1060,7 @@ impl App {
         self.show(polys, texts);
     }
 
+    /// The cursor in NDC (`[-1, 1]`, y up); the origin without a window.
     fn cursor_ndc(&self) -> [f32; 2] {
         self.win.as_ref().map_or([0.0; 2], |w| {
             let s = w.inner_size();
@@ -1112,7 +1183,12 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Open a window on a GDS file, reloading it whenever it changes on disk.
+/// Opens a window on a GDS file, reloading it whenever it changes on disk,
+/// and blocks until the window closes. Without a display server the process
+/// exits with status 1.
+///
+/// # Panics
+/// When the event loop fails while running.
 pub fn run_viewer(path: PathBuf, layer_names: LayerMap) {
     let el = EventLoop::new().unwrap_or_else(|e| {
         eprintln!("cannot create window (no display server?): {e}");
@@ -1145,6 +1221,8 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// Spawns the window thread titled `title`; a missing display is
+    /// reported on stderr and leaves a probe whose sends are dropped.
     #[must_use]
     pub fn open(title: &str) -> Self {
         let (tx, rx) = mpsc::channel();
@@ -1162,7 +1240,8 @@ impl Probe {
         Probe { tx: Some(tx), handle: Some(handle) }
     }
 
-    /// Stop sending and block until the user closes the window.
+    /// Stops sending and blocks until the user closes the window; later
+    /// [`Probe::send`]s are no-ops.
     pub fn wait(&mut self) {
         self.tx.take();
         if let Some(h) = self.handle.take() {
@@ -1170,6 +1249,8 @@ impl Probe {
         }
     }
 
+    /// Replaces the shown geometry with a copy of `polys`, appending `title`
+    /// to the window title when given. Never blocks; a closed window drops it.
     pub fn send(&self, polys: &[Poly], title: Option<&str>) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(ProbeMsg { polys: polys.to_vec(), title: title.map(String::from) });
