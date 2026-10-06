@@ -763,4 +763,191 @@ mod tests {
         assert!((area - 1.0).abs() < 1e-9);
         assert!((util - 100.0).abs() < 1e-9);
     }
+
+    #[derive(Clone, Copy)]
+    struct Over;
+    impl analog::Rule for Over {
+        type On = ();
+        fn cost(self, _: &()) -> f32 {
+            1.0
+        }
+        fn satisfied(self, _: &()) -> bool {
+            false
+        }
+        fn usage(self, _: &()) -> Option<f32> {
+            Some(1.5)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Idle;
+    impl analog::Rule for Idle {
+        type On = ();
+        fn cost(self, _: &()) -> f32 {
+            0.0
+        }
+        fn applicable(self, _: &()) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn stat_of_an_empty_batch_is_none() {
+        assert!(stat("hard", "x", &Vec::<Over>::new(), &()).is_none());
+    }
+
+    #[test]
+    fn stat_counts_violations_usage_and_residual() {
+        let c = stat("hard", "amp", &vec![Over; 2], &()).unwrap();
+        assert_eq!((c.kind.as_str(), c.arm, c.circuit.as_str()), ("Over", "hard", "amp"));
+        assert_eq!((c.total, c.violated, c.na, c.unk), (2, 2, 0, 0));
+        assert_eq!(c.usage, Some(1.5));
+        assert!((c.theta - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stat_counts_inapplicable_rules_as_na() {
+        let c = stat("budget", "x", &vec![Idle; 4], &()).unwrap();
+        assert_eq!((c.total, c.violated, c.na, c.unk), (4, 0, 4, 0));
+        assert_eq!(c.usage, None);
+    }
+
+    #[test]
+    fn short_kind_of_a_generic_is_its_last_segment() {
+        assert_eq!(short_kind("a::b::C<d::E>"), "E");
+        assert_eq!(short_kind(""), "");
+    }
+
+    #[test]
+    fn footprint_of_nothing_is_zero() {
+        assert_eq!(footprint(&[], &[], &[], &[]), (0.0, 0.0));
+    }
+
+    // Two 1×1 µm devices 3 µm apart on x: a 4×1 µm bbox, half drawn.
+    #[test]
+    fn footprint_two_devices() {
+        let (area, util) = footprint(&[0, 3000], &[0, 0], &[500, 500], &[500, 500]);
+        assert!((area - 4.0).abs() < 1e-9, "{area}");
+        assert!((util - 50.0).abs() < 1e-9, "{util}");
+    }
+
+    #[test]
+    fn footprint_of_a_degenerate_bbox_has_zero_utilisation() {
+        assert_eq!(footprint(&[0, 10], &[0, 0], &[0, 0], &[0, 0]), (0.0, 0.0));
+    }
+
+    // Coordinates near i32::MAX: the extents overflow i32 but not the answer.
+    #[test]
+    fn footprint_does_not_overflow_far_from_the_origin() {
+        let (area, util) = footprint(&[2_000_000_000], &[2_000_000_000], &[200_000_000], &[1_100_000_000]);
+        assert!((area - 4e8 * 2.2e9 / 1e6).abs() < 1.0, "{area}");
+        assert!((util - 100.0).abs() < 1e-9);
+    }
+
+    fn rows(rules: &[(&str, i64)]) -> Vec<Violation> {
+        rules.iter().map(|&(r, m)| Violation { rule: r.into(), margin: m }).collect()
+    }
+
+    #[test]
+    fn signoff_counts_tally_by_prefix() {
+        let n = SignoffCounts::of(&rows(&[
+            ("drc/m1.width:met1", 5),
+            ("drc/x", 1),
+            ("erc/floating", 1),
+            ("lvs-coverage/cap", 3),
+            ("lvs-coverage/cap2", 2),
+            ("engine/pex", 0),
+            ("cell/undrawable:M1", 0),
+            ("route/other", 9),
+        ]));
+        assert_eq!(n, SignoffCounts { drc: 2, erc: 1, lvs_mismatch: false, unverified: 5, engine: 1, undrawable: 1 });
+        assert_eq!(n.lvs(), "PARTIAL(5)");
+        assert_eq!(SignoffCounts::of(&[]), SignoffCounts::default());
+        assert_eq!(SignoffCounts::default().lvs(), "MATCH");
+    }
+
+    #[test]
+    fn lvs_mismatch_wins_over_coverage() {
+        let n = SignoffCounts::of(&rows(&[("lvs-coverage/c", 2), ("lvs/net", 0)]));
+        assert_eq!(n.lvs(), "MISMATCH");
+        // `lvs-coverage/` is not an `lvs/` row.
+        assert!(!SignoffCounts::of(&rows(&[("lvs-coverage/c", 1)])).lvs_mismatch);
+    }
+
+    fn contract(kind: &str, arm: &'static str, circuit: &str, t: [usize; 4], usage: Option<f32>, theta: f64) -> ContractStat {
+        ContractStat { kind: kind.into(), arm, circuit: circuit.into(), total: t[0], violated: t[1], na: t[2], unk: t[3], usage, theta }
+    }
+
+    #[test]
+    fn summarize_nothing_is_empty() {
+        assert!(summarize(&[]).is_empty());
+    }
+
+    #[test]
+    fn summarize_groups_by_kind_and_arm_and_sums() {
+        let a = contract("Sym", "hard", "c1", [4, 1, 1, 0], Some(0.5), 1.0);
+        let b = contract("Sym", "hard", "c2", [6, 2, 0, 1], Some(2.0), 0.5);
+        let c = contract("Sym", "budget", "c1", [1, 0, 0, 0], None, 0.0);
+        let d = contract("Area", "cost", "c3", [2, 0, 0, 2], None, 0.0);
+        let s = summarize(&[&a, &b, &c, &d]);
+        let keys: Vec<(&str, &str)> = s.iter().map(|r| (r.kind, r.arm)).collect();
+        assert_eq!(keys, [("Area", "cost"), ("Sym", "budget"), ("Sym", "hard")]);
+        let sym = &s[2];
+        assert_eq!((sym.total, sym.sat, sym.viol, sym.na, sym.unk), (10, 5, 3, 1, 1));
+        assert_eq!(sym.worst, Some((2.0, "c2")));
+        assert!((sym.theta - 1.5).abs() < 1e-12);
+        assert_eq!(s[1].worst, None);
+        assert_eq!((s[0].sat, s[0].unk), (0, 2));
+    }
+
+    #[test]
+    fn rate_is_a_percentage_of_checked_rules() {
+        assert_eq!(rate(0, 0), "     -");
+        assert_eq!(rate(1, 2), "   50%");
+        assert_eq!(rate(3, 3), "  100%");
+        assert_eq!(rate(0, 7), "    0%");
+    }
+
+    fn circuits(names: &[&str]) -> Vec<BenchmarkCircuit> {
+        names.iter().map(|n| BenchmarkCircuit { name: (*n).into(), suite: Suite::Local, spice_path: PathBuf::new() }).collect()
+    }
+
+    fn select(names: &[&str], filters: &[&str]) -> Vec<String> {
+        let mut c = circuits(names);
+        select_circuits(&mut c, &filters.iter().map(|f| (*f).to_string()).collect::<Vec<_>>());
+        c.into_iter().map(|c| c.name).collect()
+    }
+
+    #[test]
+    fn select_circuits_by_count_or_exact_name() {
+        assert_eq!(select(&["a", "b", "c"], &[]), ["a", "b", "c"]);
+        assert_eq!(select(&["a", "b", "c"], &["2"]), ["a", "b"]);
+        assert_eq!(select(&["a", "b", "c"], &["0"]), Vec::<String>::new());
+        assert_eq!(select(&["a", "b", "c"], &["10"]), ["a", "b", "c"]);
+        assert_eq!(select(&["a", "ab", "c"], &["a", "c"]), ["a", "c"]);
+        assert_eq!(select(&["a", "ab"], &["b"]), Vec::<String>::new(), "names match exactly, not as substrings");
+        // A number among names is just another name.
+        assert_eq!(select(&["a", "2"], &["a", "2"]), ["a", "2"]);
+        assert_eq!(select(&[], &["a"]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn op_config_only_biases_sky130_decks() {
+        assert!(op_config(Path::new("pdks/generic_finfet.json")).is_none());
+        assert!(op_config(Path::new("")).is_none());
+    }
+
+    #[test]
+    fn load_deck_reports_a_missing_file() {
+        let e = load_deck(Path::new("/nonexistent/deck.json")).err().unwrap();
+        assert!(e.starts_with("PDK load failed (/nonexistent/deck.json)"), "{e}");
+    }
+
+    #[test]
+    fn load_deck_names_only_drawn_layers() {
+        let (pdk, names) = load_deck(&repo_root().join("pdks/sky130.json")).expect("sky130 loads");
+        assert!(!pdk.layers.is_empty());
+        assert!(!names.is_empty());
+        assert!(!names.contains_key(&(0, 0)));
+    }
 }

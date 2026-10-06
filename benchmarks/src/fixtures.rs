@@ -771,4 +771,244 @@ mod tests {
             assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }
     }
+    /// A fresh scratch directory under the system temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("philis-fixtures-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(p: &Path) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, "* x\n").unwrap();
+    }
+
+    fn names(c: &[BenchmarkCircuit]) -> Vec<&str> {
+        c.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    fn params(kv: &[(&str, &str)]) -> HashMap<String, String> {
+        kv.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// 1 fF/µm², 50 Ω/□ resistor body 0.35 µm wide, 0.1 µm per fin.
+    fn rw(res_model: Option<&str>) -> Rewrite {
+        Rewrite { res_model: res_model.map(str::to_owned), cap_density: 1.0, r_sheet: 50.0, res_w: 0.35, um_per_fin: 0.1 }
+    }
+
+    fn line(l: &str, res_model: Option<&str>, p: &[(&str, &str)]) -> String {
+        rewrite_line(l, &rw(res_model), &params(p))
+    }
+
+    #[test]
+    fn suite_names_are_case_insensitive_and_default_to_all() {
+        assert_eq!(Suite::from_str("LOCAL"), Suite::Local);
+        assert_eq!(Suite::from_str("Align"), Suite::Align);
+        assert_eq!(Suite::from_str("magical"), Suite::Magical);
+        assert_eq!(Suite::from_str("TinyTapeout"), Suite::TinyTapeout);
+        assert_eq!(Suite::from_str("all"), Suite::All);
+        assert_eq!(Suite::from_str("whatever"), Suite::All);
+        assert_eq!(Suite::from_str(""), Suite::All);
+        assert!(Suite::All.includes(Suite::Local) && Suite::All.includes(Suite::All));
+        assert!(!Suite::Local.includes(Suite::All), "a single suite does not select everything");
+    }
+
+    #[test]
+    fn parse_si_suffixes_and_corners() {
+        assert!((parse_si("1meg") - 1e6).abs() < 1e-6, "meg is mega, not milli");
+        assert!((parse_si("1MEG") - 1e6).abs() < 1e-6);
+        assert!((parse_si("1M") - 1e-3).abs() < 1e-15, "SPICE M is milli");
+        assert!((parse_si("2t") - 2e12).abs() < 1.0);
+        assert!((parse_si("3g") - 3e9).abs() < 1e-3);
+        assert!((parse_si("4n") - 4e-9).abs() < 1e-21);
+        assert!((parse_si("5f") - 5e-15).abs() < 1e-27);
+        assert!((parse_si("-5k") + 5000.0).abs() < 1e-9);
+        assert!((parse_si(" 7 ") - 7.0).abs() < 1e-12);
+        assert!((parse_si("1e-6") - 1e-6).abs() < 1e-18);
+        assert_eq!(parse_si(""), 0.0);
+        assert_eq!(parse_si("1e"), 0.0);
+        assert_eq!(parse_si("k"), 0.0);
+    }
+
+    #[test]
+    fn is_numeric_corners() {
+        for yes in ["0", "+1", "-1", "1meg", "1.5F", "1e-3", " 2u "] {
+            assert!(is_numeric(yes), "{yes}");
+        }
+        for no in ["", "+", "-", "k", "meg", "1.2.3", "u1", "{w}"] {
+            assert!(!is_numeric(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn non_finite_words_are_not_spice_numbers() {
+        for no in ["inf", "infinity", "nan", "NaN", "-inf"] {
+            assert!(!is_numeric(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn resolve_param_follows_chains_case_insensitively_and_stops_on_cycles() {
+        let p = params(&[("wn", "0.5U"), ("wp", "WN"), ("a", "b"), ("b", "a")]);
+        assert_eq!(resolve_param("WP", &p), "0.5u");
+        assert_eq!(resolve_param("Other", &p), "other", "a non-parameter is returned lowercased");
+        let r = resolve_param("a", &p);
+        assert!(r == "a" || r == "b", "{r}");
+        assert_eq!(resolve_param("", &p), "");
+    }
+
+    #[test]
+    fn collect_spice_params_corners() {
+        let p = collect_spice_params("  .PARAM A=1, b=2\n.param a=3\nR1 a b c=4\n.param lone\n");
+        assert_eq!(p.len(), 2);
+        assert_eq!(p["a"], "3", "a later definition wins");
+        assert_eq!(p["b"], "2");
+        assert!(collect_spice_params("").is_empty());
+    }
+
+    #[test]
+    fn backslash_join_chains_and_edges() {
+        assert_eq!(join_backslash("a \\\n b \\\n   c\nd"), "a b c\nd");
+        assert_eq!(join_backslash("a\\"), "a\\", "a trailing backslash with nothing after stays");
+        assert_eq!(join_backslash(""), "");
+        assert_eq!(join_backslash("x\ny"), "x\ny");
+    }
+
+    #[test]
+    fn backslash_join_handles_crlf() {
+        assert_eq!(join_backslash("a \\\r\nb\r\n"), "a b\r\n");
+    }
+
+    #[test]
+    fn fmt_um_corners() {
+        assert_eq!(fmt_um(0.0), "0u");
+        assert_eq!(fmt_um(0.0001), "0.0001u");
+        assert_eq!(fmt_um(100.0), "100u");
+        assert_eq!(fmt_um(0.12345), "0.1235u");
+    }
+
+    #[test]
+    fn x_instance_prefixes_once() {
+        assert_eq!(x_instance("C1"), "XC1");
+        assert_eq!(x_instance("xc1"), "xc1");
+        assert_eq!(x_instance("XR2"), "XR2");
+    }
+
+    #[test]
+    fn kv_helpers() {
+        let kvs = vec![("w".to_string(), "1u".to_string()), ("w".to_string(), "2u".to_string())];
+        assert_eq!(kv_get(&kvs, "w"), Some("2u"));
+        assert_eq!(kv_get(&kvs, "l"), None);
+        assert_eq!(join_kv(kvs.iter()), "w=1u w=2u");
+        assert_eq!(join_kv([].iter()), "");
+    }
+
+    #[test]
+    fn non_card_lines_pass_through() {
+        for l in ["", "   ", "* M1 a b c d nfet nfin=2", ".param x=1", "+ w=1u l=1u", "M1 a", "V1 a b 1", "I1 a b 1u"] {
+            assert_eq!(line(l, None, &[]), l, "{l:?}");
+        }
+    }
+
+    #[test]
+    fn mos_cards_get_w_from_fins_and_a_default_l() {
+        assert_eq!(line("M1 d g s b nmos nfin=4", None, &[]), "M1 d g s b nmos nfin=4 w=0.4u l=0.15u");
+        assert_eq!(line("  m1 d g s b nmos NF=n", None, &[("n", "3")]), "m1 d g s b nmos NF=n w=0.3u l=0.15u");
+        assert_eq!(line("M1 d g s b nmos nfin=0", None, &[]), "M1 d g s b nmos nfin=0 w=0.1u l=0.15u", "at least one fin");
+        assert_eq!(line("M1 d g s b nmos W=1u", None, &[]), "M1 d g s b nmos W=1u l=0.15u");
+        assert_eq!(line("XM1 d g s b nfet W=1u L=1u", None, &[]), "XM1 d g s b nfet W=1u L=1u", "fully sized: untouched");
+        assert_eq!(line("M1 d g s b nmos nfin=2 l=1u", None, &[]), "M1 d g s b nmos nfin=2 l=1u w=0.2u");
+    }
+
+    #[test]
+    fn numeric_capacitors_become_square_deck_caps() {
+        // 1 pF at 1 fF/µm²: 1000 µm², a 31.6228 µm square.
+        assert_eq!(line("C1 a b 1p", None, &[]), "XC1 a b cap W=31.6228u L=31.6228u");
+        assert_eq!(line("C1 a b 1f", None, &[]), "XC1 a b cap W=1u L=1u");
+        assert_eq!(line("C1 a b 0.01f", None, &[]), "XC1 a b cap W=0.5u L=0.5u", "0.5 µm minimum side");
+        assert_eq!(line("C1 a b -1f m=2", None, &[]), "XC1 a b cap W=1u L=1u m=2", "magnitude; other params kept");
+        assert_eq!(line("C1 a b cval", None, &[("cval", "1f")]), "XC1 a b cap W=1u L=1u");
+        assert_eq!(line("C1 a b 0", None, &[]), "C1 a b 0", "zero value kept");
+    }
+
+    #[test]
+    fn generic_capacitors() {
+        assert_eq!(line("C4 a b capacitor w=s l=s", None, &[("s", "5u")]), "XC4 a b cap w=5u l=5u");
+        assert_eq!(line("C4 a b cap c=1f", None, &[]), "XC4 a b cap W=1u L=1u");
+        assert_eq!(line("C4 a b cap c=big", None, &[]), "C4 a b cap c=big", "non-numeric value kept");
+        assert_eq!(line("C4 a b cap w=1u", None, &[]), "C4 a b cap w=1u", "w without l and no c");
+    }
+
+    #[test]
+    fn resistors_need_a_deck_model() {
+        assert_eq!(line("R1 a b 1k", None, &[]), "R1 a b 1k");
+        // 1 kΩ at 50 Ω/□, 0.35 µm wide: 7 µm long.
+        assert_eq!(line("R1 a b 1k", Some("rpoly"), &[]), "XR1 a b rpoly W=0.35u L=7u");
+        assert_eq!(line("R1 a b 10", Some("rpoly"), &[]), "XR1 a b rpoly W=0.35u L=0.35u", "at least square");
+        assert_eq!(line("R1 vps vout resistor r=rl", Some("rpoly"), &[("rl", "500")]), "XR1 vps vout rpoly W=0.35u L=3.5u");
+        assert_eq!(line("R1 a b mymodel", Some("rpoly"), &[]), "R1 a b mymodel", "a deck model word is not generic");
+        assert_eq!(line("R1 a r=5", Some("rpoly"), &[]), "R1 a r=5", "one node");
+    }
+
+    #[test]
+    fn local_discovery_takes_netlists_sorted() {
+        let d = scratch("local");
+        for f in ["b.sp", "a.spice", "c.txt", "noext"] {
+            touch(&d.join(f));
+        }
+        fs::create_dir_all(d.join("dir.sp")).unwrap();
+        let c = discover_local(&d);
+        assert_eq!(names(&c), ["a", "b"]);
+        assert!(c.iter().all(|c| c.suite == Suite::Local && c.spice_path.is_file()));
+        assert!(discover_local(&d.join("missing")).is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tinytapeout_discovery_prefers_xschem_and_skips_derived_netlists() {
+        let d = scratch("tt");
+        touch(&d.join("tt_b/mag/b.spice"));
+        touch(&d.join("tt_b/xschem/z.spice"));
+        touch(&d.join("TT_a/mag/sub/a.spice"));
+        touch(&d.join("tt_c/xschem/c_sim.spice"));
+        touch(&d.join("tt_c/xschem/c_lvs.spice"));
+        touch(&d.join("tt_c/pex/xschem/c.spice"));
+        touch(&d.join("tt_d/spi/d.spice"));
+        touch(&d.join("other/xschem/o.spice"));
+        touch(&d.join("tt_file"));
+        let c = discover_tinytapeout(&d);
+        assert_eq!(names(&c), ["TT_a", "tt_b", "tt_d"]);
+        assert!(c[1].spice_path.ends_with("xschem/z.spice"), "{:?}", c[1].spice_path);
+        assert!(c[0].spice_path.ends_with("mag/sub/a.spice"));
+        assert!(c.iter().all(|c| c.suite == Suite::TinyTapeout));
+        assert!(discover_tinytapeout(&d.join("missing")).is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn find_spice_recursive_sorts_and_filters() {
+        let d = scratch("find");
+        touch(&d.join("x/xschem/b.spice"));
+        touch(&d.join("x/xschem/a.spice"));
+        touch(&d.join("x/xschem/a.sp"));
+        touch(&d.join("x/notxschem/n.spice"));
+        let found = find_spice_recursive(&d, "xschem");
+        assert_eq!(found, [d.join("x/xschem/a.spice"), d.join("x/xschem/b.spice")]);
+        assert!(find_spice_recursive(&d, "spi").is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn preprocess_spice_needs_a_readable_deck() {
+        assert!(preprocess_spice("R1 a b 1k\n", Path::new("/nonexistent/deck.json")).is_err());
+    }
+
+    #[test]
+    fn preprocess_spice_ends_in_one_newline() {
+        let pdk_json = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("pdks/sky130.json");
+        let out = preprocess_spice("* only a comment", &pdk_json).expect("preprocess");
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"), "{out:?}");
+        assert!(out.contains("* only a comment"));
+    }
 }

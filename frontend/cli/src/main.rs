@@ -396,4 +396,232 @@ mod tests {
         );
         assert_eq!(interface("M1 a b c d n\n", Path::new("x/flat.sp")), ("flat".into(), vec![]));
     }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn parsed(a: &[&str]) -> Args {
+        match parse_args(args(a)) {
+            Ok(x) => x,
+            Err(e) => panic!("{a:?}: {e}"),
+        }
+    }
+
+    fn refused(a: &[&str]) -> String {
+        parse_args(args(a)).err().unwrap_or_else(|| panic!("{a:?} parsed"))
+    }
+
+    /// A fresh scratch directory under the system temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("philis-cli-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn report(hard: &[(&str, i64)], cost: f32) -> Report {
+        Report {
+            hard_violations: hard.iter().map(|&(r, m)| Violation { rule: r.into(), margin: m }).collect(),
+            budget_violations: Vec::new(),
+            cost,
+        }
+    }
+
+    #[test]
+    fn interface_skips_a_nameless_subckt_and_falls_back_to_top() {
+        let sp = ".subckt\n.subckt real a b k=1\n";
+        assert_eq!(interface(sp, Path::new("x.sp")), ("real".into(), vec!["a".into(), "b".into()]));
+        assert_eq!(interface(".subckt lone\n", Path::new("x.sp")), ("lone".into(), vec![]));
+        assert_eq!(interface("", Path::new("")), ("top".into(), vec![]));
+    }
+
+    #[test]
+    fn positionals_give_netlist_and_deck_with_or_without_run() {
+        for a in [&["n.sp", "sky130"][..], &["run", "n.sp", "sky130"]] {
+            let x = parsed(a);
+            assert_eq!((x.netlist.as_str(), x.deck.as_str()), ("n.sp", "sky130"));
+            assert!(x.emit_to.is_none() && x.out.is_none() && x.perf.is_none() && x.cfg.op.is_none());
+        }
+    }
+
+    #[test]
+    fn flags_may_sit_between_positionals() {
+        let x = parsed(&["n.sp", "--seed", "9", "sky130", "-o", "d"]);
+        assert_eq!((x.netlist.as_str(), x.deck.as_str(), x.cfg.seed), ("n.sp", "sky130", 9));
+        assert_eq!(x.out, Some(PathBuf::from("d")));
+    }
+
+    #[test]
+    fn pdk_flag_replaces_the_deck_positional() {
+        let x = parsed(&["--pdk", "gf180mcu", "n.sp"]);
+        assert_eq!(x.deck, "gf180mcu");
+        // With `--pdk`, a second positional is not the deck (and `run` ignores it).
+        assert_eq!(parsed(&["--pdk", "p", "n.sp", "extra"]).deck, "p");
+    }
+
+    #[test]
+    fn missing_positionals_are_usage_errors() {
+        assert!(refused(&[]).starts_with("usage"));
+        assert!(refused(&["run"]).starts_with("usage"));
+        assert!(refused(&["n.sp"]).starts_with("usage"));
+        assert!(refused(&["emit", "n.sp", "sky130"]).starts_with("usage"), "emit needs an output");
+    }
+
+    #[test]
+    fn emit_takes_the_output_from_out_rs_else_the_positional() {
+        assert_eq!(parsed(&["emit", "n.sp", "sky130", "o.rs"]).emit_to.as_deref(), Some("o.rs"));
+        assert_eq!(parsed(&["emit", "n.sp", "sky130", "o.rs", "--out-rs", "f.rs"]).emit_to.as_deref(), Some("f.rs"));
+        assert_eq!(parsed(&["--pdk", "p", "emit", "n.sp", "o.rs"]).emit_to.as_deref(), Some("o.rs"));
+        // `--out-rs` without `emit` writes nothing.
+        assert!(parsed(&["n.sp", "sky130", "--out-rs", "f.rs"]).emit_to.is_none());
+    }
+
+    #[test]
+    fn numeric_flags_set_the_config() {
+        let x = parsed(&["n.sp", "p", "--seed", "7", "--iters", "3", "--outer", "2", "--starts", "4", "--top", "t"]);
+        assert_eq!((x.cfg.seed, x.cfg.feedback_iters, x.cfg.outer_iters, x.cfg.starts), (7, 3, 2, 4));
+        assert_eq!(x.cfg.top.as_deref(), Some("t"));
+        assert_eq!(parsed(&["n.sp", "p", "--max-iters", "5"]).cfg.feedback_iters, 5);
+    }
+
+    #[test]
+    fn bad_flags_and_values_are_refused() {
+        assert!(refused(&["n.sp", "p", "--seed", "x"]).contains("--seed: not a number: x"));
+        assert!(refused(&["n.sp", "p", "--seed", "-1"]).contains("not a number"));
+        assert!(refused(&["n.sp", "p", "--seed"]).starts_with("--seed needs a value"));
+        assert!(refused(&["n.sp", "p", "--bogus"]).starts_with("unknown flag --bogus"));
+        assert!(refused(&["n.sp", "p", "-"]).starts_with("unknown flag -"));
+        assert!(refused(&["n.sp", "p", "--testbench", "/nonexistent/tb.sp"]).starts_with("read /nonexistent/tb.sp"));
+        assert!(refused(&["n.sp", "p", "--constraints", "/nonexistent/c.json"]).starts_with("--constraints: read"));
+    }
+
+    #[test]
+    fn size_convention_accepts_exactly_two_words() {
+        assert_eq!(size_convention("spice"), Ok(library::SizeConvention::Spice));
+        assert_eq!(size_convention("per-finger"), Ok(library::SizeConvention::PerFinger));
+        assert!(size_convention("SPICE").is_err());
+        assert_eq!(parsed(&["n.sp", "p", "--size", "per-finger"]).cfg.size_convention, library::SizeConvention::PerFinger);
+    }
+
+    #[test]
+    fn hierarchy_values() {
+        assert_eq!(hierarchy("flat"), Ok(library::Hierarchy::Flat));
+        assert_eq!(hierarchy("auto"), Ok(library::Hierarchy::Auto));
+        assert_eq!(hierarchy("bottom-up:3"), Ok(library::Hierarchy::BottomUp { min_devices: 3 }));
+        for bad in ["bottom-up:", "bottom-up:x", "bottom-up:-1", "bottom-up", "deep", ""] {
+            assert!(hierarchy(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn operating_point_is_set_only_by_its_flags() {
+        assert!(parsed(&["n.sp", "p", "--seed", "1"]).cfg.op.is_none());
+        let op = parsed(&["n.sp", "p", "--vdd", "3.3", "--corner", "ff", "--temp", "85"]).cfg.op.expect("op set");
+        assert_eq!((op.vdd, op.corner.as_str(), op.temp_c), (3.3, "ff", 85.0));
+        let op = parsed(&["n.sp", "p", "--op-lib", "m.lib"]).cfg.op.expect("op set");
+        assert_eq!(op.model_lib, Some(PathBuf::from("m.lib")));
+    }
+
+    #[test]
+    fn max_wall_is_a_non_negative_finite_duration() {
+        assert_eq!(parsed(&["n.sp", "p", "--max-wall", "1.5"]).cfg.max_wall, Some(std::time::Duration::from_millis(1500)));
+        assert_eq!(parsed(&["n.sp", "p", "--max-wall", "0"]).cfg.max_wall, Some(std::time::Duration::ZERO));
+        // A negative, NaN or infinite budget is a usage error, not a panic.
+        for bad in ["-1", "NaN", "inf"] {
+            assert!(refused(&["n.sp", "p", "--max-wall", bad]).starts_with("--max-wall"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn verdict_is_clean_only_without_violations_or_unverified_devices() {
+        assert_eq!(verdict(&report(&[], 1.5), 0), (true, "signoff CLEAN — cost 1.500".into()));
+        let (clean, s) = verdict(&report(&[], 1.5), 2);
+        assert!(!clean);
+        assert_eq!(s, "signoff: 0 hard violation(s), 2 device(s) LVS-unverified — not clean");
+        let (clean, s) = verdict(&report(&[("drc/x", 3)], 0.0), 0);
+        assert!(!clean && s.starts_with("signoff: 1 hard violation(s)"));
+    }
+
+    #[test]
+    fn signoff_txt_lists_hard_then_budget() {
+        let mut r = report(&[("drc/a", 5)], 0.0);
+        r.budget_violations.push(Violation { rule: "b".into(), margin: -2 });
+        assert_eq!(signoff_txt(&r, "S"), "S\n\n# hard (1)\ndrc/a\t5\n\n# budget (1)\nb\t-2\n");
+        assert_eq!(signoff_txt(&report(&[], 0.0), "S"), "S\n\n# hard (0)\n\n# budget (0)\n");
+        assert_eq!(violation_lines(&[]), "");
+    }
+
+    #[test]
+    fn signoff_json_round_trips() {
+        let mut r = report(&[("drc/\"q\"\\\n", 5)], 2.5);
+        r.budget_violations.push(Violation { rule: "b".into(), margin: -2 });
+        let text = signoff_json(&r, false);
+        assert!(text.ends_with('\n'));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["clean"], false);
+        assert_eq!(v["cost"], 2.5);
+        assert_eq!(v["hard"][0]["rule"], "drc/\"q\"\\\n");
+        assert_eq!(v["hard"][0]["margin"], 5);
+        assert_eq!(v["budget"][0]["margin"], -2);
+        assert_eq!(v["budget"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn signoff_json_writes_non_finite_cost_as_null() {
+        for cost in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let v: serde_json::Value = serde_json::from_str(&signoff_json(&report(&[], cost), true)).unwrap();
+            assert!(v["cost"].is_null(), "{cost}");
+            assert_eq!(v["clean"], true);
+            assert_eq!(v["hard"], serde_json::json!([]));
+        }
+    }
+
+    #[test]
+    fn num_parses_or_names_the_flag() {
+        assert_eq!(num::<u32>("--x", "12"), Ok(12));
+        assert_eq!(num::<f64>("--x", "1e3"), Ok(1000.0));
+        assert_eq!(num::<u32>("--x", ""), Err("--x: not a number: ".into()));
+    }
+
+    #[test]
+    fn perf_config_reads_specs_and_the_testbench_beside_the_json() {
+        let d = scratch("perf-ok");
+        std::fs::write(d.join("tb.spice"), "TB").unwrap();
+        let json = d.join("specs.json");
+        std::fs::write(&json, r#"{"testbench": "tb.spice", "specs": [{"metric": "gain_db", "min": 40, "max": null}, {"metric": "ugf", "max": 1e9}]}"#).unwrap();
+        let sim = library::oppoint::OpConfig { vdd: 3.3, ..Default::default() };
+        let p = perf_config(json.to_str().unwrap(), sim).unwrap();
+        assert_eq!(p.testbenches, vec!["TB".to_string()]);
+        assert_eq!(p.sim.vdd, 3.3);
+        assert!(p.scenarios.is_empty());
+        assert_eq!(p.specs.len(), 2);
+        assert_eq!((p.specs[0].metric.as_str(), p.specs[0].min, p.specs[0].max), ("gain_db", Some(40.0), None));
+        assert_eq!((p.specs[1].metric.as_str(), p.specs[1].min, p.specs[1].max), ("ugf", None, Some(1e9)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn perf_config_refuses_malformed_specs() {
+        let d = scratch("perf-bad");
+        std::fs::write(d.join("tb.spice"), "TB").unwrap();
+        let cases = [
+            ("not json", "specs.json:"),
+            (r#"{"specs": []}"#, "`testbench` must be a path"),
+            (r#"{"testbench": 3, "specs": []}"#, "`testbench` must be a path"),
+            (r#"{"testbench": "missing.sp", "specs": []}"#, "read "),
+            (r#"{"testbench": "tb.spice"}"#, "`specs` must be an array"),
+            (r#"{"testbench": "tb.spice", "specs": [{"min": 1}]}"#, "spec `metric` must be a string"),
+            (r#"{"testbench": "tb.spice", "specs": [{"metric": "g", "min": "1"}]}"#, "spec `min` must be a number or null"),
+            (r#"{"testbench": "tb.spice", "specs": [{"metric": "g", "max": true}]}"#, "spec `max` must be a number or null"),
+        ];
+        let json = d.join("specs.json");
+        for (text, want) in cases {
+            std::fs::write(&json, text).unwrap();
+            let e = perf_config(json.to_str().unwrap(), Default::default()).err().unwrap_or_else(|| panic!("{text} accepted"));
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        assert!(perf_config("/nonexistent/specs.json", Default::default()).err().unwrap().starts_with("read /nonexistent/specs.json"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
