@@ -81,7 +81,11 @@ impl BudgetStatus {
 /// Budget status for every family, plus the electrical bias it was judged under.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataReport {
+    /// Placement-tier families, hard rows then budget rows, each arm sorted
+    /// by kind.
     pub placement: Vec<BudgetStatus>,
+    /// Routing-tier families, as `placement`, plus rows folded in later by
+    /// [`Self::add_routing`].
     pub routing: Vec<BudgetStatus>,
     /// The operating point used; `None` means no simulation, so thermal
     /// results are vacuous and the report says so.
@@ -163,14 +167,22 @@ pub struct MetadataReport {
 /// One promoted epoch's metrics (PERF-14); `Layout` is not `Clone`, so no geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParetoPoint {
+    /// Outer (restart/topology) loop index of the epoch.
     pub outer: u32,
+    /// Epoch index inside its outer loop.
     pub iteration: u32,
+    /// |V|: hard violations (signoff errors plus hard rule violations).
     pub v: usize,
     /// Σ normalised spec miss ([`crate::perf::PerfResult::residual`]); `0` without scoring.
     pub residual: f64,
+    /// Smallest reliability index β over the spec bounds; `None` without
+    /// robustness scoring (ranked as β = −∞).
     pub min_beta: Option<f64>,
+    /// Θ, milli-budgets ([`MetadataReport::theta`]).
     pub theta: f64,
+    /// The search key's cost tier (lower is better).
     pub c_tier: f32,
+    /// Footprint, µm².
     pub area_um2: f64,
 }
 
@@ -178,20 +190,26 @@ pub struct ParetoPoint {
 /// promoted ones): what the README's feedback chart plots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candidate {
+    /// Outer (restart/topology) loop index of the epoch.
     pub outer: u32,
+    /// Epoch index inside its outer loop.
     pub iteration: u32,
     /// Routed wire length, µm: Σ over every net's drawn shapes of the long side.
     pub wl_um: f64,
+    /// Footprint, µm².
     pub area_um2: f64,
     /// `|V| = 0`: no DRC/ERC/LVS error and no hard constraint violated.
     pub clean: bool,
 }
 
-/// Front size cap [policy].
+/// Most points [`pareto_insert`] keeps on a front [policy].
 pub const PARETO_MAX: usize = 16;
 
-/// Inserts `p` unless dominated in (−min_beta [None = −∞], theta, c_tier, area_um2) or equal there to a kept
-/// point (first kept), removes points it dominates; over [`PARETO_MAX`] drops the largest-area point.
+/// Inserts `p` into the non-dominated `front` unless a kept point dominates
+/// it or ties it, objectives minimised: (−min_beta with `None` = +∞,
+/// theta, c_tier, area_um2). On a tie the earlier point stays. Removes every
+/// point `p` dominates; past [`PARETO_MAX`] drops the largest-area point (the
+/// first of equals). O(|front|).
 pub fn pareto_insert(front: &mut Vec<ParetoPoint>, p: ParetoPoint) {
     let obj = |q: &ParetoPoint| [-q.min_beta.unwrap_or(f64::NEG_INFINITY), q.theta, f64::from(q.c_tier), q.area_um2];
     // `a` dominates `b`: no worse anywhere, better somewhere.
@@ -247,7 +265,7 @@ impl MetadataReport {
             && self.coverage.unverified.is_empty()
             && self.placement.iter().chain(&self.routing).all(|b| b.met() && b.unknown == 0)
             && self.performance.iter().all(|p| p.4 <= 0.0)
-            && self.bias.as_ref().map_or(true, |b| !b.probe)
+            && self.bias.as_ref().is_none_or(|b| !b.probe)
     }
 }
 
@@ -256,8 +274,9 @@ impl MetadataReport {
 pub struct BiasSummary {
     /// How the bias was obtained (user testbench vs synthesised probe).
     pub provenance: String,
-    /// Devices the simulator resolved, of the total in the netlist.
+    /// Devices the simulator resolved, of [`Self::devices`].
     pub resolved: usize,
+    /// Devices in the netlist.
     pub devices: usize,
     /// Total circuit dissipation, µW.
     pub total_power_uw: i64,
@@ -274,7 +293,10 @@ pub struct BiasSummary {
     pub em_derate: &'static str,
 }
 
-/// Collect budget status for one requirement arm. `arm` tags every row, because
+/// Returns one row per rule kind over the non-empty batches of one
+/// requirement arm, sorted by kind: batches of a kind merge (counts and
+/// residuals sum, criticality and usage take the max, violated ids union
+/// with their largest residual). `arm` tags every row, because
 /// [`MetadataReport::theta`] sums residuals from the budget arm alone.
 fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<BudgetStatus> {
     let mut out: Vec<BudgetStatus> = Vec::new();
@@ -337,8 +359,11 @@ fn statuses<S>(reqs: &[Box<dyn RuleBatch<S>>], state: &S, arm: Arm) -> Vec<Budge
     out
 }
 
-/// Status of every hard and budget batch of both tiers against `layout` /
-/// `routes`. Cost-arm batches have no spec, so no status.
+/// Returns the status of every hard and budget batch of both tiers against
+/// `layout` / `routes`, with the net-class census, the matched-pair ledger
+/// and sizing notes of the placement budget arm, `missing` and `assumed`.
+/// Cost-arm batches have no spec, so no status; every flow-filled field
+/// starts empty.
 #[must_use]
 pub fn build(
     placement: &Requirements<pnr_core::Layout>,
@@ -368,31 +393,16 @@ pub fn build(
         bias,
         net_classes: census,
         missing: missing.to_vec(),
-        performance: Vec::new(),
-        performance_worst: Vec::new(),
-        budget_rows: Vec::new(),
-        sensitivity: Vec::new(),
-        robustness: Vec::new(),
-        sim_failures: 0,
         matched,
         sizing,
         assumed: assumed.iter().map(|s| (*s).to_string()).collect(),
-        binding: Vec::new(),
-        coverage: verify::Coverage::default(),
-        recognition: Vec::new(),
-        unconstrained: Vec::new(),
-        aging: Vec::new(),
-        audit: Vec::new(),
-        voltage_unknown: 0,
-        pareto: Vec::new(),
-        epochs: Vec::new(),
-        post_fill: false,
-        candidates: Vec::new(),
+        ..MetadataReport::default()
     }
 }
 
 impl MetadataReport {
-    /// Fold in routing batches built after the fact (on placed pins).
+    /// Appends budget-arm rows for routing batches built after the fact (on
+    /// placed pins). Rows are not merged with existing rows of the same kind.
     pub fn add_routing(&mut self, reqs: &[Box<dyn RuleBatch<pnr_core::Routes>>], routes: &pnr_core::Routes) {
         self.routing.extend(statuses(reqs, routes, Arm::Budget));
     }

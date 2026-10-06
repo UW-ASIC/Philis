@@ -1,10 +1,12 @@
 //! Flatten a placed and routed solution into the shape list signoff and the
-//! GDS writer consume.
+//! GDS writer consume, plus the rectangle helpers the output path shares.
 
-use pnr_core::{Layout, Macro, Routes, Shape};
+use pnr_core::{Layout, Macro, Rect, Routes, Shape};
 
-/// Every macro stamped at its placement (the one transform, shared with the
-/// router via `gr::place_macros`), then every routed wire.
+/// Returns every macro's shapes stamped at its placement (the one transform,
+/// shared with the router via `gr::place_macros`), then every routed wire,
+/// net by net. `macros` is indexed like `layout`; a macro past the layout is
+/// taken as already absolute.
 #[must_use]
 pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape> {
     let mut out = Vec::new();
@@ -15,6 +17,27 @@ pub fn collect(macros: &[Macro], layout: &Layout, routes: &Routes) -> Vec<Shape>
         out.extend_from_slice(net);
     }
     out
+}
+
+/// Returns the bounding box of `shapes`, `None` when there are none.
+pub(crate) fn bbox(shapes: &[Shape]) -> Option<Rect> {
+    let first = shapes.first()?.rect;
+    let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x + first.w, first.y + first.h);
+    for s in shapes {
+        x0 = x0.min(s.rect.x);
+        y0 = y0.min(s.rect.y);
+        x1 = x1.max(s.rect.x + s.rect.w);
+        y1 = y1.max(s.rect.y + s.rect.h);
+    }
+    Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
+/// Returns the Chebyshev edge-to-edge gap between `a` and `b`, nm: the larger
+/// of the x and y separations, `0` when they touch or overlap. Symmetric.
+pub(crate) fn rect_gap(a: &Rect, b: &Rect) -> i32 {
+    let dx = (b.x - (a.x + a.w)).max(a.x - (b.x + b.w)).max(0);
+    let dy = (b.y - (a.y + a.h)).max(a.y - (b.y + b.h)).max(0);
+    dx.max(dy)
 }
 
 /// Placement quality of one placed layout (PLC-01), measured, never steered on.
@@ -40,9 +63,14 @@ pub struct PlacementMetrics {
     pub clusters_extra: Option<u32>,
 }
 
-/// [`PlacementMetrics`] of `l` with cells drawn as `macros` (indexed like `l`),
-/// against the cut `lattice` and the per-pair cell spacing `rules`; `locks`
-/// says which matched pairs must share a shape.
+/// Returns the [`PlacementMetrics`] of `l` with cells drawn as `macros`
+/// (indexed like `l`), against the cut `lattice` (nm; `<= 0` reads as 1) and
+/// the per-pair cell spacing `rules`. Matched pairs come from every arm of
+/// `reqs`; `locks` says which of them must share a shape; `groups` are the
+/// recognition blocks, the last one the glue block.
+///
+/// # Panics
+/// When `macros` is shorter than the layout.
 #[must_use]
 pub fn placement_metrics(
     macros: &[Macro],
@@ -92,8 +120,9 @@ pub fn placement_metrics(
     }
 }
 
-/// Σ over `groups` but the last (the glue block) with ≥ 2 distinct cells of
-/// their islands past the first ([`analog::placement::island::components`]).
+/// Returns Σ over `groups` but the last (the glue block) of their islands past
+/// the first ([`analog::placement::island::components`] at `touch_nm`);
+/// a group with fewer than 2 distinct in-layout cells counts 0.
 fn clusters_extra(l: &Layout, groups: &[Vec<pnr_core::DeviceId>], touch_nm: i32) -> u32 {
     let n = l.x.len();
     groups[..groups.len().saturating_sub(1)]
@@ -108,15 +137,17 @@ fn clusters_extra(l: &Layout, groups: &[Vec<pnr_core::DeviceId>], touch_nm: i32)
         .sum()
 }
 
-/// Merge `layer`'s rects wherever two overlap or abut into exactly one
-/// rectangle (same span on one axis, touching on the other), until none do.
-/// The drawn area is unchanged; the checker, which reads a well per rect,
-/// then sees a bridged well as one.
+/// Merges `layer`'s rects pairwise, until none qualify, wherever their union
+/// is exactly one rectangle: same span on one axis and touching on the other,
+/// or one inside the other. The drawn area is unchanged; the checker, which
+/// reads a well per rect, then sees a bridged well as one. Other layers keep
+/// their relative order; `layer`'s survivors move to the end.
 ///
-/// ponytail: O(n²) per pass over the layer's rects; wells are few.
+/// Cost: O(n³) worst case in `layer`'s rect count (wells are few).
 pub fn merge_rects(shapes: &mut Vec<Shape>, layer: pnr_core::LayerId) {
+    // ponytail: restart-on-merge pair scan; a sweep line if a layer ever has
+    // thousands of rects.
     let (mut on, rest): (Vec<Shape>, Vec<Shape>) = shapes.drain(..).partition(|s| s.layer == layer);
-    use pnr_core::Rect;
     let joined = |a: Rect, b: Rect| -> Option<Rect> {
         let (x0, x1) = (a.x.min(b.x), (a.x + a.w).max(b.x + b.w));
         let (y0, y1) = (a.y.min(b.y), (a.y + a.h).max(b.y + b.h));
@@ -141,31 +172,30 @@ pub fn merge_rects(shapes: &mut Vec<Shape>, layer: pnr_core::LayerId) {
     shapes.extend(on);
 }
 
-/// Debug-only: every pin of a net touches that net's routed geometry (xy
-/// overlap, touching counts). `Routes::debug_check_joined` only proves the wires are
-/// self-connected, which a net can satisfy while missing its pins entirely.
+/// Panics, in debug builds only, unless every pin of each net with at least
+/// two pins touches that net's routed geometry (closed-interval xy contact
+/// through pins and wires). `Routes::debug_check_joined` only proves the
+/// wires are self-connected, which a net can satisfy while missing its pins
+/// entirely. A no-op in release builds.
 ///
-/// ponytail: xy-only — ignores whether the touch has a via stack; O(k²) per net.
+/// # Panics
+/// Naming the net, when a net with ≥ 2 pins has no wires or leaves a pin
+/// unreached; the message gives each orphan's nearest wire and its gap.
 pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes) {
     if !cfg!(debug_assertions) {
         return;
     }
+    // ponytail: xy-only, ignores whether the touch has a via stack; O(k²) per net.
     let placed = gr::place_macros(macros, layout);
-    let n_nets = routes.wires.len().max(
-        placed
-            .iter()
-            .flat_map(|m| &m.pins)
-            .map(|p| p.net.0 as usize + 1)
-            .max()
-            .unwrap_or(0),
-    );
-    for net in 0..n_nets {
-        let pins: Vec<pnr_core::Rect> = placed
-            .iter()
-            .flat_map(|m| &m.pins)
-            .filter(|p| p.net.0 as usize == net)
-            .map(|p| p.at)
-            .collect();
+    let mut pins_of: Vec<Vec<Rect>> = vec![Vec::new(); routes.wires.len()];
+    for p in placed.iter().flat_map(|m| &m.pins) {
+        let net = p.net.0 as usize;
+        if net >= pins_of.len() {
+            pins_of.resize(net + 1, Vec::new());
+        }
+        pins_of[net].push(p.at);
+    }
+    for (net, pins) in pins_of.iter().enumerate() {
         // One pin is nothing to connect; zero means the net has no terminals here.
         if pins.len() < 2 {
             continue;
@@ -177,50 +207,22 @@ pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes)
              dropped, not routed",
             pins.len()
         );
-        // Flood over pins ∪ wires, starting from the first pin.
-        let mut boxes: Vec<pnr_core::Rect> = pins.clone();
-        boxes.extend(wires.iter().map(|s| s.rect));
-        let mut seen = vec![false; boxes.len()];
-        let mut stack = vec![0usize];
-        seen[0] = true;
-        while let Some(a) = stack.pop() {
-            for b in 0..boxes.len() {
-                if seen[b] {
-                    continue;
-                }
-                let (ra, rb) = (boxes[a], boxes[b]);
-                if ra.x <= rb.x + rb.w
-                    && rb.x <= ra.x + ra.w
-                    && ra.y <= rb.y + rb.h
-                    && rb.y <= ra.y + ra.h
-                {
-                    seen[b] = true;
-                    stack.push(b);
-                }
-            }
-        }
-        let unreached: Vec<usize> = (0..pins.len()).filter(|&i| !seen[i]).collect();
+        let unreached = unreached_pins(pins, wires);
         if unreached.is_empty() {
             continue;
         }
         // Nearest wire per orphaned pin: a few nm off is a track-snap problem, a
         // few µm off means the router aimed somewhere else entirely.
-        let gap = |r: pnr_core::Rect, s: pnr_core::Rect| -> i32 {
-            let dx = (s.x - (r.x + r.w)).max(r.x - (s.x + s.w)).max(0);
-            let dy = (s.y - (r.y + r.h)).max(r.y - (s.y + s.h)).max(0);
-            dx.max(dy)
-        };
         let detail: Vec<String> = unreached
             .iter()
             .map(|&i| {
                 let p = pins[i];
-                let near = wires.iter().min_by_key(|s| gap(p, s.rect));
-                match near {
+                match wires.iter().min_by_key(|s| rect_gap(&p, &s.rect)) {
                     Some(s) => format!(
                         "pin[{i}] {p:?} — nearest wire {:?} on layer {:?}, {} nm away",
                         s.rect,
                         s.layer,
-                        gap(p, s.rect)
+                        rect_gap(&p, &s.rect)
                     ),
                     None => format!("pin[{i}] {p:?} — no wires"),
                 }
@@ -236,10 +238,31 @@ pub fn debug_check_connected(macros: &[Macro], layout: &Layout, routes: &Routes)
     }
 }
 
+/// Returns the indices of `pins` not reached from `pins[0]` by a flood over
+/// pins ∪ `wires` under [`Rect::touches`]; empty when `pins` is empty.
+fn unreached_pins(pins: &[Rect], wires: &[Shape]) -> Vec<usize> {
+    if pins.is_empty() {
+        return Vec::new();
+    }
+    let boxes: Vec<Rect> = pins.iter().copied().chain(wires.iter().map(|s| s.rect)).collect();
+    let mut seen = vec![false; boxes.len()];
+    let mut stack = vec![0usize];
+    seen[0] = true;
+    while let Some(a) = stack.pop() {
+        for b in 0..boxes.len() {
+            if !seen[b] && boxes[a].touches(&boxes[b]) {
+                seen[b] = true;
+                stack.push(b);
+            }
+        }
+    }
+    (0..pins.len()).filter(|&i| !seen[i]).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pnr_core::{LayerId, Orient, Rect};
+    use pnr_core::{LayerId, Orient};
 
     /// An L of two rects, so a turn is detectable (a single rect would look the
     /// same under R180).
@@ -297,20 +320,7 @@ mod tests {
     }
 
     fn bbox_of(shapes: &[Shape]) -> Rect {
-        let (mut x0, mut y0) = (i32::MAX, i32::MAX);
-        let (mut x1, mut y1) = (i32::MIN, i32::MIN);
-        for s in shapes {
-            x0 = x0.min(s.rect.x);
-            y0 = y0.min(s.rect.y);
-            x1 = x1.max(s.rect.x + s.rect.w);
-            y1 = y1.max(s.rect.y + s.rect.h);
-        }
-        Rect {
-            x: x0,
-            y: y0,
-            w: x1 - x0,
-            h: y1 - y0,
-        }
+        bbox(shapes).expect("shapes")
     }
 
     /// The invariant the whole flow depends on: drawn geometry must land where

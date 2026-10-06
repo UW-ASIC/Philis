@@ -25,7 +25,9 @@ use crate::{cellgen, Config, Solution};
 /// One emitted device instance.
 #[derive(Debug)]
 pub struct IrInst {
+    /// Instance name: the schematic device name, `a_b` for a merged pair.
     pub name: String,
+    /// Device family: `Nmos`, `Pmos` or `Resistor` (the kinds with a variant).
     pub kind: DeviceKind,
     /// Unit finger/segment width, nm (a device *parameter*, not a layout nm).
     pub w: i32,
@@ -55,25 +57,31 @@ pub enum IrGap {
 /// One align step against an already-placed instance.
 #[derive(Debug)]
 pub struct IrAlign {
+    /// Which edge or side is aligned to the reference.
     pub mode: AlignMode,
     /// Index into [`GenIr::instances`] of the placed reference.
     pub reference: usize,
+    /// Offset along the align direction.
     pub gap: IrGap,
 }
 
 /// Placement program for one instance: zero aligns = anchor at origin.
 #[derive(Debug)]
 pub struct IrPlace {
+    /// Index into [`GenIr::instances`] of the instance placed.
     pub inst: usize,
+    /// Align steps, applied in order.
     pub aligns: Vec<IrAlign>,
 }
 
 /// The decompiled generator — decisions only, no coordinates.
 #[derive(Debug)]
 pub struct GenIr {
+    /// Generator (block) name; also the emitted Rust type name.
     pub name: String,
     /// Io port names: the netlist's `.subckt` ports, else every named net.
     pub ports: Vec<String>,
+    /// One per layout cell, indexed like the layout.
     pub instances: Vec<IrInst>,
     /// In placement order; references always point at earlier entries.
     pub place: Vec<IrPlace>,
@@ -81,17 +89,26 @@ pub struct GenIr {
     pub edges: Vec<(String, String)>,
 }
 
+/// Why a solution could not be decompiled.
 #[derive(Debug)]
 pub enum EmitError {
     /// The solution uses a feature the emitter cannot yet express faithfully.
     Unsupported(String),
 }
 
-/// Decompile a solved placement against the deck it was solved on. The layout
-/// may come from [`crate::run`] or any other producer — the emitter's contract
-/// is `(netlist, layout)`, not the flow. `pdk` is used only to *attribute*
-/// gaps to rule values — nothing PDK-specific survives into the IR except
+/// Decompiles a solved placement against the deck it was solved on. The
+/// layout may come from [`crate::run`] or any other producer — the emitter's
+/// contract is `(netlist, layout)`, not the flow: cells are re-enumerated
+/// from `netlist` with `cfg`'s annotation, and sizes come from the covering
+/// unitization, else the schematic. `pdk` is used only to *attribute* gaps
+/// to rule values — nothing PDK-specific survives into the IR except
 /// unattributed residues.
+///
+/// # Errors
+/// [`EmitError::Unsupported`] when the layout's cell count differs from the
+/// re-enumerated cell table, a device has no W/L, or a cell is outside what
+/// the IR expresses (quads, ratioed or mixed-kind pairs, kinds without a
+/// macroMaster variant).
 pub fn emit(
     netlist: &pnr_core::Netlist,
     layout: &pnr_core::Layout,
@@ -130,26 +147,18 @@ pub fn emit(
             // No covering unitization (unmatched device): the schematic size,
             // a MOS as `nf·m` fingers of `W_total/nf`. A missing size is not
             // guessed.
-            None => {
-                let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v).filter(|&v| v > 0);
-                let size = match d.mos_size() {
-                    Some(s) => Some((s.w_finger_nm(), s.l_nm, s.fingers())),
-                    None if d.kind == DeviceKind::Resistor => p("w").zip(p("l")).map(|(w, l)| (w, l, 1)),
-                    None => None,
-                };
-                let Some((w, l, nf)) = size else {
-                    return Err(EmitError::Unsupported(format!("{}: no W/L in the netlist", d.name)));
-                };
-                (w.min(i64::from(i32::MAX)) as i32, l.min(i64::from(i32::MAX)) as i32, nf.min(u32::from(u16::MAX)) as u16)
-            }
+            None => narrow(d.mos_size().map(|s| (s.w_finger_nm(), s.l_nm, s.fingers())), d)?,
         })
     };
     lift(netlist, layout, pdk, &cells.devices_of, size)
 }
 
-/// Decompile a [`crate::run`] result on its own cell table
+/// Decompiles a [`crate::run`] result on its own cell table
 /// ([`Solution::devices_of`]) and drawn sizes: a MOS at unit width
 /// `W_total/nf/k` and `nf·m·k` fingers, `k` from [`Solution::folds`].
+///
+/// # Errors
+/// As [`emit`], less the cell-count check (a `Solution` is consistent).
 pub fn emit_solution(sol: &Solution, pdk: &Pdk) -> Result<GenIr, EmitError> {
     let fingers = |m: DeviceId| -> Option<(i64, i64, u32)> {
         let s = sol.netlist.devices[m.0 as usize].mos_size()?;
@@ -160,25 +169,48 @@ pub fn emit_solution(sol: &Solution, pdk: &Pdk) -> Result<GenIr, EmitError> {
     };
     let size = |members: &[DeviceId]| -> Result<(i32, i32, u16), EmitError> {
         let d = &sol.netlist.devices[members[0].0 as usize];
-        let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v).filter(|&v| v > 0);
-        let size = match fingers(members[0]) {
-            Some(f) => Some(f),
-            None if d.kind == DeviceKind::Resistor => p("w").zip(p("l")).map(|(w, l)| (w, l, 1)),
-            None => None,
-        };
-        let Some((w, l, nf)) = size else {
-            return Err(EmitError::Unsupported(format!("{}: no W/L in the netlist", d.name)));
-        };
-        if members.len() == 2 && fingers(members[1]).map(|f| f.2) != Some(nf) {
+        let mos = fingers(members[0]);
+        let size = narrow(mos, d)?;
+        // A resistor's one segment never equals a second leg's `None`: a
+        // resistor pair is refused here too.
+        if members.len() == 2 && fingers(members[1]).map(|f| f.2) != Some(mos.map_or(1, |f| f.2)) {
             return Err(EmitError::Unsupported("ratioed merged group: MatchedPair models equal legs only".into()));
         }
-        Ok((w.min(i64::from(i32::MAX)) as i32, l.min(i64::from(i32::MAX)) as i32, nf.min(u32::from(u16::MAX)) as u16))
+        Ok(size)
     };
     lift(&sol.netlist, &sol.layout, pdk, &sol.devices_of, size)
 }
 
+/// Returns the drawn `(unit w, l, fingers)` of `d`: `mos` when it is a MOS
+/// size, else a resistor's positive `w`/`l` params at one segment, each
+/// saturated into the IR's field width.
+///
+/// # Errors
+/// [`EmitError::Unsupported`] when neither gives a size: a missing size is
+/// not guessed.
+fn narrow(mos: Option<(i64, i64, u32)>, d: &pnr_core::Device) -> Result<(i32, i32, u16), EmitError> {
+    let p = |k: &str| d.params.iter().find(|(n, _)| n == k).map(|&(_, v)| v).filter(|&v| v > 0);
+    let size = match mos {
+        Some(f) => Some(f),
+        None if d.kind == DeviceKind::Resistor => p("w").zip(p("l")).map(|(w, l)| (w, l, 1)),
+        None => None,
+    };
+    let Some((w, l, nf)) = size else {
+        return Err(EmitError::Unsupported(format!("{}: no W/L in the netlist", d.name)));
+    };
+    Ok((w.min(i64::from(i32::MAX)) as i32, l.min(i64::from(i32::MAX)) as i32, nf.min(u32::from(u16::MAX)) as u16))
+}
+
 /// The IR of `layout`, whose cell `i` draws schematic devices `devices_of[i]`
-/// at `size(devices_of[i])` = `(unit w, l, fingers per leg)`.
+/// at `size(devices_of[i])` = `(unit w, l, fingers per leg)`. `layout` holds
+/// at least `devices_of.len()` cells. Instances are ordered like the cells;
+/// placement is lifted bottom-left first into same-row (Bottom + ToTheRight)
+/// or new-row (Left + Above) align pairs, with a gap within two grid steps
+/// of `device_gap` attributed to that rule.
+///
+/// # Errors
+/// [`EmitError::Unsupported`] for an empty or > 2-member cell, a kind with
+/// no macroMaster variant, a mixed-kind pair, or whatever `size` refuses.
 fn lift(
     netlist: &pnr_core::Netlist,
     layout: &pnr_core::Layout,
@@ -376,7 +408,9 @@ fn ident(name: &str, taken: &mut HashSet<String>) -> String {
     out
 }
 
-/// Map a schematic terminal to the macroMaster variant's port name.
+/// Returns the macroMaster variant's port name for schematic terminal `t` at
+/// `position`: a MOS terminal lowercased, a two-terminal device `a` for the
+/// first terminal and `b` for any other.
 fn terminal_port(kind: DeviceKind, t: &str, position: usize) -> String {
     match kind {
         DeviceKind::Nmos | DeviceKind::Pmos => t.to_ascii_lowercase(),
@@ -391,11 +425,15 @@ fn terminal_port(kind: DeviceKind, t: &str, position: usize) -> String {
     }
 }
 
-/// Interpret the IR against a process: instantiate, replay the align chains,
+/// Interprets the IR against a process: instantiate, replay the align chains,
 /// wire the edges, then route — the same path [`crate::elaborate`] takes.
 ///
 /// # Errors
 /// The generator failing against this process.
+///
+/// # Panics
+/// On a malformed IR: a `place` entry or align reference indexing past
+/// `instances`, or an align referencing an instance not yet placed.
 pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborated, GenError> {
     let built = build_with(pdk, ir.ports.clone(), |c| {
         let mut placed: Vec<Option<macro_master::Instance>> =
@@ -446,8 +484,14 @@ pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborate
     Ok(route_built(built, pdk, cfg))
 }
 
-/// Pretty-print the IR as a standalone macroMaster [`Composition`] — the
-/// "substrate3 source" a user can read, edit, and re-elaborate on any PDK.
+/// Returns the IR pretty-printed as a standalone macroMaster [`Composition`]
+/// — the "substrate3 source" a user can read, edit, and re-elaborate on any
+/// PDK. Port names become unique snake-case fields; every string
+/// the IR carries is written as an escaped Rust literal. Unattributed gaps
+/// carry a comment marking them PDK-specific.
+///
+/// # Panics
+/// When a `place` entry indexes past `instances`.
 #[must_use]
 pub fn to_rust(ir: &GenIr) -> String {
     use std::fmt::Write;

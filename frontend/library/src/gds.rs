@@ -33,20 +33,31 @@ const TIMESTAMPS: [i16; 12] = [2000, 1, 1, 0, 0, 0, 2000, 1, 1, 0, 0, 0];
 /// GDS stream version. 600 is the widely-accepted modern release number.
 const GDS_VERSION: i16 = 600;
 
-/// A net name placed at `(x, y)`, nm, on GDS `(layer, texttype)`.
+/// A net-name label: one GDS TEXT element.
 pub struct Text {
+    /// The label string (the net name), written as the STRING record.
     pub name: String,
+    /// GDS `(layer, texttype)` the label is written on.
     pub gds: (u16, u16),
+    /// Anchor x, nm (database units).
     pub x: i32,
+    /// Anchor y, nm (database units).
     pub y: i32,
 }
 
-/// Emit `shapes` and `texts` as a GDSII byte stream with one structure named
-/// `top`. `layer_gds` maps a Philis [`pnr_core::LayerId`] (index =
-/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers. `Err` names
-/// every shape layer id outside the table or mapped to `(0, 0)` (a layer the
-/// deck derives rather than draws): writing it anyway would put the shape on
-/// a layer nothing reads.
+/// Returns `shapes` and `texts` as a GDSII byte stream with one structure
+/// named `top`: every shape a closed 5-point BOUNDARY, every text a TEXT
+/// element, database unit 1 nm, fixed timestamps so equal input gives equal
+/// bytes. `layer_gds` maps a Philis [`pnr_core::LayerId`] (index =
+/// `LayerId.0`) to its `(gds_layer, gds_datatype)` numbers; layer and
+/// datatype are written as their 16-bit pattern.
+///
+/// # Errors
+/// Names every shape layer id outside `layer_gds` or mapped to `(0, 0)` (a
+/// layer the deck derives rather than draws): writing it anyway would put the
+/// shape on a layer nothing reads. Also refuses a `top` or text name longer
+/// than one GDS record holds (65530 bytes), which would otherwise
+/// corrupt the stream.
 pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text]) -> Result<Vec<u8>, String> {
     let mut bad: Vec<u16> = shapes
         .iter()
@@ -101,6 +112,8 @@ pub fn emit(top: &str, shapes: &[Shape], layer_gds: &[(u16, u16)], texts: &[Text
 // ── record writers ─────────────────────────────────────────────────────────
 // Every record is [u16 total-len][u8 rec-type][u8 data-type][payload], BE.
 
+/// Writes a record header for a payload of `payload_len` bytes, which must be
+/// even and at most [`MAX_PAYLOAD`] (debug-asserted).
 fn header(out: &mut Vec<u8>, rec_datatype: u16, payload_len: usize) {
     debug_assert!(
         payload_len <= MAX_PAYLOAD,
@@ -129,13 +142,14 @@ fn rec_i32(out: &mut Vec<u8>, rec_datatype: u16, vals: &[i32]) {
     }
 }
 
+/// Writes an ASCII-string record, null-padded to even length (GDS rule).
 fn rec_str(out: &mut Vec<u8>, rec_datatype: u16, s: &str) {
-    let mut bytes = s.as_bytes().to_vec();
-    if bytes.len() % 2 == 1 {
-        bytes.push(0); // GDS strings are null-padded to even length.
+    let odd = s.len() % 2;
+    header(out, rec_datatype, s.len() + odd);
+    out.extend_from_slice(s.as_bytes());
+    if odd == 1 {
+        out.push(0);
     }
-    header(out, rec_datatype, bytes.len());
-    out.extend_from_slice(&bytes);
 }
 
 fn rec_real(out: &mut Vec<u8>, rec_datatype: u16, vals: &[f64]) {
@@ -145,9 +159,14 @@ fn rec_real(out: &mut Vec<u8>, rec_datatype: u16, vals: &[f64]) {
     }
 }
 
-/// Encode an `f64` as an 8-byte GDS real: base-16 exponent in excess-64, sign in
-/// bit 7 of byte 0, then a 7-byte fractional mantissa in `[1/16, 1)`. Exact
-/// inverse of the reader in `visualizer`.
+/// Encodes an `f64` as an 8-byte GDS real: base-16 exponent in excess-64, sign
+/// in bit 7 of byte 0, then a 7-byte fractional mantissa in `[1/16, 1)`,
+/// truncated (not rounded) to 56 bits. Inverse of the reader in `visualizer`
+/// to within one mantissa ulp.
+///
+/// # Panics
+/// On a non-finite `v`, or a magnitude outside the representable
+/// `[16^-65, 16^63)`; only the two UNITS constants are ever encoded.
 fn gds_real(v: f64) -> [u8; 8] {
     if v == 0.0 {
         return [0; 8];
