@@ -18,6 +18,7 @@ use super::Stack;
 /// combine in parallel ([`Stack::terminal_resistance_ohm`]).
 #[derive(Clone, Debug)]
 pub struct CommonNode {
+    /// The shared net.
     pub net: NetId,
     /// Terminal groups (a pair's members' source pins; a star's branches;
     /// Kelvin `[force, sense]`): each group's branch is its own subtree.
@@ -33,10 +34,14 @@ pub struct CommonNode {
     pub star: bool,
 }
 
-/// Every common node of one routed layout, measured on `stack`.
+/// Every common node of one routed layout, measured on `stack` (budget
+/// arm). A node's usage is `ΔR / max_delta_ohm`; a broken star is a
+/// violation of its own.
 #[derive(Clone)]
 pub struct CommonNodes {
+    /// The nodes, one rule each.
     pub nodes: Vec<CommonNode>,
+    /// The routing stack the branch R is measured on.
     pub stack: &'static Stack,
     /// The root halo: a star's feeds grown by this, nm (the lattice pitch).
     pub halo_nm: i32,
@@ -69,6 +74,8 @@ impl CommonNodes {
         (hi >= lo).then_some(hi - lo)
     }
 
+    /// `ΔR / max_delta_ohm`; `None` when unknown (no budget, or a group
+    /// unreached).
     fn usage(&self, n: &CommonNode, r: &Routes) -> Option<f32> {
         (n.max_delta_ohm > 0.0).then_some(())?;
         Some(self.delta_ohm(n, r)? / n.max_delta_ohm)

@@ -12,6 +12,7 @@ use super::Stack;
 /// stack — all routed metal against the tightest ratio.
 #[derive(Clone, Copy)]
 pub struct Antenna {
+    /// The gate net checked.
     pub net: NetId,
     /// Max ratio ×100 (the deck's tightest antenna rule): the fallback limit.
     pub max_ratio_x100: i32,
@@ -28,6 +29,7 @@ impl Rule for Antenna {
     type On = Routes;
     const REPAIR: crate::RepairKind = crate::RepairKind::Antenna;
     const LOCAL: bool = true;
+    /// Ratio overshoot past the worst stage's limit, ×100.
     fn cost(self, r: &Routes) -> f32 {
         let (ratio, limit) = self.worst(r);
         (ratio - limit).max(0.0) * 100.0
@@ -61,20 +63,22 @@ impl Rule for Antenna {
 }
 
 impl Antenna {
-    /// `(ratio, limit)` of the worst stage. Without the stack: all routed metal
-    /// over the gate area against the tightest ratio (the cumulative,
-    /// all-layers form, which over-estimates a per-layer rule), in the ×100
-    /// fixed point it has always been measured in.
+    /// `(ratio, limit)` of the worst stage. Without the stack (or a stack
+    /// with no antenna stage): all routed and cell metal over the gate area
+    /// against the tightest ratio (the cumulative, all-layers form, which
+    /// over-estimates a per-layer rule), in the ×100 fixed point it has
+    /// always been measured in.
     fn worst(self, r: &Routes) -> (f32, f32) {
-        // ponytail: O(all shapes) per evaluation; a per-layer spatial index if routing time shows it.
-        let foreign = |per_net: &[Vec<Shape>]| {
-            per_net.iter().enumerate().filter(|(k, _)| *k != self.net.0 as usize).flat_map(|(_, v)| v.iter().copied()).collect::<Vec<_>>()
-        };
-        let others = [foreign(&r.wires), foreign(&r.cell)].concat();
-        if let Some(w) = self.stack.and_then(|s| s.antenna(r.shapes(self.net), r.cell_metal(self.net), &others, r.gate_pins(self.net), self.gate_area_nm2)) {
-            return w;
+        let (wires, cell) = (r.shapes(self.net), r.cell_metal(self.net));
+        if let Some(stack) = self.stack {
+            // ponytail: O(all shapes) per evaluation; a per-layer spatial index if routing time shows it.
+            let me = self.net.0 as usize;
+            let others: Vec<Shape> = r.wires.iter().enumerate().chain(r.cell.iter().enumerate()).filter(|&(k, _)| k != me).flat_map(|(_, v)| v.iter().copied()).collect();
+            if let Some(w) = stack.antenna(wires, cell, &others, r.gate_pins(self.net), self.gate_area_nm2) {
+                return w;
+            }
         }
-        let area: i64 = r.shapes(self.net).iter().chain(r.cell_metal(self.net)).map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum();
+        let area: i64 = wires.iter().chain(cell).map(|s| i64::from(s.rect.w) * i64::from(s.rect.h)).sum();
         ((area * 100 / self.gate_area_nm2.max(1)) as f32 / 100.0, self.max_ratio_x100 as f32 / 100.0)
     }
 }

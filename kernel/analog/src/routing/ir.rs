@@ -20,6 +20,7 @@ use super::Stack;
 /// (as the bound); a nodal solve would replace both arms.
 #[derive(Clone, Copy)]
 pub struct IrDrop {
+    /// The current-carrying net.
     pub net: NetId,
     /// DC current the net carries, µA; negative = unknown.
     pub current_ua: i32,
@@ -27,6 +28,7 @@ pub struct IrDrop {
     pub max_drop_uv: i64,
     /// Safety margin on the budget, percent.
     pub margin_pct: u8,
+    /// The stack R is measured on; `None` = unknown.
     pub stack: Option<&'static Stack>,
 }
 

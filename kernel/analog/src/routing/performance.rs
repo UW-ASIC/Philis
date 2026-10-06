@@ -28,6 +28,7 @@ use crate::rule::RuleBatch;
 pub struct PerformanceBudget {
     /// The spec's metric, for reports.
     pub metric: String,
+    /// Nets whose ground C spends the bound, parallel to `weights`.
     pub nets: Vec<NetId>,
     /// Per-net weight, 1/aF (fraction of the headroom one aF spends).
     pub weights: Vec<f32>,
@@ -56,7 +57,9 @@ impl PerformanceBudget {
         Self { metric, nets, weights, af_per_nm, limit: 1.0, r_nets: Vec::new(), r_weights: Vec::new(), diff_pairs: Vec::new(), diff_weights: Vec::new(), coupling: Vec::new() }
     }
 
-    /// Spent fraction of the bound's headroom (of `|bound|` when `limit = 0`).
+    /// Spent fraction of the bound's headroom (of `|bound|` when `limit = 0`):
+    /// `Σ w_i · length_i · af_per_nm` over the ground-C terms only. Pairs past
+    /// the shorter of `nets` / `weights` are ignored.
     fn used(&self, r: &Routes) -> f32 {
         self.nets.iter().zip(&self.weights).map(|(&n, &w)| w * r.length(n) as f32 * self.af_per_nm).sum()
     }

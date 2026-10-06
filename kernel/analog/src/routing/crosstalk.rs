@@ -1,42 +1,35 @@
 //! Crosstalk exclusion (routing tier).
 
-use pnr_core::geom::Rect;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use crate::rule::Rule;
+use super::stack::edge_gap_sq;
 
-/// Same-layer clearance between nets `a` and `b` ≥ `min_spacing_nm`.
-/// Nets sharing no layer do not couple and always pass.
+/// Same-layer clearance between nets `a` and `b` ≥ `min_spacing_nm`
+/// (Euclidean edge-to-edge, so a diagonal neighbour counts by its corner
+/// distance). Nets sharing no layer do not couple and always pass. The
+/// router also enforces it while searching ([`Rule::separation`], RTE-18).
 #[derive(Clone, Copy)]
 pub struct CrosstalkExclusion {
+    /// One net of the pair (the victim for keep-away pricing).
     pub a: NetId,
+    /// The other net (the aggressor for keep-away pricing).
     pub b: NetId,
+    /// Required same-layer clearance, nm; `≤ 0` = any clearance passes.
     pub min_spacing_nm: i32,
     /// Safety margin on the floor, percent.
     pub margin_pct: u8,
 }
 
 impl CrosstalkExclusion {
-    /// Min same-layer edge gap between the nets' shapes, nm; `f32::MAX` when
-    /// they share no layer. ponytail: O(|A|·|B|), analog nets are short.
-    fn clearance(self, r: &Routes) -> f32 {
-        let mut best = f32::MAX;
-        for wa in r.shapes(self.a) {
-            for wb in r.shapes(self.b) {
-                if wa.layer == wb.layer {
-                    best = best.min(rect_gap(&wa.rect, &wb.rect));
-                }
-            }
-        }
-        best
+    /// Min same-layer edge gap between the nets' shapes, nm (`0` when they
+    /// touch or overlap); `None` when they share no layer.
+    fn clearance(self, r: &Routes) -> Option<f32> {
+        // ponytail: O(|A|·|B|), analog nets are short.
+        let (sa, sb) = (r.shapes(self.a), r.shapes(self.b));
+        let best = sa.iter().flat_map(|wa| sb.iter().filter(move |wb| wb.layer == wa.layer).map(move |wb| edge_gap_sq(&wa.rect, &wb.rect))).min()?;
+        Some((best as f64).sqrt() as f32)
     }
-}
-
-/// Euclidean edge-to-edge gap between two rects (`0` if touching/overlapping).
-fn rect_gap(p: &Rect, q: &Rect) -> f32 {
-    let dx = (q.x - (p.x + p.w)).max(p.x - (q.x + q.w)).max(0);
-    let dy = (q.y - (p.y + p.h)).max(p.y - (q.y + q.h)).max(0);
-    ((dx as f32).powi(2) + (dy as f32).powi(2)).sqrt()
 }
 
 impl Rule for CrosstalkExclusion {
@@ -44,14 +37,10 @@ impl Rule for CrosstalkExclusion {
     const REPAIR: crate::RepairKind = crate::RepairKind::KeepAway;
     /// Spacing shortfall, nm.
     fn cost(self, r: &Routes) -> f32 {
-        let d = self.clearance(r);
-        if d == f32::MAX {
-            return 0.0;
-        }
-        (self.min_spacing_nm as f32 - d).max(0.0)
+        self.clearance(r).map_or(0.0, |d| (self.min_spacing_nm as f32 - d).max(0.0))
     }
     fn satisfied(self, r: &Routes) -> bool {
-        self.clearance(r) >= self.min_spacing_nm as f32
+        self.clearance(r).is_none_or(|d| d >= self.min_spacing_nm as f32)
     }
     /// Both nets routed: an unrouted net has no clearance to measure, and
     /// "no shared layer" must not certify it (unknown is never pass).
@@ -72,35 +61,26 @@ impl Rule for CrosstalkExclusion {
     /// `(d − floor) / floor`; `1.0` when the nets share no layer.
     fn headroom(self, r: &Routes) -> f32 {
         let floor = self.min_spacing_nm.max(1) as f32;
-        let d = self.clearance(r);
-        if d == f32::MAX {
-            return 1.0;
-        }
-        (d - floor) / floor
+        self.clearance(r).map_or(1.0, |d| (d - floor) / floor)
     }
     /// `floor / clearance`: past `1.0` the nets sit closer than the floor.
     /// `None` when they share no layer.
     fn usage(self, r: &Routes) -> Option<f32> {
-        let d = self.clearance(r);
-        (d != f32::MAX).then(|| self.min_spacing_nm as f32 / d.max(1.0))
+        self.clearance(r).map(|d| self.min_spacing_nm as f32 / d.max(1.0))
     }
     fn margin(self) -> f32 {
         f32::from(self.margin_pct) / 100.0
     }
     fn residual(self, r: &Routes) -> f32 {
-        let d = self.clearance(r);
-        if d == f32::MAX {
-            return 0.0;
-        }
         let floor = self.min_spacing_nm as f32;
-        crate::rule::over(floor - d, floor)
+        self.clearance(r).map_or(0.0, |d| crate::rule::over(floor - d, floor))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pnr_core::geom::{LayerId, Shape};
+    use pnr_core::geom::{LayerId, Rect, Shape};
 
     fn met1(x: i32) -> Shape {
         Shape { layer: LayerId(1), rect: Rect { x, y: 0, w: 1_000, h: 260 } }

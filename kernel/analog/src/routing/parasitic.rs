@@ -15,6 +15,7 @@ use super::Stack;
 /// R_via)·W/R□`) needs an R budget the annotator does not derive.
 #[derive(Clone, Copy)]
 pub struct ParasiticBudget {
+    /// The budgeted net.
     pub net: NetId,
     /// Drawn length at which the budget is spent, nm — the fallback check.
     pub max_len_nm: i64,

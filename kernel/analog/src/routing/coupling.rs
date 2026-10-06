@@ -10,6 +10,8 @@ use pnr_core::routes::Routes;
 
 use crate::metadata::{NetClass, NetClassification};
 use crate::rule::Rule;
+use super::shield::{intersection_len, merge_spans};
+use super::stack::{overlap_area_nm2, parallel};
 use super::Stack;
 
 /// `ε·h` in `C = ε·h·run/gap`, aF (εr 3.9, ~0.35 µm metal): two wires 400 nm
@@ -19,7 +21,8 @@ use super::Stack;
 const EPS_H_AF: f32 = 12.0;
 
 /// Lateral coupling over `run` nm at `gap` nm on `layer`, aF: the deck's
-/// `ε0·k·t·run/gap` when known (TOPO eq. 4.3), else `EPS_H_AF`.
+/// `ε0·k·t·run/gap` when known (TOPO eq. 4.3), else `EPS_H_AF`. A gap below
+/// 1 nm counts as 1 nm.
 fn run_af(stack: Option<&Stack>, layer: u16, run: i32, gap: i32) -> f32 {
     stack.and_then(|s| s.lateral_run_af(layer, run, gap)).unwrap_or(EPS_H_AF * run as f32 / gap.max(1) as f32)
 }
@@ -89,24 +92,16 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
             let mut covered: Vec<(i32, i32)> = Vec::new();
             for (gap, span, mine) in side {
                 if mine {
-                    let free = i64::from(span.1 - span.0) - super::shield::intersection_len(&covered, &[span]);
+                    let free = i64::from(span.1 - span.0) - intersection_len(&covered, &[span]);
                     c += run_af(stack, layer, free as i32, gap);
                 }
                 covered.push(span);
-                covered.sort_unstable();
-                let mut merged: Vec<(i32, i32)> = Vec::with_capacity(covered.len());
-                for (x0, x1) in covered.drain(..) {
-                    match merged.last_mut() {
-                        Some(last) if x0 <= last.1 => last.1 = last.1.max(x1),
-                        _ => merged.push((x0, x1)),
-                    }
-                }
-                covered = merged;
+                merge_spans(&mut covered);
             }
         }
         // End-on: separated along the run, overlapping across it.
         for q in b.iter().filter(|q| q.layer.0 == layer) {
-            if let Some((run, gap)) = super::stack::parallel(&r, &q.rect) {
+            if let Some((run, gap)) = parallel(&r, &q.rect) {
                 let along = if horiz { q.rect.x >= r.x + r.w || q.rect.x + q.rect.w <= r.x } else { q.rect.y >= r.y + r.h || q.rect.y + q.rect.h <= r.y };
                 if along {
                     c += run_af(stack, layer, run, gap);
@@ -119,18 +114,15 @@ pub fn net_pair_af(stack: Option<&Stack>, a: &[Shape], b: &[Shape], screens: &[S
         for &(la, p, _) in &ra {
             for &(lb, q, _) in &rb {
                 let Some(per) = st.cross_af_um2(la, lb) else { continue };
-                let w = (p.x + p.w).min(q.x + q.w) - p.x.max(q.x);
-                let h = (p.y + p.h).min(q.y + q.h) - p.y.max(q.y);
-                if w > 0 && h > 0 {
-                    c += per * (f64::from(w) * f64::from(h) * 1e-6) as f32;
-                }
+                c += per * (overlap_area_nm2(&p, &q) as f64 * 1e-6) as f32;
             }
         }
     }
     c
 }
 
-/// Every shape of `r` but those of the nets in `skip`: what screens a pair.
+/// Every routed wire shape of `r` but those of the nets in `skip` (indices
+/// into [`Routes::wires`]): what screens a pair. Allocates; O(all shapes).
 #[must_use]
 pub fn screens_but(r: &Routes, skip: &[usize]) -> Vec<Shape> {
     r.wires.iter().enumerate().filter(|(n, _)| !skip.contains(n)).flat_map(|(_, w)| w.iter().copied()).collect()
@@ -141,6 +133,7 @@ pub fn screens_but(r: &Routes, skip: &[usize]) -> Vec<Shape> {
 pub struct CouplingBudget {
     /// The victim.
     pub net: NetId,
+    /// Allowed weighted coupling onto the victim from all aggressors, aF.
     pub max_coupling_af: i64,
     /// Safety margin held back from the budget, percent.
     pub margin_pct: u8,

@@ -10,8 +10,9 @@ use pnr_core::GatePin;
 pub struct Layer {
     /// `LayerId` of the deck layer.
     pub id: u16,
-    /// Ground capacitance per area and per edge length: aF/µm², aF/µm.
+    /// Ground (area) capacitance, aF/µm²; `0` = none (a cut).
     pub area_af_um2: f32,
+    /// Ground fringe capacitance per µm of edge, aF/µm; `0` = none.
     pub fringe_af_um: f32,
     /// `ε0·k·t` in aF·nm/µm: lateral coupling to a parallel wire `gap` nm
     /// away is `lateral · run_µm / gap_nm` aF (TOPO eq. 4.3).
@@ -38,9 +39,13 @@ pub struct Layer {
     pub cross_af_um2: f32,
 }
 
-/// The routing stack, bottom-up (metals and cuts interleaved).
+/// The routing stack, bottom-up (metals and cuts interleaved): the deck's
+/// per-layer parasitics and antenna rules every routing budget measures with.
+/// Built once per PDK and leaked to `&'static` so `Copy` rules can hold it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stack {
+    /// Every conductor, bottom-up; a layer's index here is its stack rank
+    /// (adjacent ranks touch through a cut). `id`s are unique.
     pub layers: Vec<Layer>,
     /// The deck's antenna rules sum every layer up to the stage
     /// (`antenna_cumulative_*`); else each stage counts its own layer.
@@ -56,11 +61,15 @@ pub struct Stack {
 /// with `diode_credit: 0`, whose area term is refused as unit-less).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiodeCredit {
+    /// `LayerId` of the diode's credited layer.
     pub layer: u16,
+    /// Ratio reduction granted (conductor/gate area, unitless).
     pub bonus: f32,
 }
 
 impl Stack {
+    /// The layer with `LayerId` `id` and its stack rank; `None` off the stack.
+    /// O(layers).
     fn at(&self, id: u16) -> Option<(usize, &Layer)> {
         self.layers.iter().enumerate().find(|(_, l)| l.id == id)
     }
@@ -96,11 +105,7 @@ impl Stack {
     pub fn resistance_ohm(&self, shapes: &[Shape]) -> f32 {
         shapes
             .iter()
-            .filter_map(|s| {
-                let (_, l) = self.at(s.layer.0)?;
-                let (w, len) = (s.rect.w.min(s.rect.h).max(1) as f32, s.rect.w.max(s.rect.h) as f32);
-                Some(if l.cut { l.sheet_ohm } else { l.sheet_ohm * len / w })
-            })
+            .filter_map(|s| self.at(s.layer.0).map(|(_, l)| shape_ohm(l, &s.rect)))
             .sum()
     }
 
@@ -118,11 +123,7 @@ impl Stack {
     pub fn path_resistance_ohm(&self, shapes: &[Shape]) -> f32 {
         let nodes: Vec<(usize, Rect, f32)> = shapes
             .iter()
-            .filter_map(|s| {
-                let (rank, l) = self.at(s.layer.0)?;
-                let (w, len) = (s.rect.w.min(s.rect.h).max(1) as f32, s.rect.w.max(s.rect.h) as f32);
-                Some((rank, s.rect, if l.cut { l.sheet_ohm } else { l.sheet_ohm * len / w }))
-            })
+            .filter_map(|s| self.at(s.layer.0).map(|(rank, l)| (rank, s.rect, shape_ohm(l, &s.rect))))
             .collect();
         if nodes.is_empty() {
             return 0.0;
@@ -366,11 +367,7 @@ impl Stack {
                 let mut area: f32 = piece.iter().map(|&k| built[k]).filter(|&(r, _)| counts(r)).map(|(_, q)| exposed(q)).sum();
                 if layer.latent_merge_nm > 0 {
                     let g = i64::from(layer.latent_merge_nm);
-                    let near = |a: &Rect, b: &Rect| {
-                        let dx = i64::from((b.x - (a.x + a.w)).max(a.x - (b.x + b.w)).max(0));
-                        let dy = i64::from((b.y - (a.y + a.h)).max(a.y - (b.y + b.h)).max(0));
-                        dx * dx + dy * dy <= g * g
-                    };
+                    let near = |a: &Rect, b: &Rect| edge_gap_sq(a, b) <= g * g;
                     let own: Vec<&Rect> = piece.iter().map(|&k| &built[k]).filter(|&&(r, _)| r == stage).map(|(_, q)| q).collect();
                     area += others
                         .iter()
@@ -391,15 +388,17 @@ impl Stack {
     }
 }
 
-/// [`Stack::port_graph`]'s resistor network: adjacency `(node, Ω, shape
-/// index)` (`u32::MAX`: a 0-Ω junction or terminal link) and each terminal's
-/// node.
+/// [`Stack::port_graph`]'s resistor network, nodes indexed `0..adj.len()`.
 pub(crate) struct PortGraph {
+    /// Per node, its links `(node, Ω, shape index)` (`u32::MAX`: a 0-Ω
+    /// junction or terminal link); every link is stored at both ends.
     pub(crate) adj: Vec<Vec<(usize, f32, u32)>>,
+    /// Per terminal, its node; `None` when it touches no stack shape.
     pub(crate) term: Vec<Option<usize>>,
 }
 
 impl PortGraph {
+    /// Joins `a` and `b` both ways by `r` Ω through `shape`.
     fn link(&mut self, a: usize, b: usize, r: f32, shape: u32) {
         self.adj[a].push((b, r, shape));
         self.adj[b].push((a, r, shape));
@@ -445,8 +444,9 @@ impl PortGraph {
     }
 }
 
-/// `(run, gap)` of two shapes separated on one axis and overlapping on the
-/// other; `None` otherwise.
+/// `(run, gap)` in nm of two rects separated (gap > 0) on one axis and
+/// overlapping (run > 0) on the other; `None` when they touch, overlap, or
+/// sit diagonally apart.
 #[must_use]
 pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
     let gap_x = (q.x - (p.x + p.w)).max(p.x - (q.x + q.w));
@@ -460,6 +460,35 @@ pub fn parallel(p: &Rect, q: &Rect) -> Option<(i32, i32)> {
     } else {
         None
     }
+}
+
+/// Series R of one shape on layer `l`, Ω: one cut's R for a cut, else
+/// `R□ · long side / short side` (a zero-width side counts as 1 nm).
+fn shape_ohm(l: &Layer, r: &Rect) -> f32 {
+    if l.cut {
+        return l.sheet_ohm;
+    }
+    l.sheet_ohm * r.w.max(r.h) as f32 / r.w.min(r.h).max(1) as f32
+}
+
+/// Squared Euclidean edge-to-edge gap between two rects, nm² (`0` when they
+/// touch or overlap). Computed in `i64`, so any `i32` coordinates are safe.
+#[must_use]
+pub(crate) fn edge_gap_sq(a: &Rect, b: &Rect) -> i64 {
+    let (ax0, ax1, bx0, bx1) = (i64::from(a.x), i64::from(a.x) + i64::from(a.w), i64::from(b.x), i64::from(b.x) + i64::from(b.w));
+    let (ay0, ay1, by0, by1) = (i64::from(a.y), i64::from(a.y) + i64::from(a.h), i64::from(b.y), i64::from(b.y) + i64::from(b.h));
+    let dx = (bx0 - ax1).max(ax0 - bx1).max(0);
+    let dy = (by0 - ay1).max(ay0 - by1).max(0);
+    dx * dx + dy * dy
+}
+
+/// Area two rects share, nm² (`0` when they only touch or are apart).
+/// Computed in `i64`.
+#[must_use]
+pub(crate) fn overlap_area_nm2(a: &Rect, b: &Rect) -> i64 {
+    let w = (i64::from(a.x) + i64::from(a.w)).min(i64::from(b.x) + i64::from(b.w)) - i64::from(a.x.max(b.x));
+    let h = (i64::from(a.y) + i64::from(a.h)).min(i64::from(b.y) + i64::from(b.h)) - i64::from(a.y.max(b.y));
+    w.max(0) * h.max(0)
 }
 
 /// Area (nm²) and perimeter (nm) of the union of `rects`, by coordinate

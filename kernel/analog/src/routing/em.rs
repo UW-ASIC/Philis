@@ -100,10 +100,12 @@ pub const MAX_LAYERS: usize = 16;
 /// ponytail: DC average only; RMS/peak need waveforms.
 #[derive(Clone, Copy)]
 pub struct Electromigration {
+    /// The net checked.
     pub net: NetId,
     /// `(layer, limit)` per metal **and cut** the deck limits (pin-access
     /// layer and cut included); unused slots `u16::MAX`.
     pub limits: [(u16, Limit); MAX_LAYERS],
+    /// The stack the current flow is solved on; `None` = unknown.
     pub stack: Option<&'static Stack>,
     /// Count a via group by its front row (sidecar `em_front_row_cuts`, default
     /// `true`): current crowds into the cuts first met along a landing metal, so
@@ -128,6 +130,7 @@ fn front_row(cuts: &[&Rect], m: &Rect) -> u32 {
 }
 
 impl Electromigration {
+    /// The limit listed for `LayerId` `layer`; `None` when unlimited.
     fn limit(self, layer: u16) -> Option<Limit> {
         self.limits.iter().find(|(l, _)| *l == layer).map(|&(_, lim)| lim)
     }
@@ -242,15 +245,19 @@ impl Electromigration {
     }
 }
 
-/// Hastings eq. 14.6 (L45870–45932): A = √(ρ·τ·I_pk²/(2·C_V·ΔT)), τ 225 ns, ΔT 50 K, I_pk = hbm_v/1500 Ω; µm².
+/// Minimum conductor cross-section that survives an HBM zap of `hbm_v` volts
+/// adiabatically, µm²: Hastings eq. 14.6 (L45870–45932), `A = √(ρ·τ·I_pk²/
+/// (2·C_V·ΔT))` with τ 225 ns, ΔT 50 K and `I_pk = hbm_v / 1500 Ω`.
+/// `rho_uohm_cm` in µΩ·cm, `cv_j_per_k_cm3` in J/(K·cm³) ([`metal_family`]).
 #[must_use]
 pub fn esd_area_um2(hbm_v: f32, rho_uohm_cm: f32, cv_j_per_k_cm3: f32) -> f32 {
     let (rho, i) = (f64::from(rho_uohm_cm) * 1e-6, f64::from(hbm_v) / 1500.0);
     ((rho * 225e-9 * i * i / (2.0 * f64::from(cv_j_per_k_cm3) * 50.0)).sqrt() * 1e8) as f32
 }
 
-/// Table 14.3 (ρ µΩ·cm, C_V J/K/cm³) for `metal_family`: "al" (2.7, 2.42), "cu" (1.7, 3.45); absent or other → Al,
-/// the larger area.
+/// `(ρ µΩ·cm, C_V J/(K·cm³))` of a deck's `metal_family` (Hastings Table
+/// 14.3): `"cu"` (1.7, 3.45); `"al"`, absent or any other key → Al (2.7,
+/// 2.42), the larger area. Keys are case-sensitive.
 #[must_use]
 pub fn metal_family(key: Option<&str>) -> (f32, f32) {
     match key {
@@ -265,8 +272,11 @@ pub fn metal_family(key: Option<&str>) -> (f32, f32) {
 /// pad net rarely has.
 #[derive(Clone, Copy)]
 pub struct EsdWidth {
+    /// The ESD pad net.
     pub net: NetId,
+    /// Required conductor cross-section, µm² ([`esd_area_um2`]).
     pub area_um2: f32,
+    /// The stack whose `thickness_nm` turns the area into a width.
     pub stack: &'static Stack,
 }
 

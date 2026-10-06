@@ -19,8 +19,12 @@ use crate::rule::Rule;
 /// impedance is not measured.
 #[derive(Clone, Copy)]
 pub struct Shield {
+    /// The sensitive net to shield.
     pub victim: NetId,
+    /// The quiet net whose metal forms the shield.
     pub reference: NetId,
+    /// Required shielded share of the victim's wire length, percent
+    /// (`0..=100`).
     pub min_coverage_pct: u8,
     /// Farthest a shield wire may sit from the victim's edge, nm.
     pub max_gap_nm: i32,
@@ -46,15 +50,8 @@ impl Shield {
                     .map(|(a, b)| (a.max(lo), b.min(hi)))
                     .filter(|(a, b)| a < b)
                     .collect();
-                spans.sort_unstable();
-                let mut merged: Vec<(i32, i32)> = Vec::with_capacity(spans.len());
-                for (a, b) in spans {
-                    match merged.last_mut() {
-                        Some(last) if a <= last.1 => last.1 = last.1.max(b),
-                        _ => merged.push((a, b)),
-                    }
-                }
-                merged
+                merge_spans(&mut spans);
+                spans
             };
             // Shielded = reference on both sides at the same point, not the
             // shorter of the two side lengths.
@@ -64,7 +61,26 @@ impl Shield {
     }
 }
 
-/// Total length common to two sorted, disjoint interval lists; O(a + b).
+/// Sorts half-open spans `[a, b)` and merges every overlapping or abutting
+/// pair in place: the result is sorted and disjoint. O(n log n), no
+/// allocation.
+pub(crate) fn merge_spans(spans: &mut Vec<(i32, i32)>) {
+    spans.sort_unstable();
+    let mut n = 0;
+    for k in 0..spans.len() {
+        let (a, b) = spans[k];
+        if n > 0 && a <= spans[n - 1].1 {
+            spans[n - 1].1 = spans[n - 1].1.max(b);
+        } else {
+            spans[n] = (a, b);
+            n += 1;
+        }
+    }
+    spans.truncate(n);
+}
+
+/// Total length common to two sorted, disjoint span lists (as
+/// [`merge_spans`] leaves them); O(p + q). Unsorted input under-counts.
 pub(crate) fn intersection_len(p: &[(i32, i32)], q: &[(i32, i32)]) -> i64 {
     let (mut i, mut j, mut len) = (0, 0, 0i64);
     while i < p.len() && j < q.len() {

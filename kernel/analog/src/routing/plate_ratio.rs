@@ -15,10 +15,14 @@ use crate::rule::RuleBatch;
 /// capacitor `Unitization`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlateSet {
+    /// The shared top-plate net.
     pub top: NetId,
+    /// Each bit's bottom-plate net and its unit count (`0` reads as 1).
     pub bits: Vec<(NetId, u32)>,
     /// One unit's C, aF; `NAN` = unknown (no `c_af` on any one-unit member).
     pub c_unit_af: f32,
+    /// The placed array's bounding box, absolute nm: metal wholly inside
+    /// it is plate, not lead.
     pub array: Rect,
 }
 
@@ -31,15 +35,20 @@ pub struct PlateSet {
 /// apart and never overlap on adjacent layers ([`RuleBatch::separations`]).
 #[derive(Clone, Debug)]
 pub struct PlateRatio {
+    /// The capacitor set.
     pub set: PlateSet,
+    /// Allowed spread, percent ×10 (`10` = 1 %).
     pub tol_pct10: i32,
+    /// The stack lead C is measured on.
     pub stack: &'static Stack,
     /// The first routed metal's spacing, nm.
     pub space_nm: i32,
 }
 
 impl PlateRatio {
-    /// Per bit, its lead C, aF.
+    /// Per bit (in `set.bits` order), its lead C, aF: ground C of its wire
+    /// shapes not wholly inside `set.array`, plus their screened coupling to
+    /// every other routed net. O(nets · shapes²).
     #[must_use]
     pub fn lead_af(&self, r: &Routes) -> Vec<f32> {
         let a = self.set.array;
@@ -56,7 +65,7 @@ impl PlateRatio {
             .collect()
     }
 
-    /// `C_i / n_i` per bit, aF.
+    /// `C_i / n_i` per bit, aF (a unit count of `0` reads as 1).
     #[must_use]
     pub fn per_unit_af(&self, r: &Routes) -> Vec<f32> {
         self.lead_af(r).iter().zip(&self.set.bits).map(|(&c, &(_, n))| c / n.max(1) as f32).collect()
@@ -75,6 +84,7 @@ impl PlateRatio {
         Some(per.iter().map(|c| (c - mean).abs()).fold(0.0, f32::max) / self.set.c_unit_af * 100.0)
     }
 
+    /// `over(spread − tol, tol)`; `0` when unknown.
     fn residual(&self, r: &Routes) -> f32 {
         let tol = self.tol_pct10 as f32 / 10.0;
         self.spread_pct(r).map_or(0.0, |s| crate::rule::over(s - tol, tol))

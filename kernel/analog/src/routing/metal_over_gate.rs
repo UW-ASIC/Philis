@@ -4,6 +4,7 @@ use pnr_core::geom::Rect;
 use pnr_core::routes::Routes;
 
 use crate::rule::Rule;
+use super::stack::overlap_area_nm2;
 
 /// Most routed metals [`MetalOverGate::metals`] lists.
 pub const MAX_METALS: usize = 8;
@@ -15,7 +16,9 @@ pub const MAX_METALS: usize = 8;
 /// Built per routed layout (the rect is placed geometry); `dr` evaluates it.
 #[derive(Clone, Copy, Debug)]
 pub struct MetalOverGate {
+    /// The gate's active area, absolute nm.
     pub rect: Rect,
+    /// Index of the placed cell the gate belongs to (for reports and repair).
     pub cell: u32,
     /// The routed metals' `LayerId`s, `u16::MAX`-padded: a cut or the pin-access
     /// conductor over the gate is not a lead.
@@ -23,22 +26,13 @@ pub struct MetalOverGate {
 }
 
 impl MetalOverGate {
-    /// Σ overlap of every routed metal shape (any net) with `rect`, µm².
+    /// Σ overlap of every routed wire shape (any net) on a listed metal with
+    /// `rect`, µm². Overlapping shapes count their shared area twice; cell
+    /// metal ([`Routes::cell`]) is not a lead and is ignored. O(all shapes).
     #[must_use]
     pub fn overlap_um2(self, r: &Routes) -> f32 {
-        let g = self.rect;
-        let nm2: i64 = r
-            .wires
-            .iter()
-            .flatten()
-            .filter(|s| self.metals.contains(&s.layer.0))
-            .map(|s| {
-                let w = (s.rect.x + s.rect.w).min(g.x + g.w) - s.rect.x.max(g.x);
-                let h = (s.rect.y + s.rect.h).min(g.y + g.h) - s.rect.y.max(g.y);
-                if w > 0 && h > 0 { i64::from(w) * i64::from(h) } else { 0 }
-            })
-            .sum();
-        nm2 as f32 * 1e-6
+        let nm2: i64 = r.wires.iter().flatten().filter(|s| self.metals.contains(&s.layer.0)).map(|s| overlap_area_nm2(&s.rect, &self.rect)).sum();
+        (nm2 as f64 * 1e-6) as f32
     }
 }
 

@@ -1,13 +1,13 @@
 //! Differential-pair route matching (routing tier).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use pnr_core::ids::NetId;
 use pnr_core::routes::Routes;
 use pnr_core::geom::Shape;
 use pnr_core::Terminal;
 use crate::rule::Rule;
 use super::Stack;
-use super::coupling::net_pair_af;
+use super::coupling::{net_pair_af, screens_but};
 
 /// `pos`/`neg` routes match electrically, not just in total length: with
 /// `same_layer_required`, their **route signatures** agree — per layer, drawn
@@ -21,19 +21,24 @@ use super::coupling::net_pair_af;
 ///
 /// With the deck's stack it compares what each side presents: ground C;
 /// series R from the net's centre to each terminal (sorted values, so a
-/// mirror image matches); the via count per cut layer; and, with
-/// `aggressor_weight`, the weighted coupling each side takes from every other
-/// net. The result is the worst term. Sides with unequal terminal counts (an
-/// ABBA cell) compare the runs' R and no via count.
+/// mirror image matches; a terminal no shape reaches reads 100 %); the via
+/// count per cut layer; and, with `aggressor_weight`, the weighted coupling
+/// each side takes from every other net. The result is the worst term.
+/// Sides with unequal terminal counts (an ABBA cell) compare the runs' R and
+/// no via count. `same_layer_required` is ignored with a stack.
 ///
-/// ponytail: star-model terminal R (no tree solve), lateral coupling only
-/// (no crossings, no screening; RTE-18); no `project` — `dr` fixes it by mirrored rip-up.
+/// ponytail: star-model terminal R (no tree solve); no `project` — `dr`
+/// fixes it by mirrored rip-up.
 #[derive(Clone, Copy)]
 pub struct Differential {
+    /// The positive side of the pair.
     pub pos: NetId,
+    /// The negative side of the pair.
     pub neg: NetId,
-    /// Max length mismatch, percent ×10.
+    /// Max mismatch, percent ×10 (`50` = 5 %).
     pub max_len_delta_pct10: i32,
+    /// Without a stack: compare the per-layer route signature, not only the
+    /// total drawn length.
     pub same_layer_required: bool,
     /// Per-layer R/C; `None` = the geometric signature.
     pub stack: Option<&'static Stack>,
@@ -42,114 +47,131 @@ pub struct Differential {
     pub aggressor_weight: Option<&'static [f32]>,
 }
 
+/// `|a − b|` over their mean, percent; `0` when the mean is not positive.
+fn rel_pct(a: f32, b: f32) -> f32 {
+    let mean = (a + b) / 2.0;
+    if mean > 0.0 { (a - b).abs() / mean * 100.0 } else { 0.0 }
+}
+
 impl Differential {
-    /// `|a − b| / mean · 100`; `0` when both are empty.
+    /// `|a − b| / mean · 100` of the total drawn lengths; `0` when both are
+    /// empty.
     fn len_delta_pct(self, r: &Routes) -> f32 {
-        let a = r.length(self.pos) as f32;
-        let b = r.length(self.neg) as f32;
-        let avg = (a + b) / 2.0;
-        if avg > 0.0 {
-            (a - b).abs() / avg * 100.0
-        } else {
-            0.0
+        rel_pct(r.length(self.pos) as f32, r.length(self.neg) as f32)
+    }
+
+    /// Mismatch, percent (see the type doc): the stack's electrical terms
+    /// when a stack is given, else the geometric signature, else (without
+    /// `same_layer_required`) the total-length delta.
+    fn mismatch_pct(self, r: &Routes) -> f32 {
+        match self.stack {
+            Some(st) => self.electrical_pct(st, r),
+            None if self.same_layer_required => self.signature_pct(r),
+            None => self.len_delta_pct(r),
         }
     }
 
-    /// Signature mismatch, percent (see the type doc); total-length delta
-    /// when layers are not required to match.
-    fn mismatch_pct(self, r: &Routes) -> f32 {
-        if let Some(st) = self.stack {
-            let (pa, pb) = (r.shapes(self.pos), r.shapes(self.neg));
-            let rel = |a: f32, b: f32| {
-                let mean = (a + b) / 2.0;
-                if mean > 0.0 { (a - b).abs() / mean * 100.0 } else { 0.0 }
-            };
-            let (ca, cb) = (st.ground_af(pa), st.ground_af(pb));
-            let (ta, tb) = (r.terminals(self.pos), r.terminals(self.neg));
-            let paired = !ta.is_empty() && ta.len() == tb.len();
-            // R of the runs alone: pads and cuts follow the pin set, and a
-            // paralleled pin's pad summed in would read as series R.
-            let runs = |s: &[Shape]| st.resistance_ohm(&s.iter().copied().filter(|q| q.rect.w != q.rect.h).collect::<Vec<_>>());
-            let r_term = if paired {
-                let ohm = |s: &[Shape], t: &[Terminal]| st.terminal_resistance_ohm(s, &t.iter().map(|t| t.at).collect::<Vec<_>>());
-                let (ra, rb) = (ohm(pa, ta), ohm(pb, tb));
-                if ra.iter().chain(&rb).any(Option::is_none) {
-                    100.0
-                } else {
-                    let sorted = |v: Vec<Option<f32>>| {
-                        let mut v: Vec<f32> = v.into_iter().flatten().collect();
-                        v.sort_by(f32::total_cmp);
-                        v
-                    };
-                    let (ra, rb) = (sorted(ra), sorted(rb));
-                    let mean = (ra.iter().sum::<f32>() + rb.iter().sum::<f32>()) / (ra.len() + rb.len()) as f32;
-                    let worst = ra.iter().zip(&rb).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
-                    if mean > 0.0 { worst / mean * 100.0 } else { 0.0 }
-                }
-            } else {
-                rel(runs(pa), runs(pb))
-            };
-            let vias = if paired {
-                let cuts = |s: &[Shape]| {
-                    let mut m: BTreeMap<u16, f32> = BTreeMap::new();
-                    for q in s.iter().filter(|q| st.layers.iter().any(|l| l.id == q.layer.0 && l.cut)) {
-                        *m.entry(q.layer.0).or_default() += 1.0;
-                    }
-                    m
-                };
-                let (na, nb) = (cuts(pa), cuts(pb));
-                let get = |m: &BTreeMap<u16, f32>, l: &u16| m.get(l).copied().unwrap_or(0.0);
-                let delta: f32 = na.keys().chain(nb.keys()).collect::<BTreeSet<_>>().into_iter().map(|l| (get(&na, l) - get(&nb, l)).abs()).sum();
-                let mean = (na.values().sum::<f32>() + nb.values().sum::<f32>()) / 2.0;
-                if mean > 0.0 { delta / mean * 100.0 } else { 0.0 }
-            } else {
-                0.0
-            };
-            let coupling = match self.aggressor_weight {
-                Some(w) if ca + cb > 0.0 => {
-                    let skew: f32 = r.wires.iter().enumerate()
-                        .filter(|&(a, _)| a != self.pos.0 as usize && a != self.neg.0 as usize)
-                        .map(|(a, x)| {
-                            let wa = w.get(a).copied().unwrap_or(1.0);
-                            let screens = if wa == 0.0 { Vec::new() } else { super::coupling::screens_but(r, &[self.pos.0 as usize, self.neg.0 as usize, a]) };
-                            if wa == 0.0 { 0.0 } else { wa * (net_pair_af(Some(st), pa, x, &screens) - net_pair_af(Some(st), pb, x, &screens)).abs() }
-                        })
-                        .sum();
-                    skew / ((ca + cb) / 2.0) * 100.0
-                }
-                _ => 0.0,
-            };
-            return rel(ca, cb).max(r_term).max(vias).max(coupling);
-        }
-        if !self.same_layer_required {
-            return self.len_delta_pct(r);
-        }
-        // Per layer: (length, area, squares).
+    /// Worst of the ground-C, terminal-R, via-count and coupling-skew
+    /// mismatches measured on `st`, percent.
+    fn electrical_pct(self, st: &Stack, r: &Routes) -> f32 {
+        let (pa, pb) = (r.shapes(self.pos), r.shapes(self.neg));
+        let (ca, cb) = (st.ground_af(pa), st.ground_af(pb));
+        let (ta, tb) = (r.terminals(self.pos), r.terminals(self.neg));
+        let paired = !ta.is_empty() && ta.len() == tb.len();
+        let r_term = if paired { terminal_r_pct(st, pa, ta, pb, tb) } else { runs_r_pct(st, pa, pb) };
+        let vias = if paired { via_count_pct(st, pa, pb) } else { 0.0 };
+        let coupling = match self.aggressor_weight {
+            Some(w) if ca + cb > 0.0 => self.coupling_skew_af(st, w, r) / ((ca + cb) / 2.0) * 100.0,
+            _ => 0.0,
+        };
+        rel_pct(ca, cb).max(r_term).max(vias).max(coupling)
+    }
+
+    /// `Σ_m w_m · |C(pos, m) − C(neg, m)|` over every other net `m`, aF.
+    fn coupling_skew_af(self, st: &Stack, w: &[f32], r: &Routes) -> f32 {
+        let (pa, pb) = (r.shapes(self.pos), r.shapes(self.neg));
+        let (p, n) = (self.pos.0 as usize, self.neg.0 as usize);
+        r.wires
+            .iter()
+            .enumerate()
+            .filter(|&(m, _)| m != p && m != n)
+            .map(|(m, x)| (w.get(m).copied().unwrap_or(1.0), m, x))
+            .filter(|&(wm, ..)| wm != 0.0)
+            .map(|(wm, m, x)| {
+                let screens = screens_but(r, &[p, n, m]);
+                wm * (net_pair_af(Some(st), pa, x, &screens) - net_pair_af(Some(st), pb, x, &screens)).abs()
+            })
+            .sum()
+    }
+
+    /// Worst per-layer `(length, area, squares)` signature mismatch, percent.
+    fn signature_pct(self, r: &Routes) -> f32 {
         let sig = |n: NetId| {
-            let mut m: std::collections::BTreeMap<u16, (f64, f64, f64)> = std::collections::BTreeMap::new();
+            let mut m: BTreeMap<u16, [f64; 3]> = BTreeMap::new();
             for s in r.shapes(n) {
                 let e = m.entry(s.layer.0).or_default();
                 let (w, h) = (f64::from(s.rect.w), f64::from(s.rect.h));
-                e.0 += w.max(h);
-                e.1 += w * h;
-                e.2 += f64::from(u8::from(s.rect.w == s.rect.h));
+                e[0] += w.max(h);
+                e[1] += w * h;
+                e[2] += f64::from(u8::from(s.rect.w == s.rect.h));
             }
             m
         };
         let (a, b) = (sig(self.pos), sig(self.neg));
-        let layers: std::collections::BTreeSet<u16> = a.keys().chain(b.keys()).copied().collect();
-        let term = |f: fn(&(f64, f64, f64)) -> f64| {
-            let get = |m: &std::collections::BTreeMap<u16, (f64, f64, f64)>, l| m.get(&l).map_or(0.0, f);
-            let delta: f64 = layers.iter().map(|&l| (get(&a, l) - get(&b, l)).abs()).sum();
-            let mean = (a.values().map(f).sum::<f64>() + b.values().map(f).sum::<f64>()) / 2.0;
-            if mean > 0.0 { delta / mean * 100.0 } else { 0.0 }
-        };
-        term(|e| e.0).max(term(|e| e.1)).max(term(|e| e.2)) as f32
+        (0..3).map(|k| per_layer_pct(&a, &b, |e| e[k])).fold(0.0, f64::max) as f32
     }
 
+    /// The budget, percent.
     fn budget_pct(self) -> f32 {
         self.max_len_delta_pct10 as f32 / 10.0
     }
+}
+
+/// `Σ_layer |f(a) − f(b)|` over the mean of `Σ f(a)` and `Σ f(b)`, percent;
+/// a layer only one side has counts in full. `0` when the mean is not
+/// positive.
+fn per_layer_pct<T>(a: &BTreeMap<u16, T>, b: &BTreeMap<u16, T>, f: impl Fn(&T) -> f64) -> f64 {
+    let get = |m: &BTreeMap<u16, T>, l: &u16| m.get(l).map_or(0.0, &f);
+    let delta: f64 = a.keys().map(|l| (get(a, l) - get(b, l)).abs()).sum::<f64>() + b.keys().filter(|l| !a.contains_key(l)).map(|l| get(b, l).abs()).sum::<f64>();
+    let mean = (a.values().map(&f).sum::<f64>() + b.values().map(&f).sum::<f64>()) / 2.0;
+    if mean > 0.0 { delta / mean * 100.0 } else { 0.0 }
+}
+
+/// Worst gap between the two sides' centre-to-terminal R, sorted so a mirror
+/// image matches, over the mean R, percent; `100` when a terminal is
+/// unreached.
+fn terminal_r_pct(st: &Stack, pa: &[Shape], ta: &[Terminal], pb: &[Shape], tb: &[Terminal]) -> f32 {
+    let sorted = |s: &[Shape], t: &[Terminal]| -> Option<Vec<f32>> {
+        let at: Vec<_> = t.iter().map(|t| t.at).collect();
+        let mut v: Vec<f32> = st.terminal_resistance_ohm(s, &at).into_iter().collect::<Option<_>>()?;
+        v.sort_by(f32::total_cmp);
+        Some(v)
+    };
+    let (Some(ra), Some(rb)) = (sorted(pa, ta), sorted(pb, tb)) else { return 100.0 };
+    let mean = (ra.iter().sum::<f32>() + rb.iter().sum::<f32>()) / (ra.len() + rb.len()) as f32;
+    let worst = ra.iter().zip(&rb).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+    if mean > 0.0 { worst / mean * 100.0 } else { 0.0 }
+}
+
+/// [`rel_pct`] of the runs' series R alone (non-square shapes): pads and
+/// cuts follow the pin set, and a paralleled pin's pad summed in would read
+/// as series R.
+fn runs_r_pct(st: &Stack, pa: &[Shape], pb: &[Shape]) -> f32 {
+    let runs = |s: &[Shape]| st.resistance_ohm(&s.iter().copied().filter(|q| q.rect.w != q.rect.h).collect::<Vec<_>>());
+    rel_pct(runs(pa), runs(pb))
+}
+
+/// Per cut layer of `st`, the two sides' cut counts' summed gap over the
+/// mean count, percent.
+fn via_count_pct(st: &Stack, pa: &[Shape], pb: &[Shape]) -> f32 {
+    let cuts = |s: &[Shape]| {
+        let mut m: BTreeMap<u16, f64> = BTreeMap::new();
+        for q in s.iter().filter(|q| st.layers.iter().any(|l| l.id == q.layer.0 && l.cut)) {
+            *m.entry(q.layer.0).or_default() += 1.0;
+        }
+        m
+    };
+    per_layer_pct(&cuts(pa), &cuts(pb), |&n| n) as f32
 }
 
 impl Rule for Differential {
