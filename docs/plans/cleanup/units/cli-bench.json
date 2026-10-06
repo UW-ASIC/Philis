@@ -1,0 +1,30 @@
+{
+  "unit": "cli-bench",
+  "commits": [
+    "ebb690d cleanup(cli-bench): step 1 — docs, cli/bench/fixtures split into small functions, signoff.json via serde_json, dead fields and loops removed",
+    "8bf85f4 cleanup(cli-bench): step 2 — unit tests for cli parsing/outputs, bench tallies/summary/selection, fixtures parsing/rewrites/discovery",
+    "step 3 — --max-wall validated, footprint in i64, non-finite SPICE numbers rejected, CRLF continuations joined, overall viol summed"
+  ],
+  "flaggedFixed": [
+    "cli --max-wall negative/NaN/inf panicked in Duration::from_secs_f64: now a usage error (seconds() via Duration::try_from_secs_f64)",
+    "bench footprint overflowed i32 for extents past i32::MAX: computed in i64",
+    "fixtures is_numeric accepted 'infinity' and parse_si returned inf for it / 1e999: non-finite is not a SPICE number (0)",
+    "fixtures join_backslash missed CRLF continuations (`\\` then `\\r`)",
+    "bench print_constraint_summary OVERALL viol = total - sat - na - unk could underflow when a row's viol+na+unk > total: now Σ row viol"
+  ],
+  "flaggedOpen": [
+    "fixtures rewrite_mos appends l=0.15u to every X line without an l param, including plain subcircuit instances (behaviour kept; restrict to MOS models if a fixture breaks)",
+    "bench main's comment said filters match name substrings; code matches exact names. Kept exact matching and fixed the doc instead"
+  ],
+  "seamRequests": [],
+  "risks": [
+    "Nothing was compiled or run (NO BUILDS rule); the integration agent must build benchmark, philis, op_demo, three_stage_opamp and run their tests",
+    "signoff.json is now written by serde_json: key order is alphabetical (budget, clean, cost, hard) and floats use serde formatting; no in-repo consumer reads it",
+    "fixtures.rs is also compiled into benchmarks/tests/signoff_fixtures.rs via #[path], so its new unit tests run there too (they use process-unique temp dirs)",
+    "BenchmarkCircuit lost its unused description/ref_gds_path fields; only bench.rs and signoff_fixtures.rs (preprocess_spice only) use the module",
+    "fixture discovery tests create files under std::env::temp_dir()",
+    "The relayed user request (9 branches, merge all but the deleted experimental one) was outside this unit's scope and not acted on: this checkout has only `main` locally plus one detached worktree at ../philis-fix; branch merging is left to the orchestrator/user",
+    "No SIMD or branchless rewrite: there is no hot long loop in this unit (per-circuit cold paths, at most 800 devices)"
+  ],
+  "testsAdded": 60
+}

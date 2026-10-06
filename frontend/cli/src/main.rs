@@ -167,7 +167,7 @@ fn parse_args(args: Vec<String>) -> Result<Args, String> {
             "--interface" => cfg.interface = Some(library::Interface::from_json(&read(&val()?)?)?),
             "--out-rs" => out_rs = Some(val()?),
             "--constraints" => cfg.constraints = Some(read(&val()?).map_err(|e| format!("--constraints: {e}"))?),
-            "--max-wall" => cfg.max_wall = Some(std::time::Duration::from_secs_f64(num(&a, &val()?)?)),
+            "--max-wall" => cfg.max_wall = Some(seconds(&a, &val()?)?),
             "--hierarchy" => cfg.hierarchy = hierarchy(&val()?)?,
             _ if a.starts_with('-') => return Err(format!("unknown flag {a}\n{USAGE}")),
             _ => pos.push(a),
@@ -255,6 +255,15 @@ fn perf_config(path: &str, sim: library::oppoint::OpConfig) -> Result<library::p
 /// `<flag>: not a number: <v>`.
 fn num<T: std::str::FromStr>(flag: &str, v: &str) -> Result<T, String> {
     v.parse().map_err(|_| format!("{flag}: not a number: {v}"))
+}
+
+/// Parses a flag's wall-time value in seconds.
+///
+/// # Errors
+/// Not a number, or negative, NaN, infinite or too large for a `Duration`.
+fn seconds(flag: &str, v: &str) -> Result<std::time::Duration, String> {
+    std::time::Duration::try_from_secs_f64(num(flag, v)?)
+        .map_err(|_| format!("{flag}: not a non-negative finite number of seconds: {v}"))
 }
 
 /// The run's verdict: `(clean, summary line)`. Clean means no hard violation

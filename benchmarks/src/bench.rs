@@ -129,12 +129,14 @@ fn footprint(x: &[i32], y: &[i32], hw: &[i32], hh: &[i32]) -> (f64, f64) {
     if n == 0 {
         return (0.0, 0.0);
     }
-    let drawn: f64 = (0..n).map(|i| f64::from(2 * hw[i]) * f64::from(2 * hh[i])).sum();
-    let x0 = (0..n).map(|i| x[i] - hw[i]).min().unwrap();
-    let y0 = (0..n).map(|i| y[i] - hh[i]).min().unwrap();
-    let x1 = (0..n).map(|i| x[i] + hw[i]).max().unwrap();
-    let y1 = (0..n).map(|i| y[i] + hh[i]).max().unwrap();
-    let bbox = f64::from(x1 - x0) * f64::from(y1 - y0);
+    // Extents in i64: a centre plus a half-extent can pass i32::MAX.
+    let at = |v: &[i32], i: usize| i64::from(v[i]);
+    let drawn: f64 = (0..n).map(|i| (2 * at(hw, i)) as f64 * (2 * at(hh, i)) as f64).sum();
+    let x0 = (0..n).map(|i| at(x, i) - at(hw, i)).min().unwrap();
+    let y0 = (0..n).map(|i| at(y, i) - at(hh, i)).min().unwrap();
+    let x1 = (0..n).map(|i| at(x, i) + at(hw, i)).max().unwrap();
+    let y1 = (0..n).map(|i| at(y, i) + at(hh, i)).max().unwrap();
+    let bbox = (x1 - x0) as f64 * (y1 - y0) as f64;
     (bbox / 1e6, if bbox > 0.0 { 100.0 * drawn / bbox } else { 0.0 })
 }
 
@@ -563,7 +565,7 @@ fn print_constraint_summary(all: &[&ContractStat]) {
         "Constraint type", "arm", "total", "sat", "viol", "unk", "n/a", "rate", "max use", "(at)", "Θ"
     );
     println!("  {}", "-".repeat(101));
-    let (mut total, mut sat, mut na, mut unk) = (0usize, 0usize, 0usize, 0usize);
+    let (mut total, mut sat, mut viol, mut na, mut unk) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for r in summarize(all) {
         let SummaryRow { kind, arm, total: n, sat: s, viol: v, unk: u, na: a, worst, theta } = r;
         let (use_s, at) = worst.map_or(("-".into(), ""), |(u, c)| (format!("{u:.3}"), c));
@@ -571,10 +573,10 @@ fn print_constraint_summary(all: &[&ContractStat]) {
         println!("  {kind:<20} {arm:<6} {n:>5} {s:>5} {v:>5} {u:>4} {a:>4} {rt}  {use_s:>9} {at:<16} {theta:>8.3}");
         total += n;
         sat += s;
+        viol += v;
         na += a;
         unk += u;
     }
-    let viol = total - sat - na - unk;
     println!("  {}", "-".repeat(101));
     println!(
         "  {:<20} {:<6} {:>5} {:>5} {:>5} {:>4} {:>4} {}",

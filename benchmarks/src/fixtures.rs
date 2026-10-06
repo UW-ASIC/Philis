@@ -387,20 +387,22 @@ const SI_SUFFIXES: &[(&str, f64)] = &[
 /// Parses a SPICE number (`10k`, `2.5u`, `1.2e3`, `100meg`). Anything
 /// unparseable is 0.
 fn parse_si(s: &str) -> f64 {
+    // Non-finite (`inf`, `1e999`) is no SPICE value: 0 like any other junk.
+    let finite = |v: f64| if v.is_finite() { v } else { 0.0 };
     let s = s.trim().to_ascii_lowercase();
     if s.contains('e') && s.as_bytes().last().is_some_and(u8::is_ascii_digit) {
         if let Ok(v) = s.parse::<f64>() {
-            return v;
+            return finite(v);
         }
     }
     for &(suffix, mult) in SI_SUFFIXES {
         if let Some(prefix) = s.strip_suffix(suffix) {
             if let Ok(v) = prefix.parse::<f64>() {
-                return v * mult;
+                return finite(v * mult);
             }
         }
     }
-    s.parse().unwrap_or(0.0)
+    s.parse().map_or(0.0, finite)
 }
 
 /// Whether `s` is a SPICE number: optional sign, a float, optional
@@ -412,7 +414,7 @@ fn is_numeric(s: &str) -> bool {
         return false;
     }
     let base = SI_SUFFIXES.iter().find_map(|&(suf, _)| s.strip_suffix(suf)).unwrap_or(s);
-    !base.is_empty() && base.parse::<f64>().is_ok()
+    !base.is_empty() && base.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
 /// Follows `.param` references from `s` (lowercased) until a word that is
@@ -446,8 +448,9 @@ fn collect_spice_params(text: &str) -> HashMap<String, String> {
 fn join_backslash(text: &str) -> String {
     let mut joined: Vec<String> = Vec::new();
     for line in text.split('\n') {
-        if let Some(s) = joined.last_mut().filter(|s| s.ends_with('\\')) {
-            s.pop();
+        // A CRLF file's continuation ends in a backslash then a carriage return.
+        if let Some(s) = joined.last_mut().filter(|s| s.trim_end_matches('\r').ends_with('\\')) {
+            s.truncate(s.trim_end_matches('\r').len() - 1);
             s.truncate(s.trim_end_matches(' ').len());
             s.push(' ');
             s.push_str(line.trim_start());
@@ -771,6 +774,7 @@ mod tests {
             assert!(revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }
     }
+
     /// A fresh scratch directory under the system temp dir.
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("philis-fixtures-{tag}-{}", std::process::id()));
