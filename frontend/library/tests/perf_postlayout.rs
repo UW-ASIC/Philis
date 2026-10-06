@@ -112,7 +112,7 @@ fn a_flow_scores_its_layout_in_simulation() {
     assert_eq!(metric, "gain");
     assert!(value.is_some_and(|g| g >= 20.0), "post-layout gain misses 20 dB: {perf:?}");
     // Real models measure the schematic, so the floor gets a row with nets
-    // (`row (N nets)`; an empty row reads `row with no measured nets`).
+    // (`row (N nets)`; an empty row reads `row with no adverse measured nets`).
     let rows = &sol.metadata.budget_rows;
     assert!(rows.len() == 2 && rows[0].ends_with(": active") && rows[1].starts_with("gain:min: row ("), "{rows:?}");
     assert_eq!(sol.stats.sim_failures, 0, "{:?}", sol.stats);
