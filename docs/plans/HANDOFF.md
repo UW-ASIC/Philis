@@ -13,9 +13,9 @@
 - strongarm: philis CLEAN, klayout 0, magic 0, netgen vs `_ref.spice` MATCH. vs user schematic: differs only by dummies (owner decision pending).
 - M0 and fix-export worktrees removed (56 GB freed).
 
-## Running: M2–M6 module run `wf_f9fc79a5-541` (2026-10-05, fourth launch; earlier wf_188597af-7b6, wf_959b64ef-4c9, wf_03e972cf-7f3 died: OOM / session end)
-- MEMORY: at most 3 agents run at once (`maxActive` arg, semaphore in the script) and agents build with CARGO_BUILD_JOBS=8 (31 GB RAM; 5 agents x 32-job cargo OOMed).
-- 73/140 items merged into `m2` at this launch; 8 segments restarted at their exec step from existing cards; RTE-15 deferred (waits PLC-28).
+## Running: M2–M6 module run `wf_83022c3c-20f` (2026-10-05, fifth launch; earlier wf_188597af-7b6, wf_959b64ef-4c9, wf_03e972cf-7f3, wf_f9fc79a5-541 died: OOM / session end)
+- BUILD QUEUE (long-term-garbage-collection skill): every agent cargo command goes through `tools/qcargo` — one machine-wide flock queue, two persistent build workers in ../philis-workers/w{1,2} (snapshot of the caller's worktree via nix rsync, GC-rooted), -j 6 (measured: 8.0 GB peak, 1m05s full release build) and 2 test threads; collector keeps each worker target <= 15 GB; runs logged in ../philis-workers/runs.log. Idle collection: `tools/qcargo --gc` hourly. Per-worktree target/ dirs were collected (they are garbage now).
+- At most 3 agents at once (`maxActive`).
 - RESTART (never resumeFromRunId — parallel modules break order-matched replay):
   1. `python3 docs/plans/restart_args.py <journal of every M2 run, oldest first> > args.json` (then add "maxActive": 3)
      (journals: ~/.claude/projects/-home-omare-Documents-Projects-Rust-Philis/a69953d9-0528-4795-8632-2cf98996a622/subagents/workflows/<run>/journal.jsonl)
