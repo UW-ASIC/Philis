@@ -82,11 +82,80 @@ fn branch_resistance_and_stress_reach_the_simulation() {
     assert!(r < plain - 1.0, "source R must cost gain: {plain} dB vs {r} dB");
     // Short diffusion ends (strong LOD stress) shift VT and mobility. On one
     // mirror half (M3): the same stress on both halves cancels in the gain
-    // (0.012 dB before XM5's m=4 reached the simulator, 0.0099 dB since),
-    // on M3 alone it moves the gain by 0.53 dB.
+    // (0.012 dB before XM5's m=4 reached the simulator, 0.0099 dB since,
+    // both with SA/SB in metres), on M3 alone it moves the gain by 0.19 dB
+    // (33.07 → 32.88 dB; 0.53 dB when SA/SB went out in metres).
     let stressed = Parasitics { lod_inv_um: (0..n).map(|d| (d == 2).then_some(2.0)).collect(), ..Parasitics::default() };
     let s = gain(&stressed).expect("measured");
     assert!((s - plain).abs() > 0.01, "stress reached the models: {plain} dB vs {s} dB");
+}
+
+/// `.option scale=1.0u` applies to AS/AD/PS/PD and SA/SB alike: the deck
+/// writes both in µm(²). A 100 µm² drain moves capbd ~700×; S ≈ 100 µm
+/// (relaxed stress) keeps Id near the unstressed value (a metres card, S ≈
+/// 1e-12 µm, divides it by ~13).
+#[test]
+fn scale_applies_as_the_deck_assumes() {
+    use pnr_core::{Device, DeviceKind, Net, NetId};
+    let Some(lib) = models() else { return };
+    let nl = pnr_core::Netlist {
+        devices: vec![Device {
+            name: "M1".into(),
+            kind: DeviceKind::Nmos,
+            model: "sky130_fd_pr__nfet_01v8".into(),
+            terminals: vec![("D".into(), NetId(0)), ("G".into(), NetId(1)), ("S".into(), NetId(2)), ("B".into(), NetId(2))],
+            params: vec![("w".into(), 1000), ("l".into(), 150)],
+        }],
+        nets: ["d", "g", "0"].iter().map(|n| Net { name: (*n).into() }).collect(),
+        ..Default::default()
+    };
+    let tb = "Vd d 0 0.9\nVg g 0 0.9\n.control\nop\nlet cbd = @m.xm1.msky130_fd_pr__nfet_01v8[capbd]\nlet idd = @m.xm1.msky130_fd_pr__nfet_01v8[id]\nprint cbd idd\n.endc";
+    let cfg = PerfConfig {
+        sim: OpConfig { model_lib: Some(lib), ..OpConfig::default() },
+        testbenches: vec![tb.into()],
+        specs: vec![Spec { metric: "cbd".into(), min: None, max: None }, Spec { metric: "idd".into(), min: None, max: None }],
+        scenarios: Vec::new(),
+    };
+    let run = |p: &Parasitics| {
+        let m = evaluate(&nl, p, &cfg, &[0]).unwrap().metrics;
+        (m[0].1.expect("cbd measured"), m[1].1.expect("idd measured"))
+    };
+    let (cbd0, id0) = run(&Parasitics::default());
+    let (cbd, _) = run(&Parasitics { junction: vec![Some([0.0, 100.0, 0.0, 40.0])], ..Parasitics::default() });
+    let (_, id) = run(&Parasitics { lod_inv_um: vec![Some(0.02)], ..Parasitics::default() });
+    eprintln!("capbd {cbd0:.4e} -> {cbd:.4e} F; id {id0:.4e} -> {id:.4e} A");
+    assert!(cbd > 100.0 * cbd0, "ad=100 µm² must reach capbd: {cbd0} vs {cbd}");
+    assert!(id > 0.8 * id0, "S ≈ 100 µm is relaxed stress: {id0} vs {id}");
+}
+
+/// PERF-26 acceptance: the ota's 100 MHz gain with drawn-like junction
+/// geometry (`[w·0.29, w·0.29, 2(w+0.29), 2(w+0.29)]`, sky130's 0.29 µm SD
+/// extension) against none.
+#[test]
+fn junction_geometry_moves_the_ota_hf_gain() {
+    let Some(lib) = models() else { return };
+    let nl = ota();
+    let bench = BENCH.replace(".endc", "meas ac ghf find vdb(vout2) at=1e8\n.endc");
+    let p = PerfConfig {
+        testbenches: vec![bench],
+        specs: vec![Spec { metric: "ghf".into(), min: None, max: None }],
+        ..cfg(lib)
+    };
+    let ghf = |par: &Parasitics| evaluate(&nl, par, &p, &[0]).unwrap().metrics[0].1.expect("ghf measured");
+    let junction = nl
+        .devices
+        .iter()
+        .map(|d| {
+            d.mos_size().map(|s| {
+                let w = s.w_total_nm as f64 / 1e3;
+                [w * 0.29, w * 0.29, 2.0 * (w + 0.29), 2.0 * (w + 0.29)]
+            })
+        })
+        .collect();
+    let plain = ghf(&Parasitics::default());
+    let drawn = ghf(&Parasitics { junction, ..Parasitics::default() });
+    eprintln!("ota gain at 100 MHz: {plain:.4} dB without junction params, {drawn:.4} dB with");
+    assert!((drawn - plain).abs() > 0.01, "junction C must reach the HF gain: {plain} dB vs {drawn} dB");
 }
 
 /// A full run scored on post-layout gain: the epoch's parasitics (extracted

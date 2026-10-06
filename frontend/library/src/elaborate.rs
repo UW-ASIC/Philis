@@ -492,7 +492,9 @@ pub(crate) fn antenna_diodes(
         let dim = |k: &str, d: i32| (k.to_string(), i64::from(pnr_core::Process::rule(pdk, k, d)));
         let device = pnr_core::Device {
             name: format!("XDANT{}", net.0),
-            kind: pnr_core::DeviceKind::Diode, model: String::new(),
+            kind: pnr_core::DeviceKind::Diode,
+            // The deck's first diode row: the model `reference_spice` gives LVS, and one ngspice can simulate.
+            model: crate::model_table(pdk).into_iter().find(|(_, k)| *k == pnr_core::DeviceKind::Diode).map(|(m, _)| m).unwrap_or_default(),
             terminals: vec![("P".into(), ground), ("N".into(), net)],
             params: vec![(dim("diode_w", 0).0.replace("diode_", ""), dim("diode_w", 0).1), (dim("diode_l", 0).0.replace("diode_", ""), dim("diode_l", 0).1)],
         };
