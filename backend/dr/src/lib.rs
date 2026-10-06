@@ -272,8 +272,8 @@ impl DetailedCfg {
     /// `wire_width`).
     fn em_width(&self, layer: LayerId, ua: f32, domain_nm: f32) -> i32 {
         let need = self.em_limit(layer).map_or(0.0, |lim| lim.width_nm(ua, domain_nm)).ceil() as i32;
-        let step = 2 * self.grid;
-        (need.max(self.wire_width) + step - 1) / step * step
+        let step = 2 * self.grid.max(1);
+        need.max(self.wire_width).saturating_add(step - 1) / step * step
     }
 }
 
@@ -773,10 +773,12 @@ impl DetailedRoute {
                         let ((nx, ny, _), (mx, my, _)) = (grid.pos(n), grid.pos(m));
                         [full, narrow].into_iter().find_map(|w| {
                             let (la_, lb_) = (jog_legs(nx, ny, ca.0, ca.1, w), jog_legs(mx, my, cb.0, cb.1, w));
+                            // b's jog also clears a's, laid first (a ≠ b), without
+                            // cloning the laid list per candidate.
                             let f = (0..2).find(|&f| {
-                                let mut laid = laid_legs.clone();
-                                laid.extend(la_[f].iter().map(|&l| (a, l)));
-                                jog_clean(&la_[f], a, zone, gap, &zones, &laid_legs, &blk_a) && jog_clean(&lb_[f], b, zone, gap, &zones, &laid, &blk_b)
+                                jog_clean(&la_[f], a, zone, gap, &zones, &laid_legs, &blk_a)
+                                    && jog_clean(&lb_[f], b, zone, gap, &zones, &laid_legs, &blk_b)
+                                    && la_[f].iter().all(|&l| lb_[f].iter().all(|&m| rect_gap(l, m) > 0))
                             })?;
                             Some((n, m, (w, f == 1), la_[f], lb_[f]))
                         })
@@ -1255,6 +1257,71 @@ impl DetailedRoute {
         #[allow(clippy::type_complexity)]
         let mut prev: Option<((u32, f64, f32), Vec<Vec<Vec<u32>>>, Vec<[u8; gr::MAX_LAYERS]>, Vec<Vec<[u8; gr::MAX_LAYERS]>>, Vec<Option<(u32, gr::LatticeMap, bool)>>, RouteStats, (Routes, Vec<usize>, Vec<Violation>))> = None;
         let mut post = 0;
+        // The fill's fixed inputs, the same for every redraw below.
+        // A net's own pin rects, and the cell metal touching them on their
+        // layer (the pin's lead), join it for the fill — a trunk stopping short
+        // of its pin's metal is a sliver or notch too — then leave: they are
+        // the cell's. All other cell metal is foreign.
+        // The pin-access conductor too: its landing pads meet the cells' own
+        // straps and rails there.
+        let fill_layers: Vec<LayerId> = layers.iter().copied().chain(cfg.pin_access.map(|(l, _)| l)).collect();
+        // Cell metal on every fill layer: on a deck whose pin-access layer is
+        // not routed (metal1 on ihp) it is still a net's own lead or foreign.
+        let fill_metal: Vec<Shape> = placed
+            .iter()
+            .chain(rings)
+            .flat_map(|m| &m.shapes)
+            .filter(|s| fill_layers.contains(&s.layer))
+            .map(|s| Shape { rect: shift(s.rect), ..*s })
+            .collect();
+        // Each hard blockage, as drawn, per blocked layer, with the compact nets it binds.
+        let hard_fill: Vec<(Vec<usize>, Shape)> = cfg
+            .blockages
+            .iter()
+            .filter(|b| b.hard)
+            .flat_map(|b| {
+                let nets: Vec<usize> = (0..n_compact).filter(|&ci| (!b.own_exempt && !b.only_aggressors) || applies(b, compact[ci])).collect();
+                (0..n_layers as usize).filter(move |&l| b.layers >> l & 1 == 1).map(move |l| (nets.clone(), Shape { layer: layers[l], rect: shift(b.rect) }))
+            })
+            .collect();
+        let touch = |a: Rect, b: Rect| rect_gap(a, b) == 0;
+        let cell_of = |n: usize| -> Vec<Shape> {
+            // The pins, then every cell shape joined to them on their layer
+            // (a pin, its rail, the strap off the rail), by flood fill.
+            let mut out: Vec<Shape> = term_rects.get(n).into_iter().flatten().map(|&(r, l, _)| Shape { layer: l, rect: r }).collect();
+            let mut taken = vec![false; fill_metal.len()];
+            let mut i = 0;
+            while i < out.len() {
+                let a = out[i];
+                for (k, c) in fill_metal.iter().enumerate() {
+                    if !taken[k] && c.layer == a.layer && touch(a.rect, c.rect) {
+                        taken[k] = true;
+                        out.push(*c);
+                    }
+                }
+                i += 1;
+            }
+            out
+        };
+        // Per layer: its own spacing (met3's is not met1's).
+        let fill_space = |l: LayerId| {
+            let floor = if cfg.pin_access.is_some_and(|(p, _)| p == l) { min_space.max(cfg.pin_access_spacing) } else { min_space };
+            cfg.space(l, 0, 0, floor)
+        };
+        // The non-route metal each net keeps off: other nets' pins, cell metal
+        // not its own lead, and the hard blockages binding it.
+        let leads: Vec<Vec<Shape>> = (0..n_nets).map(cell_of).collect();
+        let statics: Vec<Vec<Shape>> = (0..n_nets)
+            .map(|ni| {
+                let mine = &leads[ni];
+                (0..n_nets)
+                    .filter(|&n| n != ni)
+                    .flat_map(|n| term_rects[n].iter().map(|&(r, l, _)| Shape { layer: l, rect: r }))
+                    .chain(fill_metal.iter().copied().filter(|c| !mine.contains(c)))
+                    .chain(hard_fill.iter().filter(|(c, _)| ci_of.get(ni).is_some_and(|&c0| c0 != usize::MAX && c.contains(&c0))).map(|&(_, s)| s))
+                    .collect()
+            })
+            .collect();
         let (routes, sacrificed, access_v) = loop {
             stats.plate_spread_pct.clear();
             let mut round = 0;
@@ -1282,69 +1349,6 @@ impl DetailedRoute {
                 }
                 break_shorts(&mut routes.wires, &pre_access, &rank, &joins, &mut sacrificed, side);
 
-                // A net's own pin rects, and the cell metal touching them on their
-                // layer (the pin's lead), join it for the fill — a trunk stopping short
-                // of its pin's metal is a sliver or notch too — then leave: they are
-                // the cell's. All other cell metal is foreign.
-                // The pin-access conductor too: its landing pads meet the cells' own
-                // straps and rails there.
-                let fill_layers: Vec<LayerId> = layers.iter().copied().chain(cfg.pin_access.map(|(l, _)| l)).collect();
-                // Cell metal on every fill layer: on a deck whose pin-access layer is
-                // not routed (metal1 on ihp) it is still a net's own lead or foreign.
-                let fill_metal: Vec<Shape> = placed
-                    .iter()
-                    .chain(rings)
-                    .flat_map(|m| &m.shapes)
-                    .filter(|s| fill_layers.contains(&s.layer))
-                    .map(|s| Shape { rect: shift(s.rect), ..*s })
-                    .collect();
-                // Each hard blockage, as drawn, per blocked layer, with the compact nets it binds.
-                let hard_fill: Vec<(Vec<usize>, Shape)> = cfg
-                    .blockages
-                    .iter()
-                    .filter(|b| b.hard)
-                    .flat_map(|b| {
-                        let nets: Vec<usize> = (0..n_compact).filter(|&ci| (!b.own_exempt && !b.only_aggressors) || applies(b, compact[ci])).collect();
-                        (0..n_layers as usize).filter(move |&l| b.layers >> l & 1 == 1).map(move |l| (nets.clone(), Shape { layer: layers[l], rect: shift(b.rect) }))
-                    })
-                    .collect();
-                let touch = |a: Rect, b: Rect| rect_gap(a, b) == 0;
-                let cell_of = |n: usize| -> Vec<Shape> {
-                    // The pins, then every cell shape joined to them on their layer
-                    // (a pin, its rail, the strap off the rail), by flood fill.
-                    let mut out: Vec<Shape> = term_rects.get(n).into_iter().flatten().map(|&(r, l, _)| Shape { layer: l, rect: r }).collect();
-                    let mut taken = vec![false; fill_metal.len()];
-                    let mut i = 0;
-                    while i < out.len() {
-                        let a = out[i];
-                        for (k, c) in fill_metal.iter().enumerate() {
-                            if !taken[k] && c.layer == a.layer && touch(a.rect, c.rect) {
-                                taken[k] = true;
-                                out.push(*c);
-                            }
-                        }
-                        i += 1;
-                    }
-                    out
-                };
-                // Per layer: its own spacing (met3's is not met1's).
-                let fill_space = |l: LayerId| {
-                    let floor = if cfg.pin_access.is_some_and(|(p, _)| p == l) { min_space.max(cfg.pin_access_spacing) } else { min_space };
-                    cfg.space(l, 0, 0, floor)
-                };
-                // The non-route metal each net keeps off: other nets' pins, cell metal
-                // not its own lead, and the hard blockages binding it.
-                let statics: Vec<Vec<Shape>> = (0..n_nets)
-                    .map(|ni| {
-                        let mine = cell_of(ni);
-                        (0..n_nets)
-                            .filter(|&n| n != ni)
-                            .flat_map(|n| term_rects[n].iter().map(|&(r, l, _)| Shape { layer: l, rect: r }))
-                            .chain(fill_metal.iter().copied().filter(|c| !mine.contains(c)))
-                            .chain(hard_fill.iter().filter(|(c, _)| ci_of.get(ni).is_some_and(|&c0| c0 != usize::MAX && c.contains(&c0))).map(|&(_, s)| s))
-                            .collect()
-                    })
-                    .collect();
                 // Metal added after search (redundant cuts, corner stubs and
                 // squares) goes where it clears: a cut every cut but itself by cut
                 // spacing (same-net too), metal the other nets' wires and its
@@ -1505,7 +1509,6 @@ impl DetailedRoute {
                 order.sort_by_key(|&ni| lead[ni].is_some());
                 let mut fillers: Vec<Vec<Shape>> = vec![Vec::new(); n_nets];
                 for ni in order {
-                    let mine = cell_of(ni);
                     let foreign: Vec<Shape> = flat.iter().filter(|&&(i, _)| i != ni).map(|&(_, s)| s).chain(statics[ni].iter().copied()).collect();
                     if let Some((a, map)) = lead[ni] {
                         for f in std::mem::take(&mut fillers[a]) {
@@ -1522,7 +1525,7 @@ impl DetailedRoute {
                     let wires = &mut routes.wires[ni];
                     let before = wires.clone();
                     let own = wires.len();
-                    wires.extend(mine);
+                    wires.extend_from_slice(&leads[ni]);
                     let pins = wires.len() - own;
                     // Per layer: its own spacing and min width.
                     for &l in &fill_layers {
@@ -1857,17 +1860,22 @@ fn tracks(cfg: &DetailedCfg, l: usize, layer: LayerId, ua: f32) -> (u8, u8) {
         return (1, 0);
     }
     let extra = (ua * 1_000.0 / j - wire as f32).max(0.0);
-    let mut k = (1 + (extra / pitch as f32).ceil() as i32).min(i32::from(K_MAX));
+    // Clamped in f32 first: a huge current saturates instead of overflowing.
+    let steps = (extra / pitch.max(1) as f32).ceil().min(f32::from(K_MAX));
+    let mut k = (1 + steps as i32).min(i32::from(K_MAX));
     let mut w = wire + (k - 1) * pitch;
     if k > 1 && w >= cfg.wide(layer) {
-        // Drawn as `k` separate wires: the copper is `k·wire`, not `w`.
-        let need = cfg.em_width(layer, ua, 0.0);
-        k = k.max((need + wire - 1) / wire).min(i32::from(K_MAX));
+        // Drawn as `k` separate wires: the copper is `k·wire`, not `w`. No
+        // run length is known here, so no Blech credit (infinite domain).
+        let need = cfg.em_width(layer, ua, f32::INFINITY);
+        let wire1 = wire.max(1);
+        k = k.max(need.saturating_add(wire1 - 1) / wire1).min(i32::from(K_MAX));
         w = wire + (k - 1) * pitch;
     }
     let guard = if k > 1 && w >= cfg.wide(layer) {
         let need = cfg.space(layer, w, 0, 0) - (pitch - wire);
-        ((need + pitch - 1) / pitch).max(0) as u8
+        let p1 = pitch.max(1);
+        ((need + p1 - 1) / p1).clamp(0, i32::from(u8::MAX)) as u8
     } else {
         0
     };
@@ -2023,7 +2031,7 @@ fn access_need(cfg: &DetailedCfg, metal: LayerId, ua: Option<f32>) -> i32 {
     let j = cfg.em_limit(metal).map_or(0.0, |lim| lim.ua_per_um);
     let Some(u) = ua.filter(|_| j > 0.0) else { return 0 };
     let step = 2 * cfg.grid.max(1);
-    ((u.abs() * 1_000.0 / j).ceil() as i32 + step - 1) / step * step
+    ((u.abs() * 1_000.0 / j).ceil() as i32).saturating_add(step - 1) / step * step
 }
 
 /// `cell` (drawn at its own origin) moved into free space as close as it fits
@@ -2038,6 +2046,9 @@ fn access_need(cfg: &DetailedCfg, metal: LayerId, ua: Option<f32>) -> i32 {
 /// Cost: `O((reach/grid)² · obstacles)`.
 #[must_use]
 pub fn place_near(cell: &Macro, near: (i32, i32), obstacles: &[Rect], clearance: i32, grid: i32, reach: i32) -> Option<Macro> {
+    if reach < 0 {
+        return None;
+    }
     let b = cell.bbox;
     let step = grid.max(1);
     let snap = |v: i32| v.div_euclid(step) * step;
@@ -2710,7 +2721,16 @@ fn assert_on_stack(out: &[Vec<Shape>], layers: &[LayerId], cuts: &[Cut]) {
 
 /// Residual track overuse `Σ over` ([`RouteHot::over`], halos included).
 fn overuse(hot: &RouteHot) -> f32 {
-    (0..hot.usage.len()).map(|n| f32::from(hot.over(n, 1))).sum()
+    // `RouteHot::over(n, 1)` without its branch, summed in integers: the
+    // loop over every node runs once per repair probe, and an f32 sum's
+    // fixed order would block vectorizing it.
+    let total: u64 = hot
+        .usage
+        .iter()
+        .zip(&hot.halo)
+        .map(|(&u, &h)| u64::from(u > 0) * (u64::from(u) + u64::from(h)).saturating_sub(1))
+        .sum();
+    total as f32
 }
 
 /// Extra cost per node for a mirrored net off its partner's mirror image.
@@ -3290,6 +3310,7 @@ fn score(
 
 /// Snap `r` outward onto the manufacturing grid.
 fn snap_out(r: Rect, grid: i32) -> Rect {
+    let grid = grid.max(1);
     let x = r.x.div_euclid(grid) * grid;
     let y = r.y.div_euclid(grid) * grid;
     let w = ((r.x + r.w) - x + grid - 1).div_euclid(grid) * grid;
@@ -3409,6 +3430,7 @@ fn fill_same_net_notches(shapes: &mut Vec<Shape>, layers: &[LayerId], min_space:
     let mut present: Vec<LayerId> = shapes.iter().map(|s| s.layer).filter(|l| layers.contains(l)).collect();
     present.sort_unstable_by_key(|l| l.0);
     present.dedup();
+    let grid = grid.max(1);
     let snap = |v: i32| v.div_euclid(grid) * grid;
     let grow = |lo: i32, len: i32| if len >= min_feat { (lo, len) } else { (snap(lo - (min_feat - len) / 2), min_feat) };
     for _ in 0..2 {
