@@ -109,7 +109,8 @@ pub fn assemble(netlist: &Netlist, drawn: &[Drawn], blocks: &[Block], sets: &[Ma
         // other members' `P` (CELL-21).
         let bridge = if matches!(s.origin, Origin::PassiveSet { rule: "split_dac" }) { split_bridge(netlist, s) } else { None };
         let banks: Vec<DeviceId> = s.members.iter().map(|m| m.device).filter(|&d| Some(d) != bridge).collect();
-        let d0 = drawn[banks[0].0 as usize];
+        let Some(&b0) = banks.first() else { continue };
+        let d0 = drawn[b0.0 as usize];
         let same = banks.iter().all(|d| (drawn[d.0 as usize].w_finger_nm, drawn[d.0 as usize].l_nm) == (d0.w_finger_nm, d0.l_nm));
         if !same {
             continue;

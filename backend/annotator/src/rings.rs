@@ -78,6 +78,8 @@ pub fn plan(i: &RingInputs) -> (Vec<GuardRingRequirement>, Vec<(&'static str, &'
     let epi = i.substrate == SubstrateKind::EpiOnLowRes;
     let w = i.min_ring_width_nm;
     let mut victims = Vec::new();
+    // Some device got a row 1–5 ring (a tub ring does not count).
+    let mut guarded = false;
     for (d, dev) in i.netlist.devices.iter().enumerate() {
         let Some(&(_, bulk)) = dev.terminals.iter().find(|(t, _)| t == "B") else { continue };
         let pmos = dev.kind == DeviceKind::Pmos;
@@ -123,10 +125,11 @@ pub fn plan(i: &RingInputs) -> (Vec<GuardRingRequirement>, Vec<(&'static str, &'
             }
             None => None,
         };
+        guarded |= r.is_some();
         rings.extend(r);
     }
     // Row 6: victims ring only against a device that got a row 1–5 ring.
-    if !rings.is_empty() && !victims.is_empty() {
+    if guarded && !victims.is_empty() {
         match i.quiet_ring_net {
             Some(q) => rings.extend(victims.into_iter().map(|(d, pmos)| ring(d, GuardRingType::Tap { in_well: pmos }, RingRole::Victim, q, w, true))),
             None => note(&mut missing, "victim rings: no quiet ring return (SUB-30)"),

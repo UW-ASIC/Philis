@@ -46,17 +46,28 @@ pub fn rows(sens: &Sensitivities, af_per_nm: f32, r_ohm_per_um: Option<f32>, pol
                 (if bound == 0.0 { 1.0 } else { bound.abs() }, 0.0)
             };
             let w = |d: f64| sign * d / scale;
-            let (nets, weights): (Vec<NetId>, Vec<f32>) = s.d_c.iter().filter(|e| keep(w(e.1))).map(|e| (e.0, w(e.1) as f32)).unzip();
-            let (r_nets, r_weights): (Vec<NetId>, Vec<f32>) = s.d_r.iter().filter(|e| keep(w(e.1))).map(|e| (e.0, w(e.1) as f32)).unzip();
-            let coupling = s.d_cc.iter().filter(|e| keep(w(e.2))).map(|e| (e.0, e.1, w(e.2) as f32)).collect();
-            for e in s.d_c.iter().filter(|e| keep(w(e.1))) {
-                class.entry(e.0 .0).or_default().1 |= w(e.1).abs() * c_ref >= policy.rc_share;
-            }
-            if let Some(r_ref) = r_ref {
-                for e in s.d_r.iter().filter(|e| keep(w(e.1))) {
-                    class.entry(e.0 .0).or_default().0 |= w(e.1).abs() * r_ref >= policy.rc_share;
+            // One pass per term list: weigh, keep, class.
+            let (mut nets, mut weights) = (Vec::new(), Vec::new());
+            for &(n, d) in &s.d_c {
+                let w = w(d);
+                if keep(w) {
+                    nets.push(n);
+                    weights.push(w as f32);
+                    class.entry(n.0).or_default().1 |= w.abs() * c_ref >= policy.rc_share;
                 }
             }
+            let (mut r_nets, mut r_weights) = (Vec::new(), Vec::new());
+            for &(n, d) in &s.d_r {
+                let w = w(d);
+                if keep(w) {
+                    r_nets.push(n);
+                    r_weights.push(w as f32);
+                    if let Some(r_ref) = r_ref {
+                        class.entry(n.0).or_default().0 |= w.abs() * r_ref >= policy.rc_share;
+                    }
+                }
+            }
+            let coupling = s.d_cc.iter().map(|&(x, y, d)| (x, y, w(d))).filter(|e| keep(e.2)).map(|(x, y, w)| (x, y, w as f32)).collect();
             out.push(PerformanceBudget { limit, r_nets, r_weights, coupling, ..PerformanceBudget::ground_c(metric, nets, weights, af_per_nm) });
         }
     }

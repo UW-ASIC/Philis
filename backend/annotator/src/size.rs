@@ -33,9 +33,10 @@ pub struct Drawn {
 /// of distinct models, so it never wraps.
 #[must_use]
 pub fn drawn(dev: &Device, models: &mut Vec<String>) -> Drawn {
-    let model = dev.model.to_ascii_lowercase();
-    let model = models.iter().position(|m| *m == model).unwrap_or_else(|| {
-        models.push(model);
+    // Entries are lowercase, so a case-insensitive compare finds them without
+    // lowering (and allocating) the name of every device.
+    let model = models.iter().position(|m| m.eq_ignore_ascii_case(&dev.model)).unwrap_or_else(|| {
+        models.push(dev.model.to_ascii_lowercase());
         models.len() - 1
     }) as u16;
     let fet = matches!(dev.kind, DeviceKind::Nmos | DeviceKind::Pmos);

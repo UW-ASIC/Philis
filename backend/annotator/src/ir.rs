@@ -41,7 +41,9 @@ pub fn budgets(
                 .copied()
                 .flatten()
                 .map_or(policy.ir_rail_share * supply_mv, |h| policy.ir_headroom_share * h);
-            Some((c.net, i_ua, (dv_mv * 1e3) as i64))
+            // A device already in triode has no headroom left: allow no drop, never a
+            // negative one (NaN casts to 0 as well).
+            Some((c.net, i_ua, (dv_mv * 1e3).max(0.0) as i64))
         })
         .collect()
 }

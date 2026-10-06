@@ -30,12 +30,16 @@ pub fn check(p: &Problem, nl: &Netlist) -> Vec<Diagnostic> {
     let Some(id) = p.routing.budget.iter().find(|b| b.kind().ends_with("::Differential")).and_then(|b| b.meta()).map(|m| m.id) else { return Vec::new() };
     let rail = |n: pnr_core::ids::NetId| matches!(p.net_classes[n.0 as usize].class, NetClass::Supply | NetClass::Ground | NetClass::Substrate);
     // Distinct devices per net, one pass.
+    // `last[n]` is the last device counted on net `n`, so a device on one net
+    // through several terminals counts once without a per-device allocation.
     let mut on = vec![0usize; nl.nets.len()];
-    for d in &nl.devices {
-        let mut ns: Vec<u16> = d.terminals.iter().map(|t| t.1 .0).collect();
-        ns.sort_unstable();
-        ns.dedup();
-        ns.into_iter().for_each(|n| on[n as usize] += 1);
+    let mut last = vec![usize::MAX; nl.nets.len()];
+    for (i, d) in nl.devices.iter().enumerate() {
+        for &(_, n) in &d.terminals {
+            let n = n.0 as usize;
+            on[n] += usize::from(last[n] != i);
+            last[n] = i;
+        }
     }
     let count = |n: pnr_core::ids::NetId| on[n.0 as usize];
     let mut out = Vec::new();

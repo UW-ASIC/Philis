@@ -68,7 +68,8 @@ pub fn class_of(set: &MatchSpec, ctx: &mut ClassCtx) -> (MatchClass, ClassSource
         Some(ClassLimit::Mv(v)) => Some(v),
         _ => None,
     };
-    if let (Some(x), Some(min), Some(moderate), Some(exc)) = (ctx.spec_6sigma, mv(MatchClass::Minimal), mv(MatchClass::Moderate), mv(MatchClass::Exceptional)) {
+    let spec = ctx.spec_6sigma.filter(|x| !x.is_nan());
+    if let (Some(x), Some(min), Some(moderate), Some(exc)) = (spec, mv(MatchClass::Minimal), mv(MatchClass::Moderate), mv(MatchClass::Exceptional)) {
         let c = if x >= min {
             MatchClass::Minimal
         } else if x >= moderate {
