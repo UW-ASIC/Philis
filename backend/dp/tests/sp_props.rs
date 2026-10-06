@@ -11,20 +11,28 @@ struct Case {
     w: Vec<i32>,
     h: Vec<i32>,
     table: SpacingTable,
+    /// Self kids an odd number of 10 nm lattice steps wide: no axis on a
+    /// `(420, 420)` track centreline can centre them on the lattice.
+    odd_self: bool,
 }
 
 /// One symmetry node (p ∈ [1, 4] pairs, s ∈ [0, 2] selfs) and up to 8 loose
-/// cells; dims multiples of 20 nm in [100, 5000] (partners equal); one
+/// cells; dims multiples of 10 nm in [100, 5000] (partners equal; self widths
+/// all even or all odd multiples, the only realisable mixes); one
 /// uniform gap in [0, 1270]; with `block`, a proximity node over a random
 /// subset (the symmetry node included half the time). Every code random,
 /// symmetry nodes then made S-F.
 fn case(rng: &mut SplitMix64, block: bool) -> Case {
     let (p, s, loose) = (1 + rng.below(4), rng.below(3), rng.below(9));
     let n = 2 * p + s + loose;
-    let mut dim = || 100 + 20 * rng.below(246) as i32;
+    let odd = rng.below(2) as i32;
+    let mut dim = || 100 + 10 * rng.below(491) as i32;
     let (mut w, mut h) = (vec![0; n], vec![0; n]);
     for c in 0..n {
         (w[c], h[c]) = if c < 2 * p && c % 2 == 1 { (w[c - 1], h[c - 1]) } else { (dim(), dim()) };
+        if (2 * p..2 * p + s).contains(&c) {
+            w[c] = w[c] / 20 * 20 + 10 * odd;
+        }
     }
     let mut pairs: Vec<(u32, u32, u16)> = (0..p as u32).map(|i| (2 * i, 2 * i + 1, 0)).collect();
     pairs.extend((2 * p..2 * p + s).map(|c| (c as u32, c as u32, 0)));
@@ -47,7 +55,7 @@ fn case(rng: &mut SplitMix64, block: bool) -> Case {
         t.make_sf(ni as u16);
     }
     let table = SpacingTable::uniform(10 * rng.below(128) as i32, 10);
-    Case { t, w, h, table }
+    Case { t, w, h, table, odd_self: s > 0 && odd == 1 }
 }
 
 fn run(c: &Case) -> (Result<(), dp::sp::Fail>, Out, bool) {
@@ -160,17 +168,25 @@ fn run_grid(c: &Case, grid: Option<(i32, i32)>) -> (Result<(), dp::sp::Fail>, Ou
 }
 
 /// PLC-28: with sky130's `(p0, P) = (420, 420)` every axis lands on a track
-/// centreline (`210 mod 420`), and every code still decodes.
+/// centreline (`210 mod 420`), and every code decodes unless a self kid is an
+/// odd number of lattice steps wide (its corner would sit 5 nm off-lattice).
 #[test]
 fn axes_land_on_track_centrelines() {
     let mut rng = SplitMix64::new(7);
+    let mut odd = 0;
     for _ in 0..10_000 {
         let b = rng.below(2) == 0;
         let c = case(&mut rng, b);
         let (r, out) = run_grid(&c, Some((420, 420)));
+        if c.odd_self {
+            assert!(matches!(r, Err(dp::sp::Fail::SymX(_))), "{r:?}");
+            odd += 1;
+            continue;
+        }
         assert_eq!(r, Ok(()));
         assert!(!out.axis.is_empty() && out.axis.iter().all(|a| a.1.rem_euclid(420) == 210), "{:?}", out.axis);
     }
+    assert!(odd > 1_000, "only {odd} odd-self codes");
 }
 
 /// Snapping raises a symmetry node's width by less than `2·P`.
@@ -180,6 +196,9 @@ fn axis_snapping_costs_at_most_one_period_per_level() {
     let mut hist = [0u32; 9];
     for _ in 0..2_000 {
         let c = case(&mut rng, false);
+        if c.odd_self {
+            continue;
+        }
         let width = |out: &Out| {
             let mut cells = Vec::new();
             cells_under(&c.t, 0, &mut cells);
@@ -192,4 +211,34 @@ fn axis_snapping_costs_at_most_one_period_per_level() {
         hist[(grow / 100) as usize] += 1;
     }
     eprintln!("axis_snapping_costs_at_most_one_period_per_level: width growth by 100 nm bin {hist:?}");
+}
+
+/// A self kid with a 40 nm right halo owes its right partner more than its left
+/// one, so the first `2·axis` estimate is short: raising the self kid onto it
+/// pushes the right member past its mirror and `fix_monotone` must re-snap
+/// (twice: the error halves per pass). A 2000 nm halo needs more than the
+/// `2p + 2` passes and fails at the cap.
+#[test]
+fn asymmetric_push_runs_fix_monotone() {
+    let (w, h) = (vec![100, 100, 1000], vec![100, 100, 100]);
+    let prof = vec![None; 3];
+    let table = SpacingTable::uniform(0, 10);
+    let (mut t, errs) = Tree::build(3, &[(0, 1, 0), (2, 2, 0)], &[]);
+    assert!(errs.is_empty());
+    // One row: A (cell 0), self (cell 2), B (cell 1).
+    let pos = |c: u16| t.nodes[0].kids.iter().position(|k| matches!(*k, Kid::Cell(x) if x == c)).unwrap() as u16;
+    let row = vec![pos(0), pos(2), pos(1)];
+    (t.nodes[0].alpha, t.nodes[0].beta) = (row.clone(), row);
+    assert!(t.is_sf(0));
+    for (halo, want) in [(40, Ok(2)), (2000, Err(dp::sp::Fail::SymX(0)))] {
+        let halos = [[0; 4], [0; 4], [0, 0, halo, 0]];
+        let g = Geo { w: &w, h: &h, prof: &prof, halo: &halos, table: &table, lattice: 10, axis_grid: None };
+        let mut out = Out::default();
+        let r = decode(&t, &g, &mut Scratch::default(), &mut out).map(|()| out.fixes);
+        assert_eq!(r, want, "halo {halo}");
+        if r.is_ok() {
+            assert!(verify(&t, &g, &out));
+            assert_eq!(out.x0[1] - (out.x0[2] + 1000), 40, "self-B gap");
+        }
+    }
 }

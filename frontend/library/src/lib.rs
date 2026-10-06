@@ -1418,10 +1418,9 @@ fn placement_space(pdk: &Pdk) -> Vec<(String, String, i32)> {
 
 /// One [`analog::placement::SymmetryIsland`] per symmetry axis of `reqs.hard`
 /// (cell ids) with ≥ 2 distinct cells. `touch_nm` = the largest gap any two
-/// members owe across any face, at any variant, + one lattice step.
-///
-/// ponytail: profiles at R0 only (faces cover the turns up to which face
-/// meets which); read all 8 orients if a turned pair ever reads split.
+/// members owe across any face, at any variant and orient (a mirror partner
+/// drawn MY/MX180 meets with the face its R0 profile calls the same side),
+/// + one lattice step.
 fn symmetry_islands(reqs: &analog::Requirements<Layout>, rules: &gp::PlaceRules) -> Vec<analog::placement::SymmetryIsland> {
     use gp::spacing::Face;
     let mut pairs = Vec::new();
@@ -1431,7 +1430,7 @@ fn symmetry_islands(reqs: &analog::Requirements<Layout>, rules: &gp::PlaceRules)
     let mut axes: Vec<u16> = pairs.iter().map(|p| p.2).collect();
     axes.sort_unstable();
     axes.dedup();
-    let profiles = |c: u32| rules.profiles.of.get(c as usize).map(|v| v.iter().map(|o| &o[0]).collect::<Vec<_>>()).unwrap_or_default();
+    let profiles = |c: u32| rules.profiles.of.get(c as usize).map(|v| v.iter().flat_map(|o| o.iter()).collect::<Vec<_>>()).unwrap_or_default();
     axes.into_iter()
         .filter_map(|ax| {
             let mut cells: Vec<u32> = pairs.iter().filter(|p| p.2 == ax).flat_map(|p| [p.0, p.1]).collect();

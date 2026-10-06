@@ -897,6 +897,28 @@ mod tests {
             assert!(!st.warm_fallback);
             assert!(key(&l1) <= key(&l0), "seed {seed}: {:?} > {:?}", key(&l1), key(&l0));
         }
+        // place_sp returns its best state whatever T is, so the bound above
+        // holds at any temperature; the gate itself: at `T = 0` (what `p0 = 0`
+        // gives) no accepted move raises the gate key, nor E at an equal key.
+        let prices = gp::Prices::new();
+        let warm = Start::Warm { tree: &t0, variant: &l0.variant, orient: &l0.orient };
+        let (mut st, _, ok) = init(&inp, &warm, &prices);
+        assert!(ok);
+        let mut rng = SplitMix64::new(9);
+        let mut cur = (st.key(false), st.energy());
+        let (mut accepted, mut uphill) = (0, 0);
+        for _ in 0..2_000 {
+            let prev = cur;
+            let before = st.stats.accepted;
+            if let Some(de) = st.trial(&mut rng, &mut cur, 0.0, false) {
+                uphill += u32::from(de > 0.0 && cur.0 == prev.0);
+            }
+            if st.stats.accepted > before {
+                accepted += 1;
+                assert!(cur.0 < prev.0 || (cur.0 == prev.0 && cur.1 <= prev.1), "{prev:?} -> {cur:?}");
+            }
+        }
+        assert!(accepted > 0 && uphill > 0, "accepted {accepted}, uphill proposals {uphill}");
     }
 
     #[test]

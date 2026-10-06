@@ -89,6 +89,8 @@ Tests (`backend/dp/src/sp.rs` `#[cfg(test)] mod tests`, and `backend/dp/tests/sp
 tests), all with `SpacingTable::uniform(0 or g, 10)` and `prof = None` unless stated:
 - `balasa_example_1_decodes_symmetric`: data exactly as plan; asserts `is_sf(sym node)`, `decode == Ok(())`,
   `C_F + C_G == C_K + C_L == C_C + C_J == 2·ax2` (doubled centres), pairwise boxes disjoint, `y0[C] == y0[J] == 4000`.
+  (Corrected in implementation: `== 2000`. Balasa's flat 4000 needs A below C; in the hierarchy A is a root sibling
+  and the contiguous symmetry node holds only K below C and L below J, 2000 each.)
 - `make_sf_satisfies_condition_1_1`: SplitMix64 seed 7, 1,000 random α over 2 pairs + 1 self → `is_sf` after `make_sf`.
 - `random_sf_codes_decode_exactly` (sp_props): generator as plan (seed 7, 10,000 trees); `assert_eq!(fails, 0)`,
   `assert!(verify(..))` per tree; `eprintln!` the `fixes` count.

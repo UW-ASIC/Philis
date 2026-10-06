@@ -521,7 +521,15 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     let pairs: Vec<(usize, usize)> = mate.map_or(Vec::new(), |m| {
         (0..k).filter(|&a| usize::from(m[a]) > a).map(|a| (a, usize::from(m[a]))).collect()
     });
-    let has_self = mate.is_some_and(|m| (0..k).any(|a| usize::from(m[a]) == a));
+    // A self kid sits at `(ax2 - w)/2`, on the lattice only when `ax2 ≡ w (mod 2·lattice)`:
+    // every self kid's width must agree on that residue.
+    let l2 = 2 * g.lattice.max(1);
+    let mut self_w = None;
+    for a in (0..k).filter(|&a| mate.is_some_and(|m| usize::from(m[a]) == a)) {
+        if *self_w.get_or_insert(kw[a].rem_euclid(l2)) != kw[a].rem_euclid(l2) {
+            return Err(Fail::SymX(fail_at));
+        }
+    }
     let p = pairs.len();
     let mut ax2 = 0;
     let band_cap = 2 * k + 2;
@@ -600,8 +608,8 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
                 let sv = (0..k).filter(|&a| mate.is_some_and(|m| usize::from(m[a]) == a)).map(|a| 2 * x[a] + kw[a]);
                 pv.chain(sv).max().unwrap_or(0)
             };
-            let snap = |v: i32| axis_snap(v, g.lattice, has_self, g.axis_grid);
-            ax2 = snap(bound(&x));
+            let snap = |v: i32| axis_snap(v, g.lattice, self_w, g.axis_grid);
+            ax2 = snap(bound(&x)).ok_or(Fail::SymX(fail_at))?;
             let mut it = 0;
             loop {
                 step_x(&mut x, Some(ax2), gc);
@@ -614,7 +622,7 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
                     return Err(Fail::SymX(fail_at));
                 }
                 *fixes += 1;
-                ax2 = snap(b.max(ax2));
+                ax2 = snap(b.max(ax2)).ok_or(Fail::SymX(fail_at))?;
             }
         }
         // Step 6: close merge bands (0 < gap < min with `abut`) on every related
@@ -659,16 +667,21 @@ fn decode_node(t: &Tree, g: &Geo, s: &mut Scratch, ni: usize, fixes: &mut u32) -
     Ok(())
 }
 
-/// Step 2x′: the least admissible `2·axis` ≥ `v`: a multiple of `2·lattice`
-/// with a self-symmetric kid (its centre must land on the lattice), else of
-/// `lattice`. With `grid = Some((p0, P))` (PLC-28) the least `≥ v` with
+/// Step 2x′: the least admissible `2·axis` ≥ `v`: `≡ self_w (mod 2·lattice)`
+/// with self-symmetric kids (`self_w`: their common width residue, so each
+/// corner `(2·axis − w)/2` lands on the lattice), else a multiple of `lattice`.
+/// With `grid = Some((p0, P))` (PLC-28) the least `≥ v` with
 /// `2·axis ≡ p0 (mod 2P)`, so the node-relative axis is `≡ p0/2 (mod P)`
 /// (a track centreline once the node's origin is a multiple of `P`); `p0` and
-/// `2P` are multiples of `2·lattice`, so self kids still land on the lattice.
-fn axis_snap(v: i32, lattice: i32, has_self: bool, grid: Option<(i32, i32)>) -> i32 {
-    match grid {
-        Some((p0, p)) => v + (p0 - v).rem_euclid(2 * p),
-        None => round_up(v, if has_self { 2 * lattice } else { lattice }),
+/// `2P` are multiples of `2·lattice`, so `None` when `self_w ≠ 0`: a self kid
+/// an odd number of lattice steps wide cannot be centred on a track.
+fn axis_snap(v: i32, lattice: i32, self_w: Option<i32>, grid: Option<(i32, i32)>) -> Option<i32> {
+    let l2 = 2 * lattice.max(1);
+    match (grid, self_w) {
+        (Some((p0, _)), Some(r)) if (p0 - r).rem_euclid(l2) != 0 => None,
+        (Some((p0, p)), _) => Some(v + (p0 - v).rem_euclid(2 * p)),
+        (None, Some(r)) => Some(v + (r - v).rem_euclid(l2)),
+        (None, None) => Some(round_up(v, lattice)),
     }
 }
 
