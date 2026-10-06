@@ -54,8 +54,18 @@ pub fn allocate(sets: &[SetIn], sens: &Sensitivities, beta: f64, max_eta: f32) -
     let mut delta: Vec<Option<f64>> = vec![None; n];
     let mut weight: Vec<Option<f64>> = vec![None; n];
     let mut diags = Vec::new();
+    // Per-device ΔV_T sensitivity of the current spec, dense by device id; reused across specs.
+    let mut per_dev: Vec<f64> = Vec::new();
     for s in &sens.specs {
-        let side = |ds: &[DeviceId]| ds.iter().map(|&d| s.d_vt.iter().filter(|e| e.0 == d).map(|e| e.1).sum::<f64>()).sum::<f64>().abs();
+        per_dev.clear();
+        for &(d, v) in &s.d_vt {
+            let i = d.0 as usize;
+            if per_dev.len() <= i {
+                per_dev.resize(i + 1, 0.0);
+            }
+            per_dev[i] += v;
+        }
+        let side = |ds: &[DeviceId]| ds.iter().map(|d| per_dev.get(d.0 as usize).copied().unwrap_or(0.0)).sum::<f64>().abs();
         let sk: Vec<f64> = sets.iter().map(|k| k.sides.iter().map(|(a, b)| (side(a) + side(b)) / 2.0).fold(0.0, f64::max)).collect();
         let touched: Vec<usize> = (0..n).filter(|&k| sk[k] > 0.0).collect();
         if touched.is_empty() {
@@ -114,7 +124,7 @@ pub(crate) fn set_in(s: &MatchSpec, nl: &Netlist, avt: [Option<f32>; 2]) -> Opti
     let sides = if s.members.iter().any(|m| m.half.is_some()) {
         vec![(half(Half::A), half(Half::B))]
     } else {
-        let r = s.reference.unwrap_or(0);
+        let r = s.reference.unwrap_or(0).min(s.members.len() - 1);
         s.members.iter().enumerate().filter(|&(i, _)| i != r).map(|(_, m)| (vec![s.members[r].device], vec![m.device])).collect()
     };
     let area = |ds: &[DeviceId]| ds.iter().map(|d| nl.devices[d.0 as usize].gate_area_um2()).sum::<f64>() as f32;

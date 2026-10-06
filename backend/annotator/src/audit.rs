@@ -50,7 +50,7 @@ pub fn audit(intent: &Intent, nl: &Netlist, cascodes: &[[DeviceId; 4]], op: Opti
     };
     let dop = |d: DeviceId| op.and_then(|o| o.dev.get(d.0 as usize).copied().flatten());
     let mut skipped: Vec<&str> = Vec::new();
-    for s in &intent.sets {
+    for s in intent.sets.iter().filter(|s| !s.members.is_empty()) {
         let ids: Vec<DeviceId> = s.members.iter().map(|m| m.device).collect();
         if mos_current(s) {
             let vgst = |d: DeviceId| {

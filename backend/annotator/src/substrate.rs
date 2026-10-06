@@ -98,8 +98,9 @@ pub fn injectors(
     for &p in pins {
         heap.push(Reverse((0u64, false, p.0)));
     }
-    if nl.ports.is_empty() {
-        missing.push(("GuardRing", "no port list: injectors unknown"));
+    const NO_PORTS: (&str, &str) = ("GuardRing", "no port list: injectors unknown");
+    if nl.ports.is_empty() && !missing.contains(&NO_PORTS) {
+        missing.push(NO_PORTS);
     }
     let mut edges: Vec<Vec<(u16, u64, bool)>> = vec![Vec::new(); n_nets];
     for d in nl.devices.iter().filter(|d| d.kind == DeviceKind::Resistor) {
@@ -119,7 +120,7 @@ pub fn injectors(
         dist[n as usize] = Some((dd, unknown));
         for &(m, w, u) in &edges[n as usize] {
             if dist[m as usize].is_none() {
-                heap.push(Reverse((dd + w, unknown || u, m)));
+                heap.push(Reverse((dd.saturating_add(w), unknown || u, m)));
             }
         }
     }

@@ -102,7 +102,8 @@ pub struct SpecSens {
 #[must_use]
 pub fn region(op: &DeviceOp, max_id_ua: f64) -> Region {
     let id = op.id_ua.abs();
-    if id < 1e-3 * max_id_ua {
+    // `id == 0` first: with every FET idle the relative test below is `0 < 0`.
+    if id == 0.0 || id < 1e-3 * max_id_ua {
         Region::Off
     } else if match (op.vgs_mv, op.vth_mv) {
         (Some(vgs), Some(vth)) => vgs.abs() < vth.abs(),
