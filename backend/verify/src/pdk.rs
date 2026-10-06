@@ -1448,8 +1448,11 @@ impl Process for Overlay<'_> {
     fn min_space(&self, role: &str) -> Option<i32> {
         self.pdk.min_spacing(self.layer(role)?.0)
     }
+    /// As [`Pdk`]'s, by the overlay's layer: a width written on a layer
+    /// derived from it counts (ASAP7's `SDT_LOGIC` for `sdt`).
     fn width(&self, role: &str) -> Option<i32> {
-        self.pdk.min_width(self.layer(role)?.0)
+        let l = self.layer(role)?.0;
+        self.pdk.min_width(l).or_else(|| self.pdk.widest_on("min_width", "limit", &[l]).map(|v| v as i32))
     }
     // By the overlay's layers, so a recipe role (`res_implant`) resolves.
     fn enclosure(&self, outer: &str, inner: &str) -> Option<i32> {

@@ -972,8 +972,11 @@ fn mos_overlay<'a>(pdk: &'a Pdk, model: &str) -> Option<verify::pdk::Overlay<'a>
 /// deck's recogniser for that model expects.
 fn draw_variants(kind: DeviceKind, model: &str, group: &DeviceGroup, c: &Constraints, pdk: &Pdk) -> Vec<Macro> {
     match kind {
-        // A fin process draws its transistors from fins.
-        DeviceKind::Nmos | DeviceKind::Pmos if pnr_core::Process::layer(pdk, "fin").is_some() => draw_all::<cells::finfet::FinFet>(group, c, pdk),
+        // A fin process draws its transistors from fins; a flavoured model (lvt, slvt) its markers.
+        DeviceKind::Nmos | DeviceKind::Pmos if pnr_core::Process::layer(pdk, "fin").is_some() => {
+            let ov = mos_overlay(pdk, model);
+            draw_all::<cells::finfet::FinFet>(group, c, ov.as_ref().map_or(pdk as &dyn pnr_core::Process, |o| o))
+        }
         // A variant whose diffusion lies beyond the deck's latch-up tap reach
         // is dropped (CELL-13); none left keeps the empty placeholder.
         DeviceKind::Nmos | DeviceKind::Pmos => {

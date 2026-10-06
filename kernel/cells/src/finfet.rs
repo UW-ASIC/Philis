@@ -174,8 +174,8 @@ impl Cell for FinFet {
             }
             // One uncontacted edge gate per diffusion end (gates -1 and n,
             // diffusion-break style). Not a `pnr_core::Dummy`: that means a
-            // bulk-tied, extracted transistor with an LVS card, and this deck
-            // recognises no devices. A deck that does needs a tie and a record.
+            // bulk-tied, extracted transistor with an LVS card, and ASAP7
+            // extracts none here (no LIG on the gate, no trench beyond it).
             let a = Rect { x, y: 0, w: 2 * r.act_past_gate + (n + 2) * r.gate_w + (n + 1) * gap, h };
             b.rect(act, a);
             acts.push(a);
@@ -246,6 +246,13 @@ impl Cell for FinFet {
         let sel_top = (h + r.sel_enc).max(gate_hi + r.sel_past_gate);
         let sel = Rect { h: (sel_top - sel.y).max(r.sel_w), ..sel };
         b.rect(own_sel, sel);
+        // A flavoured model's recogniser markers (`gate_marker{i}`, the
+        // caller's overlay: ASAP7's LVT, SLVT, SRAMVT) over the select's area,
+        // which meets every implant rule the deck writes for them.
+        for i in 0.. {
+            let Some(l) = process.layer(&format!("gate_marker{i}")) else { break };
+            b.rect(l, sel);
+        }
 
         // Tap strip above: its own active and fins under the other select,
         // clear of the device select and of the gates' field ends.

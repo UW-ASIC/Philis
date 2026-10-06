@@ -101,6 +101,6 @@
     "res_value_tol_ppm": 5000,
     "tie_max_dist_nm": 30000,
     "tie_max_dist_nm_source": "asap7.deck ACTIVE.LUP.1.PMOS/NMOS missing_tie max_distance 30um. Read by cells::mosfet::taps_in_reach (CELL-13) for planar macros only; the FinFet generator is not checked against it.",
-    "finfet_note": "ASAP7 (asap7.deck, DRM 1p7): fins 7 nm at a 27 nm pitch, gates exactly 20 nm at a 54 nm pitch; S/D contacted through SDT + LISD and V0 to M1, gates through LIG and V0. Channel width is a fin count; L is the fixed gate width. The deck connects M1 and up only and recognises no devices: LVS covers routing, not devices."
+    "finfet_note": "ASAP7 (asap7.deck, DRM 1p7): fins 7 nm at a 27 nm pitch, gates exactly 20 nm at a 54 nm pitch; S/D contacted through SDT + LISD and V0 to M1, gates through LIG and V0. Channel width is a fin count; L is the fixed gate width. The deck (PHILIS edits) connects the front end and recognises nmos/pmos × rvt/lvt/slvt/sram as three-terminal MOS (bulk not compared); its MOL resistance is unknown, so resistance-reading ERC rows are refused, not passed."
   }
 }

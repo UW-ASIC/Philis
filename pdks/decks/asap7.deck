@@ -1,4 +1,4 @@
-# vendored from GPurify 6341f18269ae32930c4cb4b109e02f5ae0a37ac1 pdks/generic_finfet.deck; Philis edits are marked "# PHILIS:"
+# vendored from GPurify be14a73f663cd0da3989c421fd4feadb7963ae7e pdks/generic_finfet.deck; Philis edits are marked "# PHILIS:"
 # ASAP7, the predictive 7 nm FinFET PDK (Arizona State University and ARM).
 # It is the only FinFET PDK with a public design rule manual, so it stands in
 # for "a generic FinFET process" here. It is predictive: no fab builds it.
@@ -310,8 +310,22 @@ rule ir_drop ir_drop()
 # [RC] gives a resistance for. GATE, LIG, LISD, SDT, V0 and PAD have no
 # published resistance, so they are not conductors, and transistors are not
 # extracted (see "needs" below).
-connect conductors [M1, M2, M3, M4, M5, M6, M7, M8, M9]
+# PHILIS: the front end is connected too, so LVS extracts transistors (the
+# "needs: sourced MOL and gate resistance" block below, made real). SD, GATE_C
+# and LISD and the SDT and V0 cuts have no pex row: their resistance is
+# unknown, never zero (GPurify refuses only the ERC rows that read one). A
+# source/drain is diffusion off the gate that a trench contacts (the
+# generator's uncontacted diffusion ends are no net); a gate is GATE plus the
+# LIG on it, when one is (an uncontacted edge gate is no net).
+layer SD = (ACTIVE not GATE).interacting(SDT)
+layer GATE_C = (GATE_UNCUT or LIG).interacting(LIG)
+connect conductors [SD, GATE_C, LISD, M1, M2, M3, M4, M5, M6, M7, M8, M9]
 connect touch_within_layer
+# PHILIS: the front-end cuts [DRM 2.2]: SDT from diffusion to LISD, V0 from
+# LISD and from LIG up to M1.
+connect via SDT [SD, LISD]
+connect via V0 [LISD, M1]
+connect via V0 [GATE_C, M1]
 connect via V1 [M1, M2]
 connect via V2 [M2, M3]
 connect via V3 [M3, M4]
@@ -329,6 +343,27 @@ connect label M6_LABEL names M6
 connect label M7_LABEL names M7
 connect label M8_LABEL names M8
 connect label M9_LABEL names M9
+
+# PHILIS: MOS recognisers, as the "needs: sourced MOL and gate resistance"
+# block below lists them ([DRM] 2.1 layers, models per the PDK cells in
+# cdslib/asap7_TechLib_10), on the conductors above. Three terminals: the
+# well and substrate are not conductors here, so the bulk is not compared.
+layer nmos_rvt = (CHANNEL and NSELECT) not (SLVT or LVT or SRAMVT)
+layer nmos_lvt = CHANNEL and NSELECT and LVT
+layer nmos_slvt = CHANNEL and NSELECT and SLVT
+layer nmos_sram = CHANNEL and NSELECT and SRAMVT
+layer pmos_rvt = (CHANNEL and PSELECT) not (SLVT or LVT or SRAMVT)
+layer pmos_lvt = CHANNEL and PSELECT and LVT
+layer pmos_slvt = CHANNEL and PSELECT and SLVT
+layer pmos_sram = CHANNEL and PSELECT and SRAMVT
+device mos nmos_rvt model "nmos_rvt" terminals [GATE_C, SD, SD]
+device mos nmos_lvt model "nmos_lvt" terminals [GATE_C, SD, SD]
+device mos nmos_slvt model "nmos_slvt" terminals [GATE_C, SD, SD]
+device mos nmos_sram model "nmos_sram" terminals [GATE_C, SD, SD]
+device mos pmos_rvt model "pmos_rvt" terminals [GATE_C, SD, SD]
+device mos pmos_lvt model "pmos_lvt" terminals [GATE_C, SD, SD]
+device mos pmos_slvt model "pmos_slvt" terminals [GATE_C, SD, SD]
+device mos pmos_sram model "pmos_sram" terminals [GATE_C, SD, SD]
 
 # Parasitic stack.
 #   sheet: [RC] resistance per um (kohm/um) times the DRM minimum width, e.g.
@@ -408,6 +443,7 @@ rule SRAM.ACTIVE.AUX.2 forbidden(ACTIVE.outside(SRAMDRC).interacting(SRAMDRC))
 #   rule M8/M9.W.3 width >= 80nm when length >= 1200nm and < 1800nm
 #   rule M8/M9.W.4 width >= 120nm when length >= 1800nm
 #
+# PHILIS: done above, the resistance left unknown; the upstream note follows.
 # needs: sourced MOL and gate resistance. GATE, LISD, LIG and V0 have no
 # published sheet or contact resistance, so they cannot be conductors, and a
 # MOS terminal must be one. With them, the recognisers would be (layers per
