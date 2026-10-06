@@ -58,6 +58,10 @@ impl Violation {
     /// margin `0`.
     #[must_use]
     pub fn from_residual(rule: impl Into<String>, residual: f64) -> Self {
-        Self { rule: rule.into(), margin: (residual * 1000.0).ceil() as i64 }
+        // `as` saturates huge finite values; NaN/∞ would read 0 or wrap, so map
+        // them explicitly. `max(0)` keeps a within-budget residual from
+        // subtracting from Θ.
+        let margin = if residual.is_finite() { ((residual * 1000.0).ceil() as i64).max(0) } else { i64::MAX };
+        Self { rule: rule.into(), margin }
     }
 }

@@ -81,7 +81,8 @@ impl MosSize {
     /// W_total·L·m, µm².
     #[must_use]
     pub fn gate_area_um2(self) -> f64 {
-        (self.w_total_nm * self.l_nm) as f64 * 1e-6 * f64::from(self.m)
+        // In f64: the nm² product of two large i64 sides overflows i64.
+        self.w_total_nm as f64 * self.l_nm as f64 * 1e-6 * f64::from(self.m)
     }
 }
 

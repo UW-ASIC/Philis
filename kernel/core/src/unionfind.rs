@@ -59,12 +59,17 @@ impl UnionFind {
     /// omitted — they stay addressable as `Target::Device`. O(n); takes
     /// `&mut self` only to compress paths.
     pub fn groups(&mut self) -> Vec<Vec<u32>> {
+        // Dense by-root table instead of a HashMap: deterministic, no hashing.
+        // Members arrive ascending, so each list's first entry is its smallest
+        // member and one sort orders the sets.
         let n = self.parent.len();
-        let mut by_root: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        let mut by_root: Vec<Vec<u32>> = vec![Vec::new(); n];
         for i in 0..n as u32 {
             let r = self.find(i);
-            by_root.entry(r).or_default().push(i);
+            by_root[r as usize].push(i);
         }
-        by_root.into_values().filter(|s| s.len() > 1).collect()
+        let mut sets: Vec<Vec<u32>> = by_root.into_iter().filter(|s| s.len() > 1).collect();
+        sets.sort_unstable_by_key(|s| s[0]);
+        sets
     }
 }

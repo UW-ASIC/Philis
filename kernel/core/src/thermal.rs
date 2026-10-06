@@ -65,7 +65,8 @@ fn rise_at(l: &Layout, power_uw: &[i32], x: i32, y: i32) -> f32 {
             continue;
         }
         let r_floor = (l.hw[j].max(l.hh[j])).max(1) as f32;
-        let (dx, dy) = ((x - l.x[j]) as f32, (y - l.y[j]) as f32);
+        // Differences in i64: two on-die i32 coordinates can be > i32::MAX apart.
+        let (dx, dy) = ((i64::from(x) - i64::from(l.x[j])) as f32, (i64::from(y) - i64::from(l.y[j])) as f32);
         let r = dx.hypot(dy);
         rise += if r < r_floor {
             self_rise_mc(p, 2 * l.hw[j].min(l.hh[j]), 2 * l.hw[j].max(l.hh[j]), K_SI_W_PER_M_K)

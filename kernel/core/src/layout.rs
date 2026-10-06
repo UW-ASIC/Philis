@@ -54,7 +54,7 @@ impl Layout {
             (x0, y0) = (x0.min(self.x[i] - self.hw[i]), y0.min(self.y[i] - self.hh[i]));
             (x1, y1) = (x1.max(self.x[i] + self.hw[i]), y1.max(self.y[i] + self.hh[i]));
         }
-        f64::from(x1 - x0) * f64::from(y1 - y0)
+        (f64::from(x1) - f64::from(x0)) * (f64::from(y1) - f64::from(y0))
     }
 
     /// Normalising length, nm: `sqrt(Σ cell area)` over every cell's current
@@ -93,7 +93,9 @@ impl Layout {
                     hi_x = hi_x.max(self.x[i] + self.hw[i]);
                     hi_y = hi_y.max(self.y[i] + self.hh[i]);
                 }
-                ((lo_x + hi_x) / 2, (lo_y + hi_y) / 2, (hi_x - lo_x) / 2, (hi_y - lo_y) / 2)
+                let (cx, hw) = enclosing_half(lo_x, hi_x);
+                let (cy, hh) = enclosing_half(lo_y, hi_y);
+                (cx, cy, hw, hh)
             }
         }
     }
@@ -206,6 +208,14 @@ impl Layout {
         let gy = i64::from(((ay - by).abs() - (ahh + bhh)).max(0));
         ((gx * gx + gy * gy) as f32).sqrt()
     }
+}
+
+/// Centre and half-extent of the smallest centre/half box containing
+/// `[lo, hi]`: an odd span rounds the half-extent up so no edge is cut off.
+/// In i64 so spans across the whole i32 range do not overflow.
+fn enclosing_half(lo: i32, hi: i32) -> (i32, i32) {
+    let half = (i64::from(hi) - i64::from(lo) + 1) / 2;
+    ((i64::from(lo) + half) as i32, half as i32)
 }
 
 #[cfg(test)]
