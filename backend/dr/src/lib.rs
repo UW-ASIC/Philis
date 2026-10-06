@@ -5553,4 +5553,940 @@ mod tests {
         assert!((sum - total).abs() < 1e-3 * total, "{sum} vs {total}");
         assert_eq!(map.iter().map(|(r, _)| nodes(r)).sum::<f32>(), g.nodes() as f32, "regions tile the frame");
     }
+
+    /// Unit tests per helper: expectations come from each doc comment, the
+    /// deck physics, or a hand-worked value, never from re-running the code.
+    mod unit {
+        use super::*;
+        use analog::routing::em::Limit;
+
+        const L0: LayerId = LayerId(0);
+        const L1: LayerId = LayerId(1);
+        const L2: LayerId = LayerId(2);
+
+        fn r(x: i32, y: i32, w: i32, h: i32) -> Rect {
+            Rect { x, y, w, h }
+        }
+
+        fn sh(layer: LayerId, rect: Rect) -> Shape {
+            Shape { layer, rect }
+        }
+
+        /// 20×20 nodes, pitch 100, two layers.
+        fn grid20() -> TrackGrid {
+            TrackGrid::with_layers((2_000, 2_000), 100, VIA_COST, 2)
+        }
+
+        // ---- geometry helpers -------------------------------------------
+
+        #[test]
+        fn rect_gap_is_the_larger_axis_gap_and_zero_on_contact() {
+            let a = r(0, 0, 10, 10);
+            assert_eq!(rect_gap(a, r(10, 0, 5, 5)), 0, "abutting");
+            assert_eq!(rect_gap(a, r(5, 5, 20, 20)), 0, "overlapping");
+            assert_eq!(rect_gap(a, r(15, 0, 5, 5)), 5);
+            assert_eq!(rect_gap(r(15, 0, 5, 5), a), 5, "symmetric");
+            assert_eq!(rect_gap(a, r(13, 14, 5, 5)), 4, "diagonal reads as the larger axis gap");
+            assert_eq!(rect_gap(a, r(0, -7, 10, 2)), 5, "below");
+        }
+
+        #[test]
+        fn contains_overlaps_grown_bbox() {
+            let a = r(0, 0, 10, 10);
+            assert!(contains(a, a));
+            assert!(contains(a, r(2, 2, 8, 8)));
+            assert!(!contains(a, r(2, 2, 9, 8)));
+            assert!(!contains(r(2, 2, 8, 8), a));
+            assert!(overlaps(a, r(9, 9, 5, 5)));
+            assert!(!overlaps(a, r(10, 0, 5, 5)), "touching edges share no area");
+            assert!(!overlaps(a, r(3, 3, 0, 0)), "a degenerate rect has no area");
+            assert_eq!(grown(a, 3), r(-3, -3, 16, 16));
+            assert_eq!(grown(a, 0), a);
+            assert_eq!(bbox(a, r(20, -5, 5, 5)), r(0, -5, 25, 15));
+            assert_eq!(bbox(a, a), a);
+        }
+
+        #[test]
+        fn square_and_centre() {
+            assert_eq!(square((100, 50), 20), r(90, 40, 20, 20));
+            assert_eq!(square((0, 0), 0), r(0, 0, 0, 0));
+            assert_eq!(square((0, 0), 3), r(-1, -1, 3, 3));
+            assert_eq!(centre_of(r(10, 20, 30, 40)), (25, 40));
+            assert_eq!(centre_of(r(-10, -10, 5, 5)), (-8, -8));
+            assert_eq!(centred(r(0, 0, 100, 100), 40, 20), r(30, 40, 40, 20));
+            assert_eq!(centred(r(0, 0, 10, 10), 30, 30), r(-10, -10, 30, 30), "grows about the centre");
+        }
+
+        #[test]
+        fn compact_of_skips_netless_and_out_of_range() {
+            let ci_of = [usize::MAX, 0, 1];
+            assert_eq!(compact_of(&ci_of, 0), None);
+            assert_eq!(compact_of(&ci_of, 1), Some(0));
+            assert_eq!(compact_of(&ci_of, 2), Some(1));
+            assert_eq!(compact_of(&ci_of, 3), None);
+            assert_eq!(compact_of(&[], 0), None);
+        }
+
+        #[test]
+        fn flow_max_is_the_larger_of_sunk_and_sourced() {
+            assert_eq!(flow_max(&[]), 0.0);
+            assert_eq!(flow_max(&[(0, 5.0), (1, -3.0), (2, -4.0)]), 7.0);
+            assert_eq!(flow_max(&[(0, 5.0), (1, -5.0)]), 5.0, "KCL-balanced");
+            assert_eq!(flow_max(&[(0, 0.0)]), 0.0);
+        }
+
+        #[test]
+        fn max_k_is_elementwise_and_ones_when_empty() {
+            assert_eq!(max_k(&[]), [1; gr::MAX_LAYERS]);
+            let mut a = [1u8; gr::MAX_LAYERS];
+            let mut b = [1u8; gr::MAX_LAYERS];
+            (a[0], a[1], b[1], b[7]) = (3, 1, 4, 2);
+            let m = max_k(&[a, b]);
+            assert_eq!((m[0], m[1], m[2], m[7]), (3, 4, 1, 2));
+        }
+
+        #[test]
+        fn improves_is_lexicographic_without_more_overuse() {
+            assert!(improves((0, 5.0, 1.0), (1, 0.0, 1.0)), "fewer hard wins over residual");
+            assert!(improves((1, 0.5, 0.0), (1, 1.0, 0.0)));
+            assert!(!improves((1, 1.0, 0.0), (1, 1.0, 0.0)), "equal is no improvement");
+            assert!(!improves((0, 0.0, 2.0), (1, 1.0, 1.0)), "overuse may not rise");
+            assert!(improves((0, 0.0, 0.5), (1, 1.0, 1.0)), "less overuse is fine");
+        }
+
+        // ---- config lookups ---------------------------------------------
+
+        fn spaced_cfg() -> DetailedCfg {
+            DetailedCfg {
+                spacing: vec![(L0, 140, vec![(1_000, 300), (2_000, 500)])],
+                min_width: vec![(L1, 200)],
+                cut_enclosure: vec![(L2, 10, 30)],
+                ..test_cfg()
+            }
+        }
+
+        #[test]
+        fn space_picks_the_widest_reached_threshold() {
+            let cfg = spaced_cfg();
+            assert_eq!(cfg.space(L0, 100, 50, 9), 140);
+            assert_eq!(cfg.space(L0, 1_000, 0, 9), 300, "a threshold is reached at equality");
+            assert_eq!(cfg.space(L0, 0, 1_500, 9), 300, "either width");
+            assert_eq!(cfg.space(L0, 2_500, 0, 9), 500);
+            assert_eq!(cfg.space(L1, 2_500, 0, 9), 9, "fallback off the table");
+            assert_eq!(cfg.wide(L0), 1_000);
+            assert_eq!(cfg.wide(L1), i32::MAX);
+        }
+
+        #[test]
+        fn stride_wire_min_width_and_enclosure_lookups() {
+            let mut cfg = spaced_cfg();
+            assert_eq!((cfg.stride(0), cfg.wire(0)), (1, 290), "uniform lattice");
+            cfg.layers = vec![gr::LayerSpec { stride: 0, wire: 200, ..Default::default() }, gr::LayerSpec { stride: 2, wire: 400, ..Default::default() }];
+            assert_eq!((cfg.stride(0), cfg.wire(0)), (1, 200), "stride 0 reads as 1");
+            assert_eq!((cfg.stride(1), cfg.wire(1)), (2, 400));
+            assert_eq!((cfg.stride(5), cfg.wire(5)), (1, 290), "past the specs");
+            assert_eq!(cfg.min_width_on(L1), Some(200));
+            assert_eq!(cfg.min_width_on(L0), None);
+            assert_eq!(cfg.enclosure(L2), (10, 30));
+            assert_eq!(cfg.enclosure(L0), (0, 0));
+        }
+
+        #[test]
+        fn em_width_rounds_up_to_twice_the_grid() {
+            let cfg = DetailedCfg { em: vec![(L0, Limit { ua_per_um: 1_000.0, ..Limit::default() })], ..test_cfg() };
+            assert_eq!(cfg.em_width(L0, 0.0, 0.0), 290, "never under the wire");
+            assert_eq!(cfg.em_width(L0, 1_003.0, 0.0), 1_010, "1003 nm up to a 10 nm step");
+            assert_eq!(cfg.em_width(L1, 1e6, 0.0), 290, "no limit: the wire");
+            let odd = DetailedCfg { wire_width: 295, ..test_cfg() };
+            assert_eq!(odd.em_width(L0, 0.0, 0.0), 300);
+        }
+
+        /// A zero manufacturing grid reads as 1 nm, as everywhere else in the
+        /// router (`access_need`, `place_near`, the via arrays).
+        #[test]
+        fn em_width_tolerates_a_zero_grid() {
+            let cfg = DetailedCfg { grid: 0, ..test_cfg() };
+            assert_eq!(cfg.em_width(L0, 0.0, 0.0), 290);
+        }
+
+        #[test]
+        fn lattice_period_is_pitch_times_lcm_of_strides() {
+            let spec = |strides: &[u32]| DetailedCfg { pitch: 100, layers: strides.iter().map(|&stride| gr::LayerSpec { stride, ..Default::default() }).collect(), ..DetailedCfg::default() };
+            assert_eq!(lattice_period(&spec(&[])), 100);
+            assert_eq!(lattice_period(&spec(&[1, 2, 3])), 600);
+            assert_eq!(lattice_period(&spec(&[2, 4])), 400);
+            assert_eq!(lattice_period(&spec(&[0, 3])), 300, "stride 0 reads as 1");
+            assert_eq!(lattice_period(&DetailedCfg::default()), 1, "pitch 0 reads as 1");
+            assert_eq!(lattice_spec(&spec(&[1, 2])), LatticeSpec { p0: 100, strides: vec![1, 2], origin_multiple: 200 });
+        }
+
+        #[test]
+        fn frame_origin_rounds_down_to_the_period() {
+            assert_eq!(frame_origin((-5, 7), 10, 4), (-16, -4));
+            assert_eq!(frame_origin((0, 0), 0, 5), (0, 0));
+            assert_eq!(frame_origin((20, 20), 0, 10), (20, 20), "already on the period");
+            assert_eq!(frame_origin((-1, -1), 0, 10), (-10, -10));
+        }
+
+        // ---- EM sizing ---------------------------------------------------
+
+        /// J = 1 mA/µm on L0; L0 goes wide at 1 µm with 600 nm spacing.
+        fn em_cfg(blech: f32) -> DetailedCfg {
+            DetailedCfg { em: vec![(L0, Limit { ua_per_um: 1_000.0, blech, ..Limit::default() })], spacing: vec![(L0, 140, vec![(1_000, 600)])], ..test_cfg() }
+        }
+
+        #[test]
+        fn tracks_follow_current() {
+            let cfg = em_cfg(0.0);
+            assert_eq!(tracks(&cfg, 0, L0, 0.0), (1, 0), "no current");
+            assert_eq!(tracks(&cfg, 0, L1, 1e6), (1, 0), "no limit");
+            assert_eq!(tracks(&cfg, 0, L0, 100.0), (1, 0), "100 nm fits one 290 nm wire");
+            // 1 mA needs 1000 nm: 1 + ⌈710/430⌉ = 3 tracks span 1150 nm, past
+            // the wide threshold, so drawn as separate wires it needs ⌈1000/290⌉
+            // = 4; at 1580 nm the wide spacing 600 needs ⌈(600 − 140)/430⌉ = 2
+            // guard tracks.
+            assert_eq!(tracks(&cfg, 0, L0, 1_000.0), (4, 2));
+            assert_eq!(tracks(&cfg, 0, L0, -1_000.0), (4, 2), "sourced current counts the same");
+            assert_eq!(tracks(&cfg, 0, L0, 1e9), (K_MAX, 2), "capped at K_MAX");
+            assert_eq!(tracks(&cfg, 0, L0, 1e15), (K_MAX, 2), "a current past i32 nm saturates, never overflows");
+        }
+
+        /// `tracks` knows no run length: without a diffusion domain a segment
+        /// earns no Blech immortality, so a deck with a Blech product sizes the
+        /// same as one without.
+        #[test]
+        fn tracks_grant_no_blech_credit_without_a_domain() {
+            assert_eq!(tracks(&em_cfg(1e6), 0, L0, 1_000.0), tracks(&em_cfg(0.0), 0, L0, 1_000.0));
+        }
+
+        #[test]
+        fn access_need_is_the_em_width_on_twice_the_grid() {
+            let cfg = DetailedCfg { em: vec![(L0, Limit { ua_per_um: 1_000.0, ..Limit::default() })], ..test_cfg() };
+            assert_eq!(access_need(&cfg, L0, None), 0, "unknown current");
+            assert_eq!(access_need(&cfg, L1, Some(1e6)), 0, "unknown limit");
+            assert_eq!(access_need(&cfg, L0, Some(0.0)), 0);
+            assert_eq!(access_need(&cfg, L0, Some(-1_005.0)), 1_010);
+            assert_eq!(access_need(&cfg, L0, Some(1_000.0)), 1_000);
+            assert!(access_need(&cfg, L0, Some(1e15)) >= 1_000_000_000, "saturates, never overflows");
+            let zero_grid = DetailedCfg { grid: 0, ..cfg };
+            assert_eq!(access_need(&zero_grid, L0, Some(1_001.0)), 1_002);
+        }
+
+        #[test]
+        fn prim_roots_at_the_largest_current_and_carries_subtree_sums() {
+            assert_eq!(prim(&[], &[]), (Vec::new(), Vec::new(), Vec::new()));
+            assert_eq!(prim(&[(5, 5)], &[3.0]), (vec![0], vec![0.0], vec![0]));
+            // A line 0 — 1 — 2: root 2 (largest |I|); edge into 1 carries the
+            // far side {0, 1} = −3, edge into 0 carries −1.
+            let (visit, edge, parent) = prim(&[(0, 0), (10, 0), (20, 0)], &[-1.0, -2.0, 3.0]);
+            assert_eq!(visit, vec![2, 1, 0]);
+            assert_eq!(parent, vec![1, 2, 2]);
+            assert_eq!(edge, vec![1.0, 3.0, 0.0]);
+            // Ties on |I| break by the lowest index.
+            assert_eq!(prim(&[(0, 0), (10, 0)], &[1.0, -1.0]).0[0], 0);
+        }
+
+        #[test]
+        fn prim_bounds_an_unbalanced_net_by_either_side() {
+            // Σ = 4 ≠ 0: a port of unknown attachment; the edge into 0 carries
+            // max(|1|, |4 − 1|) = 3.
+            let (_, edge, _) = prim(&[(0, 0), (10, 0)], &[1.0, 3.0]);
+            assert_eq!(edge, vec![3.0, 0.0]);
+        }
+
+        // ---- jogs ---------------------------------------------------------
+
+        #[test]
+        fn jog_legs_form_flush_ls_both_ways() {
+            let [a, b] = jog_legs(0, 0, 100, 50, 10);
+            assert_eq!(a, [r(-5, -5, 110, 10), r(95, -5, 10, 60)], "horizontal at the node row first");
+            assert_eq!(b, [r(-5, -5, 10, 60), r(-5, 45, 110, 10)], "vertical at the node column first");
+            let [s, _] = jog_legs(0, 0, 0, 0, 10);
+            assert_eq!(s, [r(-5, -5, 10, 10), r(-5, -5, 10, 10)], "a node on its pin is one square");
+        }
+
+        #[test]
+        fn jog_widths_never_neck_below_em_or_the_deck_minimum() {
+            let cfg = spaced_cfg();
+            let pin = r(0, 0, 170, 170);
+            assert_eq!(jog_widths(&cfg, Some(L1), 0, pin), (290, 200), "narrow stops at min width");
+            assert_eq!(jog_widths(&cfg, Some(L0), 0, pin), (290, 170), "no min width: the pin");
+            assert_eq!(jog_widths(&cfg, None, 0, pin), (290, 170));
+            assert_eq!(jog_widths(&cfg, Some(L1), 400, pin), (400, 400), "EM wins");
+            let zero = DetailedCfg { wire_width: 0, ..DetailedCfg::default() };
+            assert_eq!(jog_widths(&zero, None, 0, r(0, 0, 0, 0)), (1, 1), "at least 1 nm");
+        }
+
+        #[test]
+        fn jog_layer_climbs_one_metal_unless_on_the_access_conductor() {
+            let cfg = test_cfg();
+            assert_eq!(jog_layer(&cfg, &LAYERS, &CUTS, 2, L0), 1);
+            assert_eq!(jog_layer(&cfg, &LAYERS, &CUTS, 2, L1), 1, "top metal stays");
+            assert_eq!(jog_layer(&cfg, &LAYERS, &CUTS, 2, LayerId(9)), 1, "unknown reads as the lowest");
+            assert_eq!(jog_layer(&cfg, &LAYERS, &CUTS, 1, L0), 0, "one lattice layer");
+            assert_eq!(jog_layer(&cfg, &LAYERS, &[], 2, L0), 0, "no cut up");
+            let li = DetailedCfg { pin_access: Some((LayerId(9), (LayerId(8), 100, 140, 140))), ..test_cfg() };
+            assert_eq!(jog_layer(&li, &LAYERS, &CUTS, 2, LayerId(9)), 0);
+            assert_eq!(jog_layer(&cfg, &LAYERS, &CUTS, 0, L0), 0, "never underflows");
+        }
+
+        #[test]
+        fn jog_clean_checks_zones_laid_legs_and_blocks() {
+            let legs = [r(0, 0, 100, 10), r(90, 0, 10, 100)];
+            assert!(jog_clean(&legs, 0, 20, 5, &[], &[], &[]));
+            assert!(jog_clean(&legs, 0, 20, 5, &[(0, 50, 5)], &[], &[]), "own zone");
+            assert!(!jog_clean(&legs, 0, 20, 5, &[(1, 50, 24)], &[], &[]), "a foreign zone 4 nm off, gap 5");
+            assert!(jog_clean(&legs, 0, 20, 5, &[(1, 50, 25)], &[], &[]), "exactly the gap is clean");
+            assert!(jog_clean(&legs, 0, 20, 5, &[(1, 50, 30)], &[], &[]), "zone 10 nm clear");
+            assert!(!jog_clean(&legs, 0, 20, 0, &[(1, 50, 20)], &[], &[]), "gap 0 still needs 1 nm");
+            assert!(!jog_clean(&legs, 0, 20, 5, &[], &[(1, r(100, 50, 10, 10))], &[]), "touching a foreign leg");
+            assert!(jog_clean(&legs, 0, 20, 5, &[], &[(0, r(100, 50, 10, 10))], &[]), "own leg");
+            assert!(jog_clean(&legs, 0, 20, 5, &[], &[(1, r(101, 50, 10, 10))], &[]), "1 nm off a foreign leg");
+            assert!(!jog_clean(&legs, 0, 20, 5, &[], &[], &[r(40, 5, 10, 10)]), "over a block");
+            assert!(jog_clean(&legs, 0, 20, 5, &[], &[], &[r(40, 10, 10, 10)]), "touching a block is not over it");
+        }
+
+        #[test]
+        fn jog_nodes_cover_the_inflated_legs() {
+            let g = grid20();
+            let cfg = DetailedCfg { wire_width: 0, ..test_cfg() };
+            let legs = [r(50, 50, 200, 0)];
+            let got: Vec<u32> = jog_nodes(&g, &cfg, &legs, 1).collect();
+            assert_eq!(got, vec![g.node(0, 0, 1), g.node(1, 0, 1), g.node(2, 0, 1)]);
+            let wide = DetailedCfg { wire_width: 200, ..test_cfg() };
+            assert_eq!(jog_nodes(&g, &wide, &legs, 0).count(), 4 * 2, "inflated by 100: columns 0..=3, rows 0..=1");
+        }
+
+        /// The access of net 0: pin at (1000, 1000), node (550, 1050) on layer
+        /// 0, a 10 nm jog decided unflipped (it runs on layer 1).
+        fn access_case() -> (TrackGrid, DetailedCfg, Access) {
+            let a = Access { ci: 0, pin: r(1_000, 1_000, 20, 20), pin_layer: L0, node: (550, 1_050), node_layer: 0, choice: Some((10, false)), ua: None, node_ua: None };
+            (grid20(), DetailedCfg { wire_width: 50, ..test_cfg() }, a)
+        }
+
+        #[test]
+        fn claim_jog_sweep_claims_free_nodes_first_come() {
+            let (g, cfg, a) = access_case();
+            let mut claimed = vec![false; g.nodes()];
+            let mut reserved = vec![NONE; g.nodes()];
+            let foreign = g.node(8, 10, 1);
+            reserved[foreign as usize] = 7;
+            claim_jog_sweep(&g, &cfg, &LAYERS, &CUTS, &a, &mut claimed, &mut reserved);
+            let mine = g.node(7, 10, 1);
+            assert!(claimed[mine as usize] && reserved[mine as usize] == 0, "under the leg");
+            assert!(!claimed[foreign as usize] && reserved[foreign as usize] == 7, "first come keeps its owner");
+            let stitch = g.node(g.bin_x(550), g.bin_y(1_050), 0);
+            assert_eq!(reserved[stitch as usize], 0, "the node end's stitch on the pin layer");
+            assert!(!claimed[g.node(7, 2, 1) as usize], "far from the jog");
+        }
+
+        #[test]
+        fn jog_hist_nodes_are_the_foreign_nodes_under_the_jog() {
+            let (g, cfg, a) = access_case();
+            let mut reserved = vec![NONE; g.nodes()];
+            let legs = jog_legs(a.node.0, a.node.1, 1_010, 1_010, 10)[0];
+            reserved[g.node(8, 10, 1) as usize] = 7;
+            reserved[g.node(9, 10, 1) as usize] = BLOCKED;
+            reserved[g.node(6, 10, 1) as usize] = 0;
+            assert_eq!(jog_hist_nodes(&g, &cfg, &legs, 1, &reserved, 0), vec![g.node(8, 10, 1)]);
+        }
+
+        // ---- lattice maps and pairs --------------------------------------
+
+        #[test]
+        fn map_rect_mirrors_and_shifts() {
+            let m = gr::LatticeMap::MirrorX { k: 4 };
+            let a = r(12, 3, 6, 9);
+            assert_eq!(map_rect(a, m, 10), r(32, 3, 6, 9));
+            assert_eq!(map_rect(map_rect(a, m, 10), m, 10), a, "a mirror is an involution");
+            let s = gr::LatticeMap::Shift { dx: 1, dy: -2 };
+            assert_eq!(map_rect(a, s, 10), r(22, -17, 6, 9));
+            assert_eq!(map_rect(map_rect(a, s, 10), s.inverse(), 10), a);
+        }
+
+        /// A node centred at `(ix + ½)·p` mirrors with its rect under `map_rect`.
+        #[test]
+        fn map_rect_agrees_with_the_grid_map() {
+            let g = grid20();
+            let m = gr::LatticeMap::MirrorX { k: 13 };
+            for ix in [0u32, 3, 6] {
+                let n = g.node(ix, 4, 0);
+                let (x, y, _) = g.pos(n);
+                let img = g.map(m, n).unwrap();
+                let (mx, my, _) = g.pos(img);
+                assert_eq!(map_rect(square((x, y), 10), m, g.pitch), square((mx, my), 10));
+            }
+        }
+
+        type Term = (Rect, LayerId, Option<f32>);
+
+        fn term(x: i32, y: i32) -> Term {
+            (r(x, y, 50, 50), L0, None)
+        }
+
+        #[test]
+        fn pair_map_finds_a_mirror() {
+            // Pin centres 1025 ↔ 2975 about x = 2000: columns 10 ↔ 29, k = 39.
+            let g = TrackGrid { nx: 40, ..grid20() };
+            assert_eq!(pair_map(&[term(1_000, 500)], &[term(2_950, 500)], &g, 5), Ok(gr::LatticeMap::MirrorX { k: 39 }));
+        }
+
+        #[test]
+        fn pair_map_finds_a_shift() {
+            let g = grid20();
+            let a = [term(1_000, 500), term(1_200, 800)];
+            let b = [term(1_300, 700), term(1_500, 1_000)];
+            assert_eq!(pair_map(&a, &b, &g, 5), Ok(gr::LatticeMap::Shift { dx: 3, dy: 2 }));
+        }
+
+        #[test]
+        fn pair_map_names_why_it_fails() {
+            let g = grid20();
+            assert_eq!(pair_map(&[], &[], &g, 5), Err("no pin map"));
+            assert_eq!(pair_map(&[term(0, 0)], &[], &g, 5), Err("no pin map"));
+            let a = [term(1_000, 500), term(1_200, 800)];
+            let bent = [term(1_300, 700), term(1_500, 1_300)];
+            assert_eq!(pair_map(&a, &bent, &g, 5), Err("no pin map"));
+            let off = [term(1_150, 500), term(1_350, 800)];
+            assert_eq!(pair_map(&a, &off, &g, 5), Err("axis off lattice"), "a 150 nm shift is off the 100 nm lattice");
+            let coarse = TrackGrid { coarsened: true, ..grid20() };
+            let b = [term(1_300, 700), term(1_500, 1_000)];
+            assert_eq!(pair_map(&a, &b, &coarse, 5), Err("axis off lattice"));
+        }
+
+        fn ctx(terms: Vec<Vec<u32>>) -> RouteCtx<TrackGrid> {
+            RouteCtx::new(grid20(), terms, vec![0, 1])
+        }
+
+        #[test]
+        fn tie_pair_links_images() {
+            let g = grid20();
+            let map = gr::LatticeMap::Shift { dx: 2, dy: 0 };
+            let (n, m) = (g.node(3, 3, 0), g.node(5, 3, 0));
+            let mut cold = ctx(vec![vec![n], vec![m]]);
+            assert!(tie_pair(&mut cold, 0, 1, map));
+            assert_eq!(cold.terms[1], vec![m]);
+            assert_eq!(cold.mirror[0], Some((1, map, true)));
+            assert_eq!(cold.mirror[1], Some((0, map.inverse(), false)));
+            assert!(cold.k.is_empty() && cold.term_k.is_empty(), "optional tables stay empty");
+        }
+
+        #[test]
+        fn tie_pair_refuses_a_missing_image_or_a_wide_vertical_mirror() {
+            let g = grid20();
+            let mut cold = ctx(vec![vec![g.node(3, 3, 0)], vec![g.node(9, 9, 0)]]);
+            assert!(!tie_pair(&mut cold, 0, 1, gr::LatticeMap::Shift { dx: 2, dy: 0 }));
+            assert!(cold.mirror.is_empty(), "no link");
+            let map = gr::LatticeMap::MirrorX { k: 10 };
+            let n = g.node(3, 3, 0);
+            let mut wide = ctx(vec![vec![n], vec![g.map(map, n).unwrap()]]);
+            let mut k = [1u8; gr::MAX_LAYERS];
+            k[1] = 2;
+            wide.k = vec![k, [1; gr::MAX_LAYERS]];
+            assert!(!tie_pair(&mut wide, 0, 1, map), "a two-track vertical run would grow toward −x in the image");
+            let mut shift = ctx(vec![vec![n], vec![g.node(5, 3, 0)]]);
+            shift.k = vec![k, [1; gr::MAX_LAYERS]];
+            assert!(tie_pair(&mut shift, 0, 1, gr::LatticeMap::Shift { dx: 2, dy: 0 }), "a shift keeps width direction");
+            assert_eq!(shift.k[1][1], 2, "tracks tie to the larger");
+        }
+
+        // ---- vias ----------------------------------------------------------
+
+        #[test]
+        fn via_pads_are_squares_or_oriented_specs() {
+            let cfg = test_cfg();
+            let cut = (L2, 100, 140, 160);
+            let c = r(0, 0, 100, 100);
+            assert_eq!(via_pads(&cfg, &LAYERS, cut, 0, c), [Some(sh(L0, r(-20, -20, 140, 140))), Some(sh(L1, r(-30, -30, 160, 160)))]);
+            assert_eq!(via_pads(&cfg, &LAYERS, cut, 1, c), [Some(sh(L1, r(-20, -20, 140, 140))), None], "past the routed layers");
+            let specs = DetailedCfg {
+                layers: vec![
+                    gr::LayerSpec { horizontal: true, pad_along: 200, pad_across: 120, ..Default::default() },
+                    gr::LayerSpec { horizontal: false, pad_along: 200, pad_across: 120, ..Default::default() },
+                ],
+                ..test_cfg()
+            };
+            assert_eq!(via_pads(&specs, &LAYERS, cut, 0, c), [Some(sh(L0, r(-50, -10, 200, 120))), Some(sh(L1, r(-10, -50, 120, 200)))]);
+        }
+
+        #[test]
+        fn array_enclosure_per_axis() {
+            let cut = (L2, 100, 140, 160);
+            assert_eq!(array_enclosure(&test_cfg(), cut, 0), (30, 30), "square pads");
+            let cfg = DetailedCfg { cut_enclosure_pair: vec![(L2, (10, 40), (20, 5))], ..test_cfg() };
+            // Lower horizontal: along (40) on x; upper vertical: along (5) on y.
+            assert_eq!(array_enclosure(&cfg, cut, 0), (40, 10));
+        }
+
+        #[test]
+        fn best_overlap_takes_the_largest() {
+            let c = r(450, 450, 100, 100);
+            let wires = [sh(L0, r(0, 0, 1_000, 1_000)), sh(L0, r(400, 400, 200, 200)), sh(L1, r(400, 0, 200, 1_000)), sh(L1, r(300, 300, 400, 400))];
+            assert_eq!(best_overlap(&wires, L0, L1, c), Some((r(0, 0, 1_000, 1_000), r(400, 0, 200, 1_000))), "200 000 nm² beats 160 000");
+            assert_eq!(best_overlap(&wires, L0, L2, c), None);
+            assert_eq!(best_overlap(&wires[..2], L0, L1, c), None, "no upper metal");
+        }
+
+        #[test]
+        fn snap_centred_rounds_to_nearest_and_commutes_with_a_mirror() {
+            assert_eq!(snap_centred(0, 100, 30, 0, 5), 35, "exactly centred");
+            assert_eq!(snap_centred(0, 100, 25, 200, 5), 40, "tie toward the original cut");
+            assert_eq!(snap_centred(0, 100, 25, 0, 5), 35);
+            // Mirror about x = 0: [−100, 0], original centre −100.
+            assert_eq!(snap_centred(-100, 100, 25, -200, 5), -(40 + 25));
+            assert_eq!(snap_centred(-100, 100, 25, 0, 5), -(35 + 25));
+            assert_eq!(snap_centred(7, 13, 13, 0, 1), 7, "a run filling its room");
+        }
+
+        #[test]
+        fn via_arrays_fill_the_overlap() {
+            let cut = sh(L2, r(450, 450, 100, 100));
+            let mut wires = vec![vec![sh(L0, r(0, 0, 1_000, 1_000)), sh(L1, r(0, 0, 1_000, 1_000)), cut]];
+            let (singles, n) = via_arrays(&mut wires, &test_cfg(), &LAYERS, &CUTS, &[], 1_720);
+            // 960 nm inside 20 nm enclosure at a 200 nm cut pitch: 5 × 5.
+            let cuts: Vec<Rect> = wires[0].iter().filter(|s| s.layer == L2).map(|s| s.rect).collect();
+            assert_eq!(cuts.len(), 25);
+            assert_eq!(n, 1);
+            assert!(singles[0].is_empty());
+            assert_eq!(cuts.iter().map(|c| c.x).min(), Some(50), "centred: 50 .. 950");
+            assert_eq!(cuts.iter().map(|c| c.x + c.w).max(), Some(950));
+            for (i, a) in cuts.iter().enumerate() {
+                assert!(cuts[i + 1..].iter().all(|b| rect_gap(*a, *b) >= 100), "cut spacing");
+            }
+        }
+
+        #[test]
+        fn via_arrays_leave_a_tight_or_unsupported_cut_single() {
+            let cut = sh(L2, r(450, 450, 100, 100));
+            let mut tight = vec![vec![sh(L0, r(430, 430, 140, 140)), sh(L1, r(430, 430, 140, 140)), cut]];
+            let (singles, n) = via_arrays(&mut tight, &test_cfg(), &LAYERS, &CUTS, &[], 1_720);
+            assert_eq!((singles[0].clone(), n), (vec![(0, cut.rect)], 1));
+            assert_eq!(tight[0].iter().filter(|s| s.layer == L2).count(), 1);
+            let mut bare = vec![vec![cut], Vec::new()];
+            let (singles, n) = via_arrays(&mut bare, &test_cfg(), &LAYERS, &CUTS, &[], 1_720);
+            assert_eq!((singles[0].clone(), n), (vec![(0, cut.rect)], 1), "no metals: kept, counted, single");
+            assert!(singles[1].is_empty());
+            assert_eq!(bare[0], vec![cut]);
+        }
+
+        #[test]
+        fn add_where_clear_takes_the_first_clear_alternative() {
+            let a = vec![sh(L0, r(0, 0, 1, 1))];
+            let b = vec![sh(L0, r(5, 5, 1, 1))];
+            let sites = vec![vec![vec![a.clone(), b.clone()]], Vec::new()];
+            let mut wires = vec![Vec::new(), Vec::new()];
+            let only_b = |_: usize, s: Shape, _: &[Vec<Shape>]| s.rect.x == 5;
+            assert_eq!(add_where_clear(&mut wires, &sites, &[None, None], 10, &only_b), vec![vec![Some(1)], Vec::new()]);
+            assert_eq!(wires[0], b);
+            let mut wires = vec![Vec::new(), Vec::new()];
+            let never = |_: usize, _: Shape, _: &[Vec<Shape>]| false;
+            assert_eq!(add_where_clear(&mut wires, &sites, &[None, None], 10, &never), vec![vec![None], Vec::new()]);
+            assert!(wires[0].is_empty());
+        }
+
+        #[test]
+        fn add_where_clear_adds_a_pair_both_sides_or_neither() {
+            let map = gr::LatticeMap::Shift { dx: 1, dy: 0 };
+            let image = [Some((1, map)), None];
+            let alt = vec![sh(L0, r(0, 0, 1, 1))];
+            let sites = vec![vec![vec![alt.clone()]], vec![vec![vec![sh(L0, r(50, 50, 1, 1))]]]];
+            let mut wires = vec![Vec::new(), Vec::new()];
+            let any = |_: usize, _: Shape, _: &[Vec<Shape>]| true;
+            let taken = add_where_clear(&mut wires, &sites, &image, 10, &any);
+            assert_eq!(taken, vec![vec![Some(0)], Vec::new()], "the image's own sites are its leader's");
+            assert_eq!((wires[0].clone(), wires[1].clone()), (alt.clone(), vec![sh(L0, r(10, 0, 1, 1))]));
+            let mut wires = vec![Vec::new(), Vec::new()];
+            let not_image = |n: usize, _: Shape, _: &[Vec<Shape>]| n == 0;
+            assert_eq!(add_where_clear(&mut wires, &sites, &image, 10, &not_image), vec![vec![None], Vec::new()]);
+            assert!(wires.iter().all(Vec::is_empty), "neither side");
+        }
+
+        #[test]
+        fn missed_counts_a_leader_twice() {
+            let map = gr::LatticeMap::Shift { dx: 1, dy: 0 };
+            assert_eq!(missed(&[vec![Some(0), None], vec![None]], &[Some((1, map)), None]), 3);
+            assert_eq!(missed(&[], &[]), 0);
+        }
+
+        #[test]
+        fn corner_stubs_move_a_corner_cut_onto_the_run() {
+            let b = r(0, 0, 300, 300);
+            let cut = r(100, 100, 100, 100);
+            let wires = [sh(L0, b), sh(L1, b), sh(L1, r(0, 0, 300, 2_000)), sh(L2, cut)];
+            assert_eq!(corner_stubs(&wires, &test_cfg(), &LAYERS, &CUTS), vec![(cut, [sh(L0, r(0, 300, 300, 300)), sh(L2, r(100, 400, 100, 100))])]);
+            let through = [sh(L0, b), sh(L1, b), sh(L1, r(0, -1_000, 300, 3_000)), sh(L2, cut)];
+            assert!(corner_stubs(&through, &test_cfg(), &LAYERS, &CUTS).is_empty(), "R leaves both sides: no corner");
+            assert!(corner_stubs(&wires[..3], &test_cfg(), &LAYERS, &CUTS).is_empty(), "no cut");
+            let necked = [sh(L0, r(0, 0, 200, 300)), sh(L1, r(0, 0, 200, 300)), sh(L1, r(0, 0, 200, 2_000)), sh(L2, cut)];
+            assert!(corner_stubs(&necked, &test_cfg(), &LAYERS, &CUTS).is_empty(), "B narrower across than long");
+        }
+
+        #[test]
+        fn support_squares_sit_inside_flush_ls_only() {
+            let a = sh(L0, r(0, 0, 100, 10));
+            let up = sh(L0, r(0, 0, 10, 100));
+            assert_eq!(support_squares(&[a, up], &[L0]), vec![sh(L0, r(10, 10, 10, 10))]);
+            let down_right = sh(L0, r(90, -90, 10, 100));
+            assert_eq!(support_squares(&[a, down_right], &[L0]), vec![sh(L0, r(80, -10, 10, 10))]);
+            let tee = sh(L0, r(40, 0, 10, 100));
+            assert!(support_squares(&[a, tee], &[L0]).is_empty(), "a T");
+            let thin = sh(L0, r(0, 0, 5, 100));
+            assert!(support_squares(&[a, thin], &[L0]).is_empty(), "widths differ");
+            assert!(support_squares(&[a, up], &[L1]).is_empty(), "not a metal");
+            assert!(support_squares(&[], &[L0]).is_empty());
+        }
+
+        // ---- fill -----------------------------------------------------------
+
+        #[test]
+        fn snap_out_covers_the_rect_on_grid() {
+            assert_eq!(snap_out(r(3, 7, 10, 10), 5), r(0, 5, 15, 15));
+            assert_eq!(snap_out(r(-3, -3, 3, 3), 5), r(-5, -5, 5, 5));
+            assert_eq!(snap_out(r(10, 10, 10, 10), 5), r(10, 10, 10, 10), "already on grid");
+        }
+
+        /// A grid under 1 nm reads as 1, so the fill never divides by zero.
+        #[test]
+        fn snap_out_on_a_zero_grid_is_identity() {
+            assert_eq!(snap_out(r(3, 7, 10, 10), 0), r(3, 7, 10, 10));
+        }
+
+        #[test]
+        fn span_fill_grows_to_min_feature() {
+            assert_eq!(span_fill(0, 10, 100, 150, 20, false), r(-5, 80, 20, 90));
+            assert_eq!(span_fill(0, 40, 100, 150, 20, true), r(80, 0, 90, 40));
+        }
+
+        #[test]
+        fn slivers_between_aligned_pieces_are_bridged() {
+            let mut w = vec![sh(L0, r(0, 0, 100, 20)), sh(L0, r(150, 0, 100, 20))];
+            heal_same_net_slivers(&mut w, &[L0], 100, 20, &[], 5);
+            assert!(w.iter().any(|s| contains(s.rect, r(100, 0, 50, 20))), "{w:?}");
+            assert_eq!(open_components(&w, &[]), 0);
+        }
+
+        #[test]
+        fn slivers_are_left_when_wide_foreign_or_off_layer() {
+            let pieces = vec![sh(L0, r(0, 0, 100, 20)), sh(L0, r(150, 0, 100, 20))];
+            let mut w = pieces.clone();
+            heal_same_net_slivers(&mut w, &[L0], 50, 20, &[], 5);
+            assert_eq!(w, pieces, "a gap at min space is legal");
+            heal_same_net_slivers(&mut w, &[L0], 0, 20, &[], 5);
+            assert_eq!(w, pieces, "no spacing rule");
+            heal_same_net_slivers(&mut w, &[L1], 100, 20, &[], 5);
+            assert_eq!(w, pieces, "another layer");
+            heal_same_net_slivers(&mut w, &[L0], 100, 20, &[sh(L0, r(100, 60, 50, 10))], 5);
+            assert_eq!(w, pieces, "the filler would crowd foreign metal");
+        }
+
+        #[test]
+        fn a_corner_sliver_gets_a_patch() {
+            let mut w = vec![sh(L0, r(0, 0, 100, 100)), sh(L0, r(150, 150, 100, 100))];
+            heal_same_net_slivers(&mut w, &[L0], 100, 20, &[], 5);
+            assert_eq!(w.len(), 3);
+            assert_eq!(w[2].rect, r(80, 80, 90, 90));
+        }
+
+        #[test]
+        fn a_notch_in_a_u_is_filled() {
+            let mut w = vec![sh(L0, r(0, 0, 100, 30)), sh(L0, r(0, 0, 30, 100)), sh(L0, r(70, 0, 30, 100))];
+            fill_same_net_notches(&mut w, &[L0], 50, 20, &[], 5);
+            assert!(w.iter().any(|s| contains(s.rect, r(30, 30, 40, 70))), "{w:?}");
+            let mut wide = vec![sh(L0, r(0, 0, 200, 30)), sh(L0, r(0, 0, 30, 100)), sh(L0, r(170, 0, 30, 100))];
+            let before = wide.clone();
+            fill_same_net_notches(&mut wide, &[L0], 50, 20, &[], 5);
+            assert_eq!(wide, before, "a 140 nm notch is legal");
+            let mut fouled = vec![sh(L0, r(0, 0, 100, 30)), sh(L0, r(0, 0, 30, 100)), sh(L0, r(70, 0, 30, 100))];
+            let before = fouled.clone();
+            fill_same_net_notches(&mut fouled, &[L0], 50, 20, &[sh(L0, r(30, 120, 40, 10))], 5);
+            assert_eq!(fouled, before, "foreign metal 20 nm above the notch");
+            let mut single = vec![sh(L0, r(0, 0, 10, 10))];
+            fill_same_net_notches(&mut single, &[L0], 50, 20, &[], 5);
+            assert_eq!(single.len(), 1);
+        }
+
+        #[test]
+        fn notch_fill_on_a_zero_grid_does_not_panic() {
+            let mut w = vec![sh(L0, r(0, 0, 100, 30)), sh(L0, r(0, 0, 30, 100)), sh(L0, r(70, 0, 30, 100))];
+            fill_same_net_notches(&mut w, &[L0], 50, 60, &[], 0);
+            assert!(w.iter().any(|s| contains(s.rect, r(30, 30, 40, 70))));
+        }
+
+        #[test]
+        fn drop_contained_keeps_the_first_of_equals() {
+            let big = sh(L0, r(0, 0, 100, 100));
+            let small = sh(L0, r(10, 10, 10, 10));
+            let other = sh(L1, r(10, 10, 10, 10));
+            let mut w = vec![small, big, other, big];
+            drop_contained(&mut w);
+            assert_eq!(w, vec![big, other]);
+            let mut none: Vec<Shape> = Vec::new();
+            drop_contained(&mut none);
+            assert!(none.is_empty());
+        }
+
+        // ---- connectivity and shorts --------------------------------------
+
+        #[test]
+        fn joins_list_stack_cuts_then_pin_access() {
+            let layers = [L0, L1, LayerId(3)];
+            let cuts = [(L2, 100, 140, 140), (LayerId(4), 100, 140, 140)];
+            let pa = Some((LayerId(9), (LayerId(8), 100, 140, 140)));
+            assert_eq!(joins(&layers, &cuts, pa), vec![(L2, L0, L1), (LayerId(4), L1, LayerId(3)), (LayerId(8), LayerId(9), L0)]);
+            assert_eq!(joins(&layers, &cuts[..1], None), vec![(L2, L0, L1)]);
+            assert!(joins(&[], &cuts, pa).is_empty(), "no layers, nothing joins");
+        }
+
+        #[test]
+        fn meeting_lists_a_layer_its_cuts_and_a_cut_its_metals() {
+            let j = [(L2, L0, L1)];
+            assert_eq!(meeting(L0, &j), vec![L0, L2]);
+            assert_eq!(meeting(L2, &j), vec![L2, L0, L1]);
+            assert_eq!(meeting(LayerId(7), &j), vec![LayerId(7)]);
+        }
+
+        #[test]
+        fn shape_index_near_is_a_superset_of_the_halo() {
+            let items = [(L0, r(0, 0, 10, 10)), (L0, r(1_000, 1_000, 10, 10)), (L1, r(0, 0, 10, 10))];
+            let idx = ShapeIndex::new(100, items);
+            let mut near: Vec<u32> = idx.near(L0, r(20, 20, 5, 5), 10).collect();
+            near.sort_unstable();
+            near.dedup();
+            assert_eq!(near, vec![0]);
+            assert!(idx.near(L0, r(980, 980, 20, 20), 0).any(|k| k == 1), "corner contact shares a bucket");
+            assert_eq!(ShapeIndex::new(0, items).side, 1, "side at least 1");
+        }
+
+        #[test]
+        fn break_shorts_deletes_the_later_nets_access() {
+            let mut w = vec![vec![sh(L0, r(0, 0, 10, 10))], vec![sh(L0, r(10, 0, 10, 10))]];
+            let mut sac = vec![0, 0];
+            break_shorts(&mut w, &[0, 0], &[0, 1], &[], &mut sac, 100);
+            assert_eq!((w[0].len(), w[1].len(), sac.clone()), (1, 0, vec![0, 1]), "net 1 routes later");
+            let mut w = vec![vec![sh(L0, r(0, 0, 10, 10))], vec![sh(L0, r(10, 0, 10, 10))]];
+            let mut sac = vec![0, 0];
+            break_shorts(&mut w, &[0, 1], &[0, 1], &[], &mut sac, 100);
+            assert_eq!((w[0].len(), w[1].len(), sac), (0, 1, vec![1, 0]), "net 1's shape is trunk: net 0's access goes");
+            let mut w = vec![vec![sh(L0, r(0, 0, 10, 10))], vec![sh(L0, r(10, 0, 10, 10))]];
+            let mut sac = vec![0, 0];
+            break_shorts(&mut w, &[1, 1], &[0, 1], &[], &mut sac, 100);
+            assert_eq!((w[0].len(), w[1].len(), sac), (1, 1, vec![0, 0]), "trunk vs trunk deletes nothing");
+            let mut w = vec![vec![sh(L2, r(0, 0, 10, 10))], vec![sh(L1, r(5, 5, 10, 10))]];
+            let mut sac = vec![0, 0];
+            break_shorts(&mut w, &[0, 0], &[0, 1], &[(L2, L0, L1)], &mut sac, 100);
+            assert_eq!(sac, vec![0, 1], "a cut shorts the metal above it");
+        }
+
+        #[test]
+        fn cross_net_shorts_reports_net_pairs_and_foreign_cell_metal() {
+            let j = [(L2, L0, L1)];
+            let w = vec![vec![sh(L0, r(0, 0, 10, 10)), sh(L2, r(100, 0, 10, 10))], vec![sh(L0, r(10, 0, 10, 10))], vec![sh(L1, r(105, 5, 10, 10))]];
+            let foreign = [(Some(0), sh(L0, r(0, 0, 5, 5))), (Some(0), sh(L0, r(20, 0, 5, 5))), (None, sh(LayerId(9), r(0, 0, 500, 500)))];
+            let (pairs, cell) = cross_net_shorts(&w, &j, &foreign, 100);
+            assert_eq!(pairs, vec![(0, 1), (0, 2)]);
+            assert_eq!(cell, vec![1], "net 1 touches net 0's cell metal; layer 9 is drawn by no route");
+            let (pairs, cell) = cross_net_shorts(&[], &j, &foreign, 100);
+            assert!(pairs.is_empty() && cell.is_empty());
+        }
+
+        #[test]
+        #[should_panic(expected = "non-routing layer")]
+        fn assert_on_stack_rejects_an_off_stack_shape() {
+            assert_on_stack(&[vec![sh(LayerId(9), r(0, 0, 10, 10))]], &LAYERS, &CUTS);
+        }
+
+        #[test]
+        #[should_panic(expected = "deck requires 100x100")]
+        fn assert_on_stack_rejects_a_mis_sized_cut() {
+            assert_on_stack(&[vec![sh(L2, r(0, 0, 90, 100))]], &LAYERS, &CUTS);
+        }
+
+        #[test]
+        fn assert_on_stack_accepts_metal_and_exact_cuts() {
+            assert_on_stack(&[vec![sh(L0, r(0, 0, 1, 1)), sh(L2, r(0, 0, 100, 100))], Vec::new()], &LAYERS, &CUTS);
+        }
+
+        // ---- scoring and reporting -----------------------------------------
+
+        #[test]
+        fn score_reports_opens_sacrifices_and_congestion() {
+            let routes = Routes { wires: vec![vec![sh(L0, r(0, 0, 10, 10)), sh(L0, r(100, 0, 10, 10))], Vec::new()], ..Default::default() };
+            let reqs = Requirements::<Routes>::default();
+            let rep = score(&routes, &reqs, 1.0, &[], &[], &[0, 2], 100);
+            let row = |name: &str| rep.hard_violations.iter().find(|v| v.rule == name).map(|v| v.margin);
+            assert_eq!(row("open net 0"), Some(1));
+            assert_eq!(row("pin access sacrificed on net 1"), Some(2));
+            assert_eq!(row("unresolved congestion"), Some(1));
+            assert_eq!(rep.hard_violations.len(), 3);
+            assert_eq!(rep.cost, 1.0);
+            let clean = score(&Routes { wires: vec![Vec::new()], ..Default::default() }, &reqs, 0.0, &[], &[], &[], 100);
+            assert!(clean.hard_violations.is_empty() && clean.cost == 0.0);
+        }
+
+        #[test]
+        fn score_reports_drawn_shorts() {
+            let routes = Routes { wires: vec![vec![sh(L0, r(0, 0, 10, 10))], vec![sh(L0, r(10, 0, 10, 10))]], ..Default::default() };
+            let foreign = [(None, sh(L0, r(0, 0, 2, 2)))];
+            let rep = score(&routes, &Requirements::default(), 0.0, &[], &foreign, &[], 100);
+            let rules: Vec<&str> = rep.hard_violations.iter().map(|v| v.rule.as_str()).collect();
+            assert_eq!(rules, vec!["drawn short nets 0/1", "drawn short net 0 to cell metal"]);
+        }
+
+        #[test]
+        fn gate_violations_measure_metal_over_gate() {
+            let gate = Blockage { rect: r(0, 0, 1_000, 1_000), halo: 0, layers: 0b11, hard: true, own_exempt: false, only_aggressors: false, cell: 3, gate: true };
+            let routes = Routes { wires: vec![vec![sh(L0, r(0, 0, 1_000, 1_000))]], ..Default::default() };
+            let v = gate_violations(&routes, &[gate], &LAYERS);
+            assert_eq!(v.len(), 1);
+            assert_eq!((v[0].rule.as_str(), v[0].margin), ("metal over gate cell 3", 1_000), "1 µm² in 10⁻³ µm²");
+            assert!(gate_violations(&routes, &[Blockage { gate: false, ..gate }], &LAYERS).is_empty(), "not a gate");
+            assert!(gate_violations(&routes, &[gate], &[L1]).is_empty(), "metal off the listed metals");
+            let beside = Routes { wires: vec![vec![sh(L0, r(1_000, 0, 10, 10))]], ..Default::default() };
+            assert!(gate_violations(&beside, &[gate], &LAYERS).is_empty(), "abutting is not over");
+        }
+
+        fn plate_rule() -> analog::routing::PlateRatio {
+            analog::routing::PlateRatio {
+                set: analog::routing::PlateSet { top: NetId(0), bits: vec![(NetId(1), 1)], c_unit_af: 1.0, array: r(5_000, 5_000, 1_000, 1_000) },
+                tol_pct10: 10,
+                stack: test_stack(),
+                space_nm: 140,
+            }
+        }
+
+        #[test]
+        fn plate_rows_flag_spread_and_crossings() {
+            let crossing = Routes { wires: vec![vec![sh(L1, r(0, 0, 1_000, 1_000))], vec![sh(L0, r(500, 0, 100, 2_000))]], ..Default::default() };
+            let mut rep = Report::default();
+            plate_violations(&crossing, &[plate_rule()], &[Some(2.0)], &LAYERS, &mut rep);
+            assert_eq!(rep.budget_violations.iter().map(|v| (v.rule.as_str(), v.margin)).collect::<Vec<_>>(), vec![("plate ratio net 0", 1_000)]);
+            assert_eq!(rep.hard_violations.iter().map(|v| v.rule.as_str()).collect::<Vec<_>>(), vec!["plate crossing net 1"]);
+            let mut rep = Report::default();
+            plate_violations(&crossing, &[plate_rule()], &[None], &[L0], &mut rep);
+            assert!(rep.budget_violations.is_empty(), "unknown spread");
+            assert!(rep.hard_violations.is_empty(), "top metal off the listed metals");
+            let same_layer = Routes { wires: vec![vec![sh(L0, r(0, 0, 1_000, 1_000))], vec![sh(L0, r(2_000, 0, 100, 2_000))]], ..Default::default() };
+            let mut rep = Report::default();
+            plate_violations(&same_layer, &[plate_rule()], &[Some(0.5)], &LAYERS, &mut rep);
+            assert!(rep.hard_violations.is_empty() && rep.budget_violations.is_empty());
+            let inside = Routes { wires: vec![vec![sh(L1, r(5_000, 5_000, 1_000, 1_000))], vec![sh(L0, r(5_100, 5_100, 100, 100))]], ..Default::default() };
+            let mut rep = Report::default();
+            plate_violations(&inside, &[plate_rule()], &[None], &LAYERS, &mut rep);
+            assert!(rep.hard_violations.is_empty(), "the plates' own stack inside the array");
+        }
+
+        #[test]
+        fn cell_metal_attributes_pieces_and_gates() {
+            let gate = |net: u16, at: Rect| pnr_core::Pin { name: "d0:G".into(), net: NetId(net), at, layer: L0 };
+            let cell = Macro { shapes: vec![sh(L0, r(0, 0, 100, 100)), sh(L0, r(500, 500, 10, 10))], pins: vec![gate(1, r(10, 10, 20, 20))], ..Default::default() };
+            let (metal, gates) = cell_metal(std::slice::from_ref(&cell), 3, None, &[]);
+            assert_eq!((metal.len(), gates.len()), (3, 3));
+            assert!(metal.iter().all(Vec::is_empty) && gates.iter().all(Vec::is_empty), "no stack, nothing attributed");
+            let (metal, gates) = cell_metal(std::slice::from_ref(&cell), 3, Some(test_stack()), &[]);
+            assert_eq!(metal[1], vec![sh(L0, r(0, 0, 100, 100))], "only the piece under the pin");
+            assert_eq!(gates[1], vec![GatePin { at: r(10, 10, 20, 20), dev: u32::MAX, nm2: 0 }], "unknown device");
+            let (_, gates) = cell_metal(std::slice::from_ref(&cell), 3, Some(test_stack()), &[vec![("d0:G".into(), 7, 1_234)]]);
+            assert_eq!((gates[1][0].dev, gates[1][0].nm2), (7, 1_234));
+            let stray = Macro { pins: vec![gate(9, r(0, 0, 1, 1))], ..cell.clone() };
+            let (metal, _) = cell_metal(&[stray], 3, Some(test_stack()), &[]);
+            assert!(metal.iter().all(Vec::is_empty), "a net past `n_nets` is skipped");
+        }
+
+        // ---- search fields ---------------------------------------------------
+
+        #[test]
+        fn overuse_sums_capacity_excess() {
+            let mut hot = RouteHot::new(4, 1);
+            assert_eq!(overuse(&hot), 0.0);
+            (hot.usage[0], hot.usage[2], hot.halo[2], hot.halo[3]) = (2, 1, 1, 5);
+            assert_eq!(overuse(&hot), 2.0, "1 at node 0, 1 at node 2; a halo alone is not over");
+        }
+
+        #[test]
+        fn jumper_prices_one_layer() {
+            let g = grid20();
+            let f = jumper(&g, 1);
+            let size = g.layer_size() as usize;
+            assert!(f[..size].iter().all(|&c| c == 0.0));
+            assert!(f[size..].iter().all(|&c| c == JUMP_COST));
+        }
+
+        #[test]
+        fn keep_away_prices_the_eight_neighbours() {
+            let g = grid20();
+            let mut hot = RouteHot::new(g.nodes(), 2);
+            hot.foot[0] = vec![g.node(5, 5, 0), g.node(0, 0, 1)];
+            let f = keep_away(&hot, &g, &[0]);
+            assert_eq!(f[g.node(5, 5, 0) as usize], 0.0, "the net's own node");
+            for (x, y) in [(4, 4), (5, 4), (6, 6), (4, 6)] {
+                assert_eq!(f[g.node(x, y, 0) as usize], COUPLE_COST);
+            }
+            assert_eq!(f[g.node(7, 5, 0) as usize], 0.0, "two tracks off");
+            assert_eq!(f[g.node(5, 4, 1) as usize], 0.0, "another layer");
+            assert_eq!(f[g.node(1, 1, 1) as usize], COUPLE_COST, "the corner node's neighbour, no wrap");
+            assert_eq!(f.iter().filter(|&&c| c > 0.0).count(), 8 + 3);
+            assert!(keep_away(&hot, &g, &[]).iter().all(|&c| c == 0.0));
+        }
+
+        #[test]
+        fn balance_field_is_zero_on_the_bisector() {
+            let g = grid20();
+            // Pin centres (50, 1000) and (1850, 1000): the bisector is x = 950, column 9.
+            let f = balance_field(&g, &[r(0, 950, 100, 100)], &[r(1_800, 950, 100, 100)]);
+            assert_eq!(f[g.node(9, 3, 0) as usize], 0.0);
+            assert_eq!(f[g.node(9, 9, 1) as usize], 0.0);
+            assert_eq!(f[g.node(0, 9, 0) as usize], BALANCE_COST * 18.0, "50 vs 1850: 18 pitches");
+        }
+
+        #[test]
+        fn lift_field_prices_around_the_gate_but_its_column() {
+            let g = grid20();
+            let hot = RouteHot::new(g.nodes(), 1);
+            let sites = [((550, 550), r(500, 500, 100, 100))];
+            let f = lift_field(&hot, &g, 0, 0, &sites);
+            assert_eq!(f[g.node(5, 5, 0) as usize], 0.0, "the gate's own column");
+            assert_eq!(f[g.node(4, 5, 0) as usize], LIFT_COST);
+            assert_eq!(f[g.node(3, 3, 0) as usize], LIFT_COST, "two pitches out");
+            assert_eq!(f[g.node(0, 0, 0) as usize], 0.0);
+            assert_eq!(f[g.node(4, 5, 1) as usize], 0.0, "above `top`");
+            let mut busy = RouteHot::new(g.nodes(), 2);
+            busy.usage[g.node(15, 15, 0) as usize] = 1;
+            assert_eq!(lift_field(&busy, &g, 0, 0, &[])[g.node(15, 15, 0) as usize], 2.0 * LIFT_COST, "a node another net holds");
+        }
+
+        // ---- placement of inserted devices -----------------------------------
+
+        fn diode() -> Macro {
+            Macro {
+                shapes: vec![sh(L0, r(0, 0, 100, 100))],
+                pins: vec![pnr_core::Pin { name: "A".into(), net: NetId(2), at: r(10, 10, 20, 20), layer: L0 }],
+                bbox: r(0, 0, 100, 100),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn place_near_centres_on_the_target_when_free() {
+            let m = place_near(&diode(), (1_000, 1_000), &[], 10, 5, 0).unwrap();
+            assert_eq!(m.bbox, r(950, 950, 100, 100));
+            assert_eq!(m.shapes[0].rect, r(950, 950, 100, 100));
+            assert_eq!(m.pins[0].at, r(960, 960, 20, 20), "pins move with the cell");
+            assert_eq!(m.pins[0].net, NetId(2));
+        }
+
+        #[test]
+        fn place_near_steps_out_ring_by_ring() {
+            let wall = [r(900, 900, 200, 200)];
+            let m = place_near(&diode(), (1_000, 1_000), &wall, 10, 50, 1_000).unwrap();
+            assert!(rect_gap(m.bbox, wall[0]) >= 10);
+            let d = (m.bbox.x - 950).abs().max((m.bbox.y - 950).abs());
+            assert_eq!(d, 200, "the first ring of 50 nm steps whose cell keeps 10 nm off the wall");
+            assert_eq!(place_near(&diode(), (1_000, 1_000), &wall, 10, 50, 100), None, "nothing within reach");
+        }
+
+        #[test]
+        fn place_near_with_negative_reach_finds_nothing() {
+            assert_eq!(place_near(&diode(), (1_000, 1_000), &[], 10, 5, -1), None);
+        }
+    }
 }
