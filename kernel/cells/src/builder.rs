@@ -1,12 +1,20 @@
 //! The drawing surface shared by every generator (and by `macro_master`), plus
 //! the sizing/pin helpers the generators have in common.
+//!
+//! All coordinates are nanometres in the cell's local frame.
 
 use analog::cell::Unitization;
 use analog::Constraints;
 use pnr_core::{DeviceGroup, LayerId, Macro, NetId, Pin, Process, Rect, Shape};
 
 /// Accumulates grid-snapped rectangles and pins into a [`Macro`].
+///
+/// Shapes, pins and keep-outs are snapped on entry; units, dummies and drawn
+/// records are stored verbatim (they are centres and LVS cards, not
+/// geometry). [`Builder::finish`] drops exact duplicate shapes and sizes the
+/// bbox.
 pub struct Builder {
+    /// Manufacturing grid, nm; `<= 0` disables snapping.
     grid: i32,
     shapes: Vec<Shape>,
     pins: Vec<Pin>,
@@ -17,6 +25,8 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// An empty builder snapping to `grid` nm (`<= 0`: no snapping, extents
+    /// still clamp up to 1 nm).
     #[must_use]
     pub fn new(grid: i32) -> Self {
         Self { grid, shapes: Vec::new(), pins: Vec::new(), units: Vec::new(), dummies: Vec::new(), drawn: Vec::new(), keepouts: Vec::new() }
@@ -29,7 +39,6 @@ impl Builder {
         self.shapes.push(Shape { layer, rect });
     }
 
-    /// Register a pin, snapped like [`Builder::rect`].
     /// Record one active unit (local frame, unsnapped: a centre, not a shape).
     pub fn unit(&mut self, u: pnr_core::Unit) {
         self.units.push(u);
@@ -51,11 +60,14 @@ impl Builder {
         self.keepouts.push(pnr_core::Keepout { rect, why });
     }
 
+    /// Register a pin, its `at` snapped like [`Builder::rect`].
     pub fn pin(&mut self, mut pin: Pin) {
         pin.at = self.snap(pin.at);
         self.pins.push(pin);
     }
 
+    /// `r` with every coordinate on the grid and each extent at least one
+    /// grid step (1 nm with snapping off).
     fn snap(&self, r: Rect) -> Rect {
         let g = self.grid.max(1);
         Rect {
@@ -83,10 +95,9 @@ impl Builder {
         let enc = process.enclosure("npc", "licon").unwrap_or(0);
         let space = process.space("npc").unwrap_or(0);
         let wmin = process.width("npc").unwrap_or(0);
-        let inside = |c: &Rect, p: &Rect| c.x >= p.x && c.y >= p.y && c.x + c.w <= p.x + p.w && c.y + c.h <= p.y + p.h;
         let polys: Vec<Rect> = self.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
         let mut rows: Vec<Rect> = Vec::new();
-        for c in self.shapes.iter().filter(|s| s.layer == licon && polys.iter().any(|p| inside(&s.rect, p))) {
+        for c in self.shapes.iter().filter(|s| s.layer == licon && polys.iter().any(|p| contains(p, &s.rect))) {
             let r = Rect { x: c.rect.x - enc, y: c.rect.y - enc, w: c.rect.w + 2 * enc, h: c.rect.h + 2 * enc };
             match rows.iter_mut().find(|q| q.y == r.y && q.h == r.h) {
                 Some(q) => *q = hull(*q, r),
@@ -124,9 +135,11 @@ impl Builder {
         }
     }
 
-    /// The bbox corner is a multiple of two grid steps (the cut lattice) and
-    /// its extents of four, so the half-extent the placer stamps at
-    /// (`centre - bbox.w / 2`) is on the cut lattice too (H01-26).
+    /// The finished macro. Exact duplicate shapes (same layer and rect) are
+    /// kept once. The bbox encloses every shape; its corner is a multiple of
+    /// two grid steps (the cut lattice) and its extents of four, so the
+    /// half-extent the placer stamps at (`centre - bbox.w / 2`) is on the cut
+    /// lattice too (H01-26). No shapes: a zero-size bbox at the origin.
     #[must_use]
     pub fn finish(mut self) -> Macro {
         // Exact duplicates (rings sharing a band draw its cuts twice) are one
@@ -155,15 +168,19 @@ pub fn cut_lattice(process: &dyn Process) -> i32 {
     2 * process.grid().max(1)
 }
 
-/// Round `v` down onto the cut lattice `lat`.
+/// Round `v` down (toward −∞) onto the cut lattice `lat`.
+///
+/// # Panics
+/// If `lat == 0`.
 #[must_use]
 pub fn snap_cut(v: i32, lat: i32) -> i32 {
     v.div_euclid(lat) * lat
 }
 
+/// The tight bounding box of `shapes`; a zero rect at the origin when empty.
 fn bbox_of(shapes: &[Shape]) -> Rect {
     let Some(first) = shapes.first() else {
-        return Rect { x: 0, y: 0, w: 0, h: 0 };
+        return Rect::default();
     };
     let (mut x0, mut y0) = (first.rect.x, first.rect.y);
     let (mut x1, mut y1) = (x0 + first.rect.w, y0 + first.rect.h);
@@ -225,7 +242,9 @@ pub fn dim(process: &dyn Process, key: &str) -> i32 {
 }
 
 /// A pin `d{di}:{term}` over `at`. The net is a placeholder, distinct per
-/// `(di, term)`, that the caller rebinds by pin name.
+/// `(di, term)` for `di < 8192` (eight terminal slots per member in a `u16`),
+/// that the caller rebinds by pin name. A `term` outside `G S D B P N C`
+/// shares slot 7.
 #[must_use]
 pub fn pin(di: usize, term: &str, at: Rect, layer: LayerId) -> Pin {
     const TERMS: [&str; 7] = ["G", "S", "D", "B", "P", "N", "C"];
@@ -234,6 +253,9 @@ pub fn pin(di: usize, term: &str, at: Rect, layer: LayerId) -> Pin {
 }
 
 /// Resolved sizing for the devices in a group.
+///
+/// Invariant: `dev_nf` holds one entry per group member (one entry for an
+/// empty group), each `>= 1`.
 pub struct Sizing {
     /// Unit finger/segment width, nm.
     pub unit_w: i32,
@@ -253,15 +275,16 @@ pub fn unitization<'a>(group: &DeviceGroup, c: &'a Constraints) -> Option<&'a Un
 }
 
 /// Group sizing from the covering unitization, else one finger at
-/// `def_w`×`def_l` per device.
+/// `def_w`×`def_l` per device. A unitization's non-positive `unit_w`/`unit_l`
+/// falls back to the default, a missing or zero finger count to 1.
 #[must_use]
 pub fn sizing(group: &DeviceGroup, c: &Constraints, def_w: i32, def_l: i32) -> Sizing {
-    let n = group.devices.len().max(1);
     let Some(u) = unitization(group, c) else {
-        return Sizing { unit_w: def_w, unit_l: def_l, dev_nf: vec![1; n] };
+        return Sizing { unit_w: def_w, unit_l: def_l, dev_nf: vec![1; group.devices.len().max(1)] };
     };
     // Each member reads its own slot of the (possibly larger) unitization.
-    let mut dev_nf: Vec<u16> = group
+    // `unitization` only covers a non-empty group, so `dev_nf` is non-empty.
+    let dev_nf: Vec<u16> = group
         .devices
         .iter()
         .map(|d| {
@@ -269,14 +292,22 @@ pub fn sizing(group: &DeviceGroup, c: &Constraints, def_w: i32, def_l: i32) -> S
             slot.and_then(|i| u.dev_nf.get(i)).copied().unwrap_or(1).max(1)
         })
         .collect();
-    if dev_nf.is_empty() {
-        dev_nf = vec![1; n];
-    }
     Sizing {
         unit_w: if u.unit_w > 0 { u.unit_w } else { def_w },
         unit_l: if u.unit_l > 0 { u.unit_l } else { def_l },
         dev_nf,
     }
+}
+
+/// The smallest rect enclosing both `a` and `b`.
+pub(crate) fn hull(a: Rect, b: Rect) -> Rect {
+    let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
+    Rect { x: x0, y: y0, w: (a.x + a.w).max(b.x + b.w) - x0, h: (a.y + a.h).max(b.y + b.h) - y0 }
+}
+
+/// Whether `inner` lies inside `outer`, edges included.
+pub(crate) fn contains(outer: &Rect, inner: &Rect) -> bool {
+    inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h
 }
 
 #[cfg(test)]
@@ -305,9 +336,4 @@ mod tests {
         assert!(m.bbox.x <= s.x && m.bbox.y <= s.y);
         assert!(m.bbox.x + m.bbox.w >= s.x + s.w && m.bbox.y + m.bbox.h >= s.y + s.h);
     }
-}
-
-fn hull(a: Rect, b: Rect) -> Rect {
-    let (x0, y0) = (a.x.min(b.x), a.y.min(b.y));
-    Rect { x: x0, y: y0, w: (a.x + a.w).max(b.x + b.w) - x0, h: (a.y + a.h).max(b.y + b.h) - y0 }
 }

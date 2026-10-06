@@ -24,36 +24,64 @@ pub struct FinFet {
     pub shared: bool,
 }
 
-/// The deck's front-end numbers, nm.
+/// The deck's front-end numbers, nm (areas nm²); a rule the deck omits reads
+/// 0. Roles map onto the planar names: fin layer `fin`, gate `poly`, active
+/// `diff`, V0 `licon`, M1 `li`, V1 `mcon`, M2 `met1`.
 struct Rules {
+    /// Fin width.
     fin_w: i32,
+    /// Fin pitch: width plus fin spacing.
     fin_p: i32,
+    /// Gate length: the poly width, never under `min_gate_l`.
     gate_w: i32,
+    /// Gate pitch: gate length plus poly spacing.
     gate_p: i32,
+    /// Active extension past the outer fins' ends.
     act_past_fin: i32,
+    /// Active extension past the outer (edge) gates.
     act_past_gate: i32,
+    /// Gate extension past the active (end cap).
     gate_past_act: i32,
+    /// S/D trench width.
     sdt_w: i32,
+    /// S/D trench to gate spacing.
     sdt_gate: i32,
+    /// S/D local-interconnect width.
     lisd_w: i32,
+    /// V0 cut size.
     v0: i32,
+    /// LISD enclosure of V0 (max of end cap and enclosure).
     v0_in_lisd: i32,
+    /// M1 enclosure of V0 (max of end cap and enclosure).
     v0_in_m1: i32,
+    /// M1 minimum width.
     m1_w: i32,
+    /// M1 minimum spacing.
     m1_s: i32,
+    /// M1 minimum area.
     m1_area: i64,
+    /// Gate local-interconnect width.
     lig_w: i32,
+    /// Gate local-interconnect minimum area.
     lig_area: i64,
+    /// LIG clearance to the channel (to poly or to active, the larger).
     lig_channel: i32,
+    /// Active to active spacing.
     act_s: i32,
+    /// Select implant enclosure of active.
     sel_enc: i32,
+    /// Select implant extension past the gates.
     sel_past_gate: i32,
+    /// Select implant minimum width.
     sel_w: i32,
+    /// Nwell enclosure of active.
     well_enc: i32,
+    /// Field gate end to (tap) active spacing.
     gate_field: i32,
 }
 
 impl Rules {
+    /// Reads every rule from `p`.
     fn of(p: &dyn Process) -> Self {
         let w = |r: &str| p.width(r).unwrap_or(0);
         let s = |r: &str| p.space(r).unwrap_or(0);
@@ -91,6 +119,9 @@ impl Rules {
 }
 
 impl Cell for FinFet {
+    /// Separate actives always; the shared common-centroid row too when the
+    /// group has two or more members and a diffusion-legal centroid order
+    /// exists. Nothing for an empty group or a deck without a `fin` layer.
     fn enumerate(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() || process.layer("fin").is_none() {
             return vec![];
@@ -103,6 +134,11 @@ impl Cell for FinFet {
         v
     }
 
+    /// Draws this variant.
+    ///
+    /// # Panics
+    /// If `group` is empty, if the deck lacks a mandatory role ([`req`]), or
+    /// for `shared` when no centroid row exists (never enumerated).
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
         let r = Rules::of(process);
         let s = group_sizing(group, constraints, process);
@@ -261,7 +297,6 @@ impl Cell for FinFet {
         let tsel = Rect { x: tap.x - r.sel_enc, y: tap_y - r.sel_enc, w: tap.w + 2 * r.sel_enc, h: (tap_h + 2 * r.sel_enc).max(r.sel_w) };
         b.rect(tap_sel, tsel);
         let tv0_y = tap_y + (tap_h - r.v0) / 2;
-        let lw = r.lisd_w.max(r.v0 + 2 * r.v0_in_lisd);
         let mut cx = tap.x + end / 2;
         let mut first = None;
         while cx + lw / 2 <= tap.x + tap.w - r.sdt_gate {
@@ -287,6 +322,7 @@ impl Cell for FinFet {
     }
 }
 
+/// [`sizing`] with a one-fin default width and the deck's minimum gate length.
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     let fin_p = process.width("fin").unwrap_or(0) + process.space("fin").unwrap_or(0);
     sizing(group, c, fin_p.max(1), dim(process, "min_gate_l"))

@@ -9,7 +9,7 @@ use analog::matching::pattern::{self, Outer};
 use analog::Constraints;
 use pnr_core::{DeviceGroup, DeviceKind, Macro, MatchClass, Process, Rect};
 
-use crate::builder::{cut_lattice, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
+use crate::builder::{contains, cut_lattice, hull, pin, req, sizing, snap_cut, unitization, Builder, Sizing};
 use crate::{Cell, Pattern};
 
 /// One MOSFET variant: `nf` fingers per device arranged by `style`, with
@@ -45,11 +45,20 @@ use crate::{Cell, Pattern};
 /// ([`stack_pad_to_pad`]); every moment of order ≤ 3 cancels.
 #[derive(Clone)]
 pub struct Mosfet {
+    /// Fingers of the first member (the schematic's count); every member's
+    /// own count comes from the group's sizing at draw time.
     pub nf: u16,
+    /// Finger interleave; `Interdig` is never enumerated (it abuts drains).
     pub style: Pattern,
+    /// Dummy gates on each diffusion end, before any class environment raises
+    /// it.
     pub dummies_per_edge: u8,
+    /// Odd-indexed members' gates leave above the diffusion (see the type).
     pub split_gates: bool,
+    /// Swap-reverse symmetric drain-pair order for an equal pair (see the
+    /// type).
     pub mirror_pins: bool,
+    /// Diffusion rows: 1, 2 or 4 (0 reads as 1).
     pub rows: u16,
     /// Every finger contacted at both ends, a strap on each (unsplit rows):
     /// the distributed gate R drops fourfold, `R□·W/(12·L)` against `/3`
@@ -86,6 +95,12 @@ fn two_ended_gate_pays(process: &dyn Process, w: i32, l: i32) -> bool {
 }
 
 impl Cell for Mosfet {
+    /// A series stack: one `Chain` (split when the bars cannot fit), nothing
+    /// when a member has an even finger count. Otherwise blocks (where every
+    /// boundary can sit on a source), centroid rows and, for an equal pair,
+    /// split/mirror variants, each at 1, 2 or 4 rows and one- or two-ended
+    /// gates where they pay; every variant's bars fit and every row is
+    /// diffusion-legal. Empty for an empty group.
     fn enumerate(group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Vec<Self> {
         if group.devices.is_empty() {
             return vec![];
@@ -182,6 +197,12 @@ impl Cell for Mosfet {
             .collect()
     }
 
+    /// Draws this variant's rows, stacked on shared taps, plus per-owner gate
+    /// resistance when the deck characterises poly and its contact.
+    ///
+    /// # Panics
+    /// If `group` is empty, `rows == 3`, or the deck lacks a mandatory role
+    /// ([`req`]).
     fn draw(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process) -> Macro {
         let s = group_sizing(group, constraints, process);
         // A row whose bars cannot drop a boundary cut (never enumerated)
@@ -217,7 +238,7 @@ fn stack_on_tap(a: &Macro, b: &Macro, process: &dyn Process) -> Macro {
     let tap = req(process, "tap");
     // The strip is the topmost shape on the tap layer (a deck may draw tap
     // and diffusion on one layer).
-    let t = a.shapes.iter().filter(|s| s.layer == tap).max_by_key(|s| s.rect.y).map_or(Rect { x: 0, y: 0, w: 0, h: 0 }, |s| s.rect);
+    let t = a.shapes.iter().filter(|s| s.layer == tap).max_by_key(|s| s.rect.y).map_or(Rect::default(), |s| s.rect);
     let y2 = 2 * t.y + t.h;
     merge_stacked(a, b, |r: Rect| Rect { y: y2 - r.y - r.h, ..r }, Some(t), process)
 }
@@ -248,12 +269,7 @@ fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_i
     // the second untapped.
     let nwell = process.layer("nwell");
     let mut well: Option<Rect> = None;
-    let mut grow = |r: Rect| {
-        well = Some(well.map_or(r, |w: Rect| {
-            let (x0, y0) = (w.x.min(r.x), w.y.min(r.y));
-            Rect { x: x0, y: y0, w: (w.x + w.w).max(r.x + r.w) - x0, h: (w.y + w.h).max(r.y + r.h) - y0 }
-        }));
-    };
+    let mut grow = |r: Rect| well = Some(well.map_or(r, |w| hull(w, r)));
     for s in &a.shapes {
         if Some(s.layer) == nwell {
             grow(s.rect);
@@ -264,7 +280,7 @@ fn merge_stacked(a: &Macro, b: &Macro, place: impl Fn(Rect) -> Rect, skip_cuts_i
     // The strip keeps `a`'s cut row: `b`'s, mirrored, sits off it by the
     // strip's asymmetric enclosure and would merge into oversized cuts.
     let licon = process.layer("licon");
-    let inside = |r: Rect| skip_cuts_in.is_some_and(|t| r.x >= t.x && r.x + r.w <= t.x + t.w && r.y >= t.y && r.y + r.h <= t.y + t.h);
+    let inside = |r: Rect| skip_cuts_in.is_some_and(|t| contains(&t, &r));
     for s in &b.shapes {
         let r = place(s.rect);
         if Some(s.layer) == licon && inside(r) {
@@ -309,6 +325,11 @@ impl Mosfet {
     /// first, then for two rows the first relabelled (a pair) or reversed;
     /// four rows: MAT-15's order-3 grid over the `Cc1d` base row of nf/4 per
     /// member (only enumerated for an equal `Cc1d` pair, no mirror pins).
+    /// `rows` 0 reads as 1, above 4 as 4; each member keeps at least one
+    /// finger per row.
+    ///
+    /// # Panics
+    /// If `rows == 3`.
     fn row_orders(&self, dev_nf: &[u16], n_dev: usize) -> Vec<Vec<usize>> {
         let rows = self.rows.clamp(1, 4);
         assert!(rows != 3, "no three-row variant: rows is 1, 2 or 4");
@@ -339,7 +360,13 @@ impl Mosfet {
         self.row_orders(dev_nf, n_dev).iter().all(|seq| bar_cuts(seq, same_row, self.mirror_pins && !self.split_gates).is_some())
     }
 
-    /// One row of fingers in `sequence` order (device index per finger).
+    /// One row of fingers in `sequence` order (device index per finger, each
+    /// `< group.devices.len()`), with its dummies, tap strip, implants,
+    /// markers and (PMOS) well; S/D junction figures in `figures.sd`.
+    ///
+    /// # Panics
+    /// If `sequence` is empty, or a non-EXC row's bars cannot all keep a cut
+    /// ([`bar_cuts`] `None`; `enumerate` filters such variants).
     fn draw_row(&self, group: &DeviceGroup, constraints: &Constraints, process: &dyn Process, sequence: &[usize]) -> Macro {
         let mut b = Builder::new(process.grid());
         let s = group_sizing(group, constraints, process);
@@ -907,7 +934,7 @@ pub fn sd_and_pitch(process: &dyn Process, gate_l: i32) -> (i32, i32) {
 #[must_use]
 pub fn tap_reach(m: &Macro, process: &dyn Process) -> Option<i32> {
     let (tap, diff) = (req(process, "tap"), req(process, "diff"));
-    let holds_b = |r: &Rect| m.pins.iter().any(|p| p.name.ends_with(":B") && r.x <= p.at.x && r.y <= p.at.y && p.at.x + p.at.w <= r.x + r.w && p.at.y + p.at.h <= r.y + r.h);
+    let holds_b = |r: &Rect| m.pins.iter().any(|p| p.name.ends_with(":B") && contains(r, &p.at));
     let taps: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == tap && holds_b(&s.rect)).map(|s| s.rect).collect();
     if taps.is_empty() {
         return None;
@@ -1041,7 +1068,8 @@ fn bar_cuts(seq: &[usize], same_row: impl Fn(usize, usize) -> bool, shared: bool
 pub fn gate_islands(m: &Macro, poly: pnr_core::LayerId, members: usize) -> Vec<Option<usize>> {
     let at: Vec<Option<(i32, i32)>> = (0..members)
         .map(|i| {
-            let p = m.pins.iter().find(|p| p.name == format!("d{i}:G"))?;
+            let name = format!("d{i}:G");
+            let p = m.pins.iter().find(|p| p.name == name)?;
             Some((p.at.x + p.at.w / 2, p.at.y + p.at.h / 2))
         })
         .collect();
@@ -1051,23 +1079,18 @@ pub fn gate_islands(m: &Macro, poly: pnr_core::LayerId, members: usize) -> Vec<O
 }
 
 /// The poly island under each point (`None` off poly); equal ids = joined.
+/// Shapes that touch (edges and corners included, [`Rect::touches`]) join;
+/// a point on a shape's boundary is on it. Ids are opaque.
+///
+/// Cost: O(s²) in the macro's poly shapes plus O(s) per point.
 #[must_use]
 pub fn poly_islands_at(m: &Macro, poly: pnr_core::LayerId, points: &[(i32, i32)]) -> Vec<Option<usize>> {
     let rects: Vec<Rect> = m.shapes.iter().filter(|s| s.layer == poly).map(|s| s.rect).collect();
-    let mut parent: Vec<usize> = (0..rects.len()).collect();
-    fn root(p: &mut [usize], mut i: usize) -> usize {
-        while p[i] != i {
-            p[i] = p[p[i]];
-            i = p[i];
-        }
-        i
-    }
-    let touch = |a: &Rect, b: &Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+    let mut islands = pnr_core::UnionFind::new(rects.len());
     for i in 0..rects.len() {
         for j in i + 1..rects.len() {
-            if touch(&rects[i], &rects[j]) {
-                let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
-                parent[ri] = rj;
+            if rects[i].touches(&rects[j]) {
+                islands.union(i as u32, j as u32);
             }
         }
     }
@@ -1075,11 +1098,12 @@ pub fn poly_islands_at(m: &Macro, poly: pnr_core::LayerId, points: &[(i32, i32)]
         .iter()
         .map(|&(x, y)| {
             let k = rects.iter().position(|r| (r.x..=r.x + r.w).contains(&x) && (r.y..=r.y + r.h).contains(&y))?;
-            Some(root(&mut parent, k))
+            Some(islands.find(k as u32) as usize)
         })
         .collect()
 }
 
+/// [`sizing`] at the deck's minimum finger width and gate length.
 fn group_sizing(group: &DeviceGroup, c: &Constraints, process: &dyn Process) -> Sizing {
     sizing(group, c, dim(process, "min_finger_width"), dim(process, "min_gate_l"))
 }
@@ -1091,7 +1115,8 @@ fn grid_legal(orders: &[Vec<usize>]) -> bool {
 
 /// Every inter-device boundary of `seq` (device index per finger) lies on a
 /// source region, with region 0 a source iff `s0`. Region i sits left of
-/// finger i; region `seq.len()` is the right end.
+/// finger i; region `seq.len()` is the right end. Vacuously true for fewer
+/// than two fingers.
 pub(crate) fn legal_row(seq: &[usize], s0: bool) -> bool {
     (1..seq.len()).all(|i| seq[i] == seq[i - 1] || ((i % 2 == 0) == s0))
 }
@@ -1117,13 +1142,17 @@ pub fn cc_row_exists(dev_nf: &[u16], route_matched: bool) -> bool {
 /// `H` is chosen to bring the centroids closest (exact where one exists, e.g.
 /// `nf = 8`: A BB A B AA B); ties go to the lexicographically first.
 ///
+/// The order has `4·(nf/2)` fingers: an odd `nf` loses one pair (callers
+/// only reach here with even `nf`); `nf < 2` gives an empty order.
+///
 /// ponytail: brute force over `2^(nf/2)` halves, capped at `nf = 32`; larger
 /// arrays fall back to alternating pairs (one pair of centroid offset).
 fn mirror_sequence(nf: usize) -> Vec<usize> {
     mirror_pairs(nf).into_iter().flat_map(|d| [d, d]).collect()
 }
 
-/// [`mirror_sequence`]'s order, one entry per drain pair.
+/// [`mirror_sequence`]'s order, one entry per drain pair: `2·(nf/2)` entries,
+/// half of them device 0's.
 fn mirror_pairs(nf: usize) -> Vec<usize> {
     let half = nf / 2;
     let build = |h: u32| -> Vec<usize> {
