@@ -19,8 +19,11 @@ use crate::rule::RuleBatch;
 /// same kind)` and reordering silently moves prices. In-loop DRC batches are
 /// appended to `hard` and truncated off, keeping the prefix.
 pub struct Requirements<On> {
+    /// Must hold: counted by [`RuleBatch::violations`].
     pub hard: Vec<Box<dyn RuleBatch<On>>>,
+    /// Priced by overshoot: summed by [`RuleBatch::residual`].
     pub budget: Vec<Box<dyn RuleBatch<On>>>,
+    /// Pure objective terms: summed by [`RuleBatch::cost`].
     pub cost: Vec<Box<dyn RuleBatch<On>>>,
 }
 

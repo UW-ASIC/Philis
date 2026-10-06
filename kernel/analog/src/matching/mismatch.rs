@@ -3,6 +3,8 @@
 //! allowance they share (plan-02 MAT-04). Pure math, mV (or % of a
 //! mirror current, MAT-09).
 
+use crate::matching::class::ClassLimit;
+
 /// Pelgrom pair σ of two devices of unequal gate area, mV:
 /// `A·√((1/a1 + 1/a2)/2)`, `A` = pair constant mV·µm, `a` µm² (LDM eq. 4,
 /// PDF p.3; Hastings eq. 13.49, PDF p.688). `0` when an area is not positive.
@@ -19,19 +21,22 @@ pub fn sigma_pair(a_pair: f32, a1_um2: f32, a2_um2: f32) -> f32 {
 /// passives (MAT-10).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MatchKind {
+    /// Equal gate-source voltage at equal current (a differential pair).
     Voltage,
+    /// Equal current at equal gate-source voltage (a mirror or load).
     Current,
+    /// A passive or bipolar ratio.
     Ratio,
 }
-
-use crate::matching::class::ClassLimit;
 
 /// What a ledger's σ and allowance are in: input-referred mV, or a current
 /// ratio in % (a mirror whose G = g_m/I is known, MAT-09).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LedgerUnit {
+    /// Input-referred millivolts.
     #[default]
     Mv,
+    /// Percent of a current or component ratio.
     Pct,
 }
 
@@ -53,6 +58,7 @@ pub fn sigma_current_pct(sigma_vt_mv: f32, g_per_v: f32, sigma_beta_pct: f32) ->
 }
 
 /// Voltage-domain random σ, mV: √(σ_VT² + (10·σ_β/G)²) (eq. 13.42).
+/// Infinite when `g_per_v` is 0 and `sigma_beta_pct` is not.
 #[must_use]
 pub fn sigma_voltage_mv(sigma_vt_mv: f32, g_per_v: f32, sigma_beta_pct: f32) -> f32 {
     sigma_vt_mv.hypot(10.0 * sigma_beta_pct / g_per_v)
@@ -73,7 +79,8 @@ pub enum Budget {
     Eta(f32),
     /// Total 1σ budget `b`, mV: the layout gets `√max(0, b² − σ_rand²)`.
     Sigma1Mv(f32),
-    /// The 1σ systematic allowance itself, mV.
+    /// The 1σ systematic allowance itself, in the ledger's unit (mV, or %
+    /// after [`Budget::to_pct`]).
     Allowance(f32),
     /// Total 1σ budget `b`, % of a current ratio: [`Budget::to_pct`] of a
     /// `Sigma1Mv` on a % ledger.
@@ -96,7 +103,8 @@ impl Budget {
         }
     }
 
-    /// The systematic allowance, mV, given the pair's random σ.
+    /// The systematic allowance, in the unit of `sigma_rand`, given the
+    /// pair's random σ. Never negative for a non-negative budget.
     #[must_use]
     pub fn allowance(self, sigma_rand: f32) -> f32 {
         match self {
@@ -166,7 +174,8 @@ pub struct Coeffs {
 }
 
 /// Distance coefficient at gate length `l_um`, µV/µm: `√(a + b/L²)` (S_D²
-/// grows with 1/L², Schaper & Linnenbank Fig. 8; MM-25).
+/// grows with 1/L², Schaper & Linnenbank Fig. 8; MM-25). `a` µV²/µm², `b`
+/// µV²; infinite at `l_um = 0`.
 #[must_use]
 pub fn svt_of_l(a_uv2_per_um2: f32, b_uv2: f32, l_um: f32) -> f32 {
     (a_uv2_per_um2 + b_uv2 / (l_um * l_um)).sqrt()
@@ -181,7 +190,7 @@ pub fn sigma_grad_mv(s_xy_uv_per_um: (f32, f32), dx_nm: f32, dy_nm: f32) -> f32 
 
 /// Current-factor change of a member `dt_k` warmer than its partner, %:
 /// `−100·exp·ΔT/T` for `k ∝ T^−exp` (Hastings §12.1.1, PDF p.578). Signed,
-/// ΔT of member a minus b.
+/// ΔT of member a minus b; `t_abs_k` must be positive.
 #[must_use]
 pub fn mobility_pct(exp: f32, dt_k: f32, t_abs_k: f32) -> f32 {
     -100.0 * exp * dt_k / t_abs_k
@@ -220,15 +229,27 @@ pub fn ratio_thermal_pct(tc_ppm_per_k: f32, dt_mk: f32) -> f32 {
 ///   equivalent centroid offset (cost and report only; no deck has a coefficient).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Ledger {
+    /// Random 1σ the sizing bought.
     pub sigma_rand: f32,
+    /// Gradient term of the centroid offset.
     pub sigma_grad: f32,
+    /// Thermal term.
     pub mu_thermal: f32,
+    /// LOD/stress term.
     pub mu_lod: f32,
+    /// What the systematic terms may spend ([`Budget::allowance`]).
     pub allowance: f32,
+    /// `|Δm|/tol`, binding at 1; `None` when the check is off or the
+    /// members' units admit no common-centroid row.
     pub coincidence: Option<f32>,
+    /// Second-moment residue as an equivalent centroid offset, nm.
     pub second_order_nm: f32,
+    /// Placed centroid distance between the members, nm.
     pub delta_m_nm: f32,
+    /// The members' units are drawn and a budget or coincidence check
+    /// applies; `false` = the ledger is not certified.
     pub known: bool,
+    /// Unit of every σ/μ/allowance field.
     pub unit: LedgerUnit,
 }
 
@@ -268,7 +289,8 @@ impl Ledger {
         self.mu_thermal + self.mu_lod + self.sigma_grad
     }
 
-    /// Fraction of the tighter check used; finite at a zero allowance.
+    /// Fraction of the tighter check used (`spent / allowance` or the
+    /// coincidence ratio); finite at a zero allowance.
     #[must_use]
     pub fn usage(&self) -> f32 {
         (self.spent() / self.allowance.max(f32::EPSILON)).max(self.coincidence.unwrap_or(0.0))

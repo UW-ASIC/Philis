@@ -8,7 +8,9 @@
 //! Split DAC (MAT-18): C_A is DACP eq. 1, non-unit plate sizing §III-D, slot
 //! order §IV-C.
 
-/// Per-slot capacitance, unit-normalised: `Σ 1/(1 + g·(x cosθ + y sinθ))`.
+/// Per-slot capacitance, unit-normalised: `Σ 1/(1 + g·(x cosθ + y sinθ))`
+/// over each slot's units, `slots` entries. Panics when a unit's slot is
+/// `≥ slots`.
 #[must_use]
 pub fn gradient_caps(units: &[(u8, f64, f64)], slots: usize, g_per_um: f64, theta: f64) -> Vec<f64> {
     let (c, s) = (theta.cos(), theta.sin());
@@ -21,7 +23,9 @@ pub fn gradient_caps(units: &[(u8, f64, f64)], slots: usize, g_per_um: f64, thet
 
 /// Worst `(|INL|, |DNL|)`, LSB, over θ = k·π/`steps` (k < steps): slot 0 is
 /// the termination unit, bits 1..=`n_bits`; every code's transfer
-/// `Σ_{b set} C_b / ΣC · 2ⁿ` against the ideal code.
+/// `Σ_{b set} C_b / ΣC · 2ⁿ` against the ideal code. `(0, 0)` when `steps`
+/// is 0 or there are no units. Cost O(steps · (units + 2ⁿ)); requires
+/// `n_bits < usize::BITS` and every unit slot `≤ n_bits`.
 #[must_use]
 pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize) -> (f64, f64) {
     let n = usize::from(n_bits);
@@ -43,7 +47,8 @@ pub fn inl_dnl(units: &[(u8, f64, f64)], n_bits: u8, g_per_um: f64, steps: usize
 
 /// Systematic ratio mismatch M_sys: worst over θ (as [`inl_dnl`]) and slots
 /// `i ≥ 1` of `|(C_i/counts_i) / (C_0/counts_0) − 1|`, the per-unit
-/// capacitance of each slot against slot 0's.
+/// capacitance of each slot against slot 0's. `counts[i]` is slot `i`'s unit
+/// count and must be positive; `0` with fewer than two slots or no steps.
 #[must_use]
 pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usize) -> f64 {
     let mut worst = 0.0f64;
@@ -58,6 +63,8 @@ pub fn msys(units: &[(u8, f64, f64)], counts: &[u16], g_per_um: f64, steps: usiz
 }
 
 /// max over slots of ‖M_slot − M_array‖_F per unit, µm² (M = [xx, xy, yy] about the array centroid).
+/// Unit coordinates must already be centred on the array centroid. Slots
+/// without units, and slots `≥ slots`, are skipped; `0` without units.
 #[must_use]
 pub fn second_um2(units: &[(u8, f64, f64)], slots: usize) -> f64 {
     let mean = |f: &dyn Fn(&(u8, f64, f64)) -> bool| {
@@ -76,7 +83,7 @@ pub fn second_um2(units: &[(u8, f64, f64)], slots: usize) -> f64 {
 }
 
 /// C_A in units of C_u: `C_T^LSB / C_T^MSB` (DACP eq. 1); the LSB total
-/// counts the termination unit.
+/// counts the termination unit. Infinite when `ct_msb_units` is 0.
 #[must_use]
 pub fn attenuation_cap(ct_lsb_units: u32, ct_msb_units: u32) -> f64 {
     f64::from(ct_lsb_units) / f64::from(ct_msb_units)
@@ -85,7 +92,8 @@ pub fn attenuation_cap(ct_lsb_units: u32, ct_msb_units: u32) -> f64 {
 /// Non-unit side lengths `(H, l)`, `H ≥ l`, of area `A` with the unit's
 /// perimeter-to-area ratio `k = (H_u + l_u)/(H_u·l_u)`: roots of
 /// `z² − kA·z + A = 0` (DACP §III-D eqs 37–45). `None` when `k²A² < 4A` (no
-/// rectangle of that area keeps the unit's edge sensitivity).
+/// rectangle of that area keeps the unit's edge sensitivity). Unit sides
+/// must be positive.
 #[must_use]
 pub fn nonunit_dims(area_um2: f64, unit_h_um: f64, unit_l_um: f64) -> Option<(f64, f64)> {
     let ka = (unit_h_um + unit_l_um) / (unit_h_um * unit_l_um) * area_um2;
@@ -102,11 +110,15 @@ pub fn nonunit_dims(area_um2: f64, unit_h_um: f64, unit_l_um: f64) -> Option<(f6
 /// MSB tokens alternating (each bank largest cap first), each at the next free
 /// pair.
 ///
+/// Requires `l_bits ≥ 1`, `m_bits ≥ 1` (debug-asserted) and a grid of at
+/// least `2^L + 2^M + 1` cells; on a smaller grid the tail tokens are dropped.
+///
 /// [`pattern::spiral`]: crate::matching::pattern::spiral
 #[must_use]
 pub fn split_dac_assign(l_bits: u8, m_bits: u8, rows: usize, cols: usize) -> Vec<Option<u8>> {
     use crate::matching::pattern::{spiral, Grid};
     let (l, m) = (usize::from(l_bits), usize::from(m_bits));
+    debug_assert!(l >= 1 && m >= 1, "split DAC needs both banks: L={l}, M={m}");
     let mut left: Vec<usize> = std::iter::once(1).chain((0..l).map(|k| 1 << k)).chain((0..m).map(|k| 1 << k)).collect();
     let n = rows * cols;
     debug_assert!(n >= (1 << l) + (1 << m) - 1 + 2, "{rows}×{cols} cannot hold L={l}, M={m}");

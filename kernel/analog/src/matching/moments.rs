@@ -7,9 +7,13 @@
 /// drawn outline), `phi` its signed S→D direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pt {
+    /// Position, in the frame's unit (nm for placed units).
     pub x: f64,
+    /// Position, in the frame's unit.
     pub y: f64,
+    /// Electrical weight (≥ 0).
     pub w: f64,
+    /// Signed S→D direction per axis, each in `{-1, 0, 1}`.
     pub phi: (i8, i8),
 }
 
@@ -30,10 +34,14 @@ impl From<pnr_core::Unit> for Pt {
 /// symmetry there).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Axis {
+    /// No unit carries current (or the set is empty).
     #[default]
     None,
+    /// Current along x only.
     H,
+    /// Current along y only.
     V,
+    /// Current along both axes.
     Mixed,
 }
 
@@ -41,19 +49,30 @@ pub enum Axis {
 /// current and how many units carried a non-zero φ on each axis.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sums {
+    /// Σw.
     pub w: f64,
+    /// Σw·x.
     pub x: f64,
+    /// Σw·y.
     pub y: f64,
+    /// Σw·x².
     pub xx: f64,
+    /// Σw·x·y.
     pub xy: f64,
+    /// Σw·y².
     pub yy: f64,
+    /// Σφx.
     pub phi_x: i32,
+    /// Σφy.
     pub phi_y: i32,
+    /// Units summed, zero-weight ones included.
     pub n: u32,
+    /// Axes the non-zero φ run on.
     pub axis: Axis,
 }
 
 /// One pass over a unit set's points: weighted sums plus the current axes.
+#[must_use]
 pub fn sums(pts: impl IntoIterator<Item = Pt>) -> Sums {
     let mut s = Sums::default();
     let (mut any_x, mut any_y) = (false, false);
@@ -121,9 +140,10 @@ pub fn phi_equal(a: &Sums, b: &Sums) -> bool {
         && i64::from(a.phi_y) * i64::from(b.n) == i64::from(b.phi_y) * i64::from(a.n)
 }
 
-/// Every member of a macro's units runs the same mean current direction. A
-/// macro without units (or none of a member's units set φ) has nothing to
-/// compare and passes.
+/// Every member `0..members` of a macro's units runs the same mean current
+/// direction ([`phi_equal`]). Members without units are skipped; a macro
+/// without units (or with zero-φ units only) has nothing to compare and
+/// passes. Units owned by `members` or above are ignored.
 #[must_use]
 pub fn phi_equal_all(units: &[pnr_core::Unit], members: usize) -> bool {
     let live: Vec<Sums> = (0..members)
@@ -151,6 +171,8 @@ pub fn mirror_allowed_units(units: &[pnr_core::Unit]) -> bool {
     mirror_allowed(&per)
 }
 
+/// Normalised moment `Σw·((x−cx)/l)^p·((y−cy)/l)^q / Σw` of `pts`; `0`
+/// without weight.
 fn moment(pts: &[Pt], c: (f64, f64), l: f64, p: i32, q: i32) -> f64 {
     let w: f64 = pts.iter().map(|pt| pt.w).sum();
     if w <= 0.0 {
@@ -165,8 +187,13 @@ fn moment(pts: &[Pt], c: (f64, f64), l: f64, p: i32, q: i32) -> f64 {
 /// How many leading moment orders (1, 2, …) cancel between every pair of
 /// devices in a figure, Hastings §13.3: order 1 is a common centroid, order 2
 /// also equalises second moments (ABBA/BAAB), and so on up to `nmax` (<= 4).
-/// Returns `(order, r)` where `r[n]` is the worst residual at order `n`
-/// (`r[0] = 0`, unused entries above `nmax` are `0.0`).
+/// Returns `(order, r)` where `r[n]` is the worst residual at order `n`: the
+/// largest `|moment_a − moment_b|` over every `p + q = n`, coordinates about
+/// the figure's weighted centroid scaled by its largest radius, so `r` is
+/// unit-free (`r[0] = 0`, unused entries above `nmax` are `0.0`). An order
+/// counts when its residual is `≤ tol`. Devices without weight are skipped; a
+/// figure without weight, or with every point at the centroid, cancels every
+/// order (`(nmax, [0; 5])`). Panics (debug) when `nmax > 4`.
 #[must_use]
 pub fn cancelled_order(devs: &[&[Pt]], nmax: u8, tol: f64) -> (u8, [f64; 5]) {
     debug_assert!(nmax <= 4);

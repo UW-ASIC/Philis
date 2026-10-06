@@ -34,6 +34,7 @@ pub enum RepairKind {
 /// [`Rule::On`] (`Layout` for placement, `Routes` for routing) and knows where
 /// it applies ([`Rule::extract`]). Every method is pure except `project`.
 pub trait Rule: Copy {
+    /// The state the rule scores: `pnr_core::Layout` or `pnr_core::Routes`.
     type On;
 
     /// Objective contribution (lower is better).
@@ -182,10 +183,13 @@ pub trait Rule: Copy {
 }
 
 /// Type-erased view of one kind's whole array. Cold: called once per kind.
+/// Every `out` parameter is appended to, never cleared.
 /// `Send + Sync`: a whole solve (its `Requirements` included) may run on a
 /// worker thread (the library's multi-start).
 pub trait RuleBatch<On>: Send + Sync {
+    /// Σ [`Rule::cost`] over the batch (lower is better).
     fn cost(&self, state: &On) -> f32;
+    /// Number of rules not [`Rule::satisfied`] on `state`.
     fn violations(&self, state: &On) -> u32;
     /// Σ [`Rule::residual`] — this batch's Θ contribution. Default: one full
     /// budget per violation, so a batch that cannot measure its overshoot still
@@ -261,9 +265,11 @@ pub trait RuleBatch<On>: Send + Sync {
     fn touched(&self, out: &mut Vec<u32>) {
         let _ = out;
     }
+    /// [`Rule::project`] of every rule, in batch order. Default no-op.
     fn project(&self, state: &mut On, grid: i32) {
         let _ = (state, grid);
     }
+    /// [`Rule::retarget`] of every rule in place. Default no-op.
     fn retarget(&mut self, cell_of: &[u16]) {
         let _ = cell_of;
     }
@@ -325,7 +331,9 @@ pub trait RuleBatch<On>: Send + Sync {
 /// A batch with its [`crate::intent::BatchMeta`]: every method delegates to
 /// `inner`. Boxed so the annotator tags batches after emission.
 pub struct Tagged<On> {
+    /// What [`RuleBatch::meta`] returns.
     pub meta: crate::intent::BatchMeta,
+    /// The batch every other method forwards to.
     pub inner: Box<dyn RuleBatch<On>>,
 }
 

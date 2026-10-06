@@ -6,7 +6,9 @@ use pnr_core::netlist::DeviceKind;
 /// A latch-up guard ring around `device`, tied to `connection_net`.
 #[derive(Clone, Copy)]
 pub struct GuardRingRequirement {
+    /// Schematic device the ring encloses.
     pub device: DeviceId,
+    /// Diffusion and well stack of the ring.
     pub ring_type: GuardRingType,
     /// May merge with a neighbouring ring of the same class.
     pub shareable: bool,
@@ -24,11 +26,15 @@ pub struct GuardRingRequirement {
 /// carriers, an aggressor's majority-carrier noise, or a victim's exposure.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RingRole {
+    /// Encloses a device that can inject minority carriers (a forward-biased junction).
     Injector,
+    /// Encloses a noisy device to collect its majority-carrier substrate current.
     Aggressor,
+    /// Encloses a sensitive device to shield it from substrate noise.
     Victim,
 }
 
+/// The diffusion/well construction of a guard ring.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuardRingType {
     /// Majority-carrier tap ring: p+ in substrate, or n+ in n-well when
@@ -50,7 +56,9 @@ pub enum GuardRingType {
 /// variant). The layout pattern is chosen by the cell generator.
 #[derive(Clone)]
 pub struct Unitization {
+    /// Members of the set, schematic ids; every per-member `Vec` below is parallel to it.
     pub devices: Vec<DeviceId>,
+    /// Device kind shared by every member.
     pub device_type: DeviceKind,
     /// Unit count per device.
     pub dev_nf: Vec<u16>,
@@ -60,8 +68,11 @@ pub struct Unitization {
     pub unit_w: i32,
     /// Unit length, nm.
     pub unit_l: i32,
+    /// How a member's units compose.
     pub series_parallel: SeriesParallel,
+    /// Dummy units must flank the array.
     pub dummy_required: bool,
+    /// Members' connections must be routed alike.
     pub route_matching_required: bool,
     /// Match class of the set (EXT-16 from a spec, or the user); `None` = not given, matched-cell readers use
     /// `unwrap_or(Moderate)` (C16). Read by `cells::cap_array` (GAP-18): an Exceptional binary bank lists its
@@ -71,13 +82,15 @@ pub struct Unitization {
     pub kind: Option<crate::intent::MatchKind>,
     /// Per member; empty = all 1.
     pub series: Vec<u16>,
-    /// None = today's choice.
+    /// Requested array arrangement; `None` = the cell generator's default choice.
     pub style: Option<crate::intent::ArrayStyle>,
 }
 
 /// How units compose into one instance.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeriesParallel {
+    /// Units in parallel: more units, more current (W adds).
     Parallel,
+    /// Units in series: more units, longer device (L or R adds).
     Series,
 }
