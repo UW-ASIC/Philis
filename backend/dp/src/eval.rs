@@ -2,7 +2,8 @@
 //! per-batch values cached; a move recomputes only the nets of the cells it
 //! moved and the batches whose [`analog::RuleBatch::touched`] ids it moved,
 //! plus every global batch (no touched ids: `Utilization`,
-//! `LiveEnvironment`, …; or [`analog::RuleBatch::reads_field`]: `MatchedSet`). Totals are re-summed in the order
+//! `LiveEnvironment`, …). A [`analog::RuleBatch::reads_field`] batch
+//! (`MatchedSet`) also counts every powered cell as touched. Totals are re-summed in the order
 //! [`gp::mechanics`] sums them, so a cached value is bit-identical to a full
 //! evaluation, not merely close.
 
@@ -31,7 +32,8 @@ pub(crate) struct Eval {
 }
 
 impl Eval {
-    pub(crate) fn new(reqs: &Requirements<Layout>, nets: &Nets, n: usize) -> Self {
+    /// `power[c] > 0` marks the cells whose moves change the thermal field.
+    pub(crate) fn new(reqs: &Requirements<Layout>, nets: &Nets, n: usize, power: &[i32]) -> Self {
         let (n_hard, n_budget) = (reqs.hard.len(), reqs.budget.len());
         let mut cell_rows = vec![Vec::new(); n];
         let mut global = Vec::new();
@@ -41,9 +43,14 @@ impl Eval {
             b.touched(&mut ids);
             ids.sort_unstable();
             ids.dedup();
-            if ids.is_empty() || b.reads_field() {
+            if ids.is_empty() {
                 global.push(i as u32);
                 continue;
+            }
+            if b.reads_field() {
+                ids.extend((0..n.min(power.len())).filter(|&c| power[c] > 0).map(|c| c as u32));
+                ids.sort_unstable();
+                ids.dedup();
             }
             for &c in ids.iter().filter(|&&c| (c as usize) < n) {
                 cell_rows[c as usize].push(i as u32);

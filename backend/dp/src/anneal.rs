@@ -454,6 +454,7 @@ fn init<'a>(inp: &'a PlaceInput<'a>, start: &Start, prices: &'a gp::Prices) -> (
         Start::Warm { tree: t0, .. } if warm_ok => tree.clone_from(t0),
         _ => {}
     }
+    let eval = Eval::new(reqs, &nets, n, &l.power_uw);
     let mut st = St {
         inp,
         prices,
@@ -463,7 +464,7 @@ fn init<'a>(inp: &'a PlaceInput<'a>, start: &Start, prices: &'a gp::Prices) -> (
         prof: vec![None; n],
         l,
         cell_nets: nets.cell_nets(n),
-        eval: Eval::new(reqs, &nets, n),
+        eval,
         nets,
         scratch: Scratch::default(),
         out: Out::default(),
