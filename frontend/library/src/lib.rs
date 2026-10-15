@@ -11,7 +11,7 @@ mod hier;
 mod parse;
 pub use parse::{retarget, spice_report, spice_with, ParseOptions, ParseReport, SizeConvention};
 
-/// Substrate3 elaboration: build a `macro_master::Composition` against a PDK
+/// Substrate3 elaboration: build a `macro_master::legacy::Composition` against a PDK
 /// and route its declared nets — the "PDK on the fly" entry.
 pub mod elaborate;
 pub use elaborate::{elaborate, stack as parasitic_stack, ElabConfig, Elaborated};
@@ -71,7 +71,7 @@ pub mod tools {
 use annotator::{AnnotationConfig, Problem};
 pub use dp::PlaceStats;
 pub use geometry::PlacementMetrics;
-pub use macro_master::Macros;
+pub use macro_master::legacy::Macros;
 use pnr_core::{DeviceId, LayerId, Layout, Macro, Report, Routes};
 use verify::Pdk;
 /// The GDS/geometry viewer, re-exported so callers get it through this crate.

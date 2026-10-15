@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use annotator::{annotate};
-use macro_master::{build_with, variants, AlignMode, GenError, Macros};
+use macro_master::legacy::{build_with, variants, AlignMode, GenError, Macros};
 use pnr_core::{DeviceId, DeviceKind, Orient, Process as _};
 use verify::Pdk;
 
@@ -398,7 +398,7 @@ fn terminal_port(kind: DeviceKind, t: &str, position: usize) -> String {
 /// The generator failing against this process.
 pub fn elaborate_ir(ir: &GenIr, pdk: &Pdk, cfg: &ElabConfig) -> Result<Elaborated, GenError> {
     let built = build_with(pdk, ir.ports.clone(), |c| {
-        let mut placed: Vec<Option<macro_master::Instance>> =
+        let mut placed: Vec<Option<macro_master::legacy::Instance>> =
             (0..ir.instances.len()).map(|_| None).collect();
         for p in &ir.place {
             let spec = &ir.instances[p.inst];
@@ -458,7 +458,7 @@ pub fn to_rust(ir: &GenIr) -> String {
     );
     let _ = writeln!(
         s,
-        "use macro_master::{{variants::{{MatchedPair, Mos, Res}}, AlignMode, Block, CompBuilder,"
+        "use macro_master::legacy::{{variants::{{MatchedPair, Mos, Res}}, AlignMode, Block, CompBuilder,"
     );
     let _ = writeln!(
         s,

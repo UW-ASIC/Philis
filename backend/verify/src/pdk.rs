@@ -1347,6 +1347,28 @@ impl Pdk {
         self.deck.devices.model.iter().map(|&m| self.strings.resolve(m)).find(|n| hit(n)).map(str::to_string)
     }
 
+    /// The LVS kind of schematic `model`, from the recogniser [`Pdk::deck_model`]
+    /// finds; polarity from its marker layer's leading `n`/`p`, as the
+    /// reference compiler reads it. `None` when no recogniser names `model`.
+    #[must_use]
+    pub fn model_kind(&self, model: &str) -> Option<crate::reference::RefKind> {
+        use crate::reference::RefKind;
+        use gdsverify::ingest::deck::DeviceKind;
+        let name = self.deck_model(model)?;
+        let d = &self.deck.devices;
+        let row = d.model.iter().position(|&m| self.strings.resolve(m) == name)?;
+        let p = self.strings.resolve(self.deck.layers.name(d.marker[row])).starts_with('p');
+        Some(match d.kind[row] {
+            DeviceKind::Mos if p => RefKind::Pmos,
+            DeviceKind::Mos => RefKind::Nmos,
+            DeviceKind::Bjt if p => RefKind::Pnp,
+            DeviceKind::Bjt => RefKind::Npn,
+            DeviceKind::Resistor => RefKind::Resistor,
+            DeviceKind::Capacitor => RefKind::Capacitor,
+            DeviceKind::Diode => RefKind::Diode,
+        })
+    }
+
     /// Layers `model`'s recogniser requires (`and`) and forbids (`not`) beyond its
     /// gate layer, from the marker's derived-layer expression (sky130
     /// `nfet_01v8_lvt = (ngate and lvtn) not hvi` → `([lvtn], [hvi])`). The walk

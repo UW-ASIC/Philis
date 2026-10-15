@@ -5,7 +5,7 @@
 //! the fly.
 
 use library::{elaborate, ElabConfig};
-use macro_master::{
+use macro_master::legacy::{
     variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io, Output,
     PortInfo, Process, Signal,
 };

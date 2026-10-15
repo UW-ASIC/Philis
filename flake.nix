@@ -44,13 +44,16 @@
             # crates.io and nix needs the hash spelled out.
             outputHashes = {
               "gpurify-0.1.0" = "sha256-/Vac085qczozWZ352X2poKrHQhKP+9qASQZV6mbHFIA=";
+              # Substrate2: one hash covers every crate of the repo.
+              "substrate-0.10.3" = "sha256-6tfY+N5bZUAc4uixQHMpiu/mubZCALObk4Llxy0m/RI=";
             };
           };
 
           # Just the CLI, not the whole workspace (benchmarks, examples).
           cargoBuildFlags = [ "--bin" "philis" ];
 
-          nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake ];
+          # protobuf: Substrate2's `cache` crate runs protoc in its build script.
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.protobuf ];
           buildInputs = [ pkgs.highs ];
 
           # The suite expects fixtures and, in places, a GPU. Signoff for this package is
@@ -90,6 +93,7 @@
             pkgs.cmake
             pkgs.pkg-config
             pkgs.highs
+            pkgs.protobuf # protoc, for Substrate2's `cache` build script
           ]
           # CUDA for verify's GPU kernels (feature "gpu", CubeCL). CubeCL needs the
           # toolkit headers (CUDA_PATH) for NVRTC kernel compilation, libnvrtc, and

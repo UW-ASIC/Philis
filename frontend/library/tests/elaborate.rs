@@ -3,7 +3,7 @@
 //! parameter, which is the substrate3 "swap on the fly" contract.
 
 use library::{elaborate, ElabConfig};
-use macro_master::{
+use macro_master::legacy::{
     variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Io, PortInfo,
     Process, Signal,
 };

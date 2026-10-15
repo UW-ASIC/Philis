@@ -13,7 +13,7 @@ use cells::inductor::Inductor;
 use cells::mosfet::Mosfet;
 use cells::resistor::Resistor;
 use cells::Cell;
-use macro_master::Macros;
+use macro_master::legacy::Macros;
 use pnr_core::{Device, DeviceGroup, DeviceId, DeviceKind, Macro, NetId, Netlist, Rect};
 use verify::{Checker, Checks, Pdk, RefDeviceIn, RefInput, RefKind};
 
