@@ -1347,6 +1347,50 @@ impl Pdk {
         self.deck.devices.model.iter().map(|&m| self.strings.resolve(m)).find(|n| hit(n)).map(str::to_string)
     }
 
+    /// `model`'s recogniser markers (GAP-07) that the planar generator does not already draw, as `gate_marker{i}`
+    /// roles over `pdk`; `None` when there are none (plain `nfet_01v8`). Forbidden layers are ignored: the generator never
+    /// draws them.
+    #[must_use]
+    pub fn mos_overlay(&self, model: &str) -> Option<Overlay<'_>> {
+        let pdk = self;
+        let (need, _) = pdk.model_markers(model)?;
+        let drawn: Vec<_> = ["diff", "tap", "poly", "licon", "li", "mcon", "met1", "nwell", "nsdm", "psdm", "npc"]
+            .iter()
+            .filter_map(|r| Process::layer(pdk, r))
+            .collect();
+        let name = |l: &pnr_core::LayerId| pdk.layers.iter().find(|(_, id)| id == l).map(|(n, _)| n.clone());
+        let mut layers: Vec<(String, String)> =
+            need.iter().filter(|l| !drawn.contains(l)).filter_map(name).enumerate().map(|(i, n)| (format!("gate_marker{i}"), n)).collect();
+        if layers.is_empty() {
+            return None;
+        }
+        // `npc` is a recipe-controlled role on an overlay: the gate contacts keep the base deck's.
+        layers.extend(Process::layer(pdk, "npc").as_ref().and_then(name).map(|n| ("npc".to_string(), n)));
+        Some(Overlay { pdk, recipe: Recipe { model: model.into(), layers, rules: vec![] } })
+    }
+
+    /// The LVS kind of schematic `model`, from the recogniser [`Pdk::deck_model`]
+    /// finds; polarity from its marker layer's leading `n`/`p`, as the
+    /// reference compiler reads it. `None` when no recogniser names `model`.
+    #[must_use]
+    pub fn model_kind(&self, model: &str) -> Option<crate::reference::RefKind> {
+        use crate::reference::RefKind;
+        use gdsverify::ingest::deck::DeviceKind;
+        let name = self.deck_model(model)?;
+        let d = &self.deck.devices;
+        let row = d.model.iter().position(|&m| self.strings.resolve(m) == name)?;
+        let p = self.strings.resolve(self.deck.layers.name(d.marker[row])).starts_with('p');
+        Some(match d.kind[row] {
+            DeviceKind::Mos if p => RefKind::Pmos,
+            DeviceKind::Mos => RefKind::Nmos,
+            DeviceKind::Bjt if p => RefKind::Pnp,
+            DeviceKind::Bjt => RefKind::Npn,
+            DeviceKind::Resistor => RefKind::Resistor,
+            DeviceKind::Capacitor => RefKind::Capacitor,
+            DeviceKind::Diode => RefKind::Diode,
+        })
+    }
+
     /// Layers `model`'s recogniser requires (`and`) and forbids (`not`) beyond its
     /// gate layer, from the marker's derived-layer expression (sky130
     /// `nfet_01v8_lvt = (ngate and lvtn) not hvi` → `([lvtn], [hvi])`). The walk

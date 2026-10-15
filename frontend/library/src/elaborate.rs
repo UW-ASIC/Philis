@@ -5,7 +5,7 @@
 
 use analog::Requirements;
 use annotator::{annotate, AnnotationConfig};
-use macro_master::{build_composition, Composition};
+use macro_master::legacy::{build_composition, Composition};
 use pnr_core::{LayerId, Layout, Macro, Netlist, Orient, Report, Routes, Shape};
 use verify::Pdk;
 
@@ -36,7 +36,7 @@ pub struct Elaborated {
     pub report: Report,
     /// The composition as a circuit, on the same `NetId` numbering as `nets`:
     /// the annotator's routing rules and the LVS reference come from it. `None`
-    /// when any instance is an opaque `macro_master::DeviceGen`.
+    /// when any instance is an opaque `macro_master::legacy::DeviceGen`.
     pub schematic: Option<Netlist>,
 }
 
@@ -129,13 +129,13 @@ pub fn elaborate<C: Composition>(
     comp: &C,
     pdk: &Pdk,
     cfg: &ElabConfig,
-) -> Result<Elaborated, macro_master::GenError> {
+) -> Result<Elaborated, macro_master::legacy::GenError> {
     Ok(route_built(build_composition(comp, pdk)?, pdk, cfg))
 }
 
 /// Route an already-built composition (shared with `emit::elaborate_ir`).
 pub(crate) fn route_built(
-    built: macro_master::BuiltComp,
+    built: macro_master::legacy::BuiltComp,
     pdk: &Pdk,
     cfg: &ElabConfig,
 ) -> Elaborated {

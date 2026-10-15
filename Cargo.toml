@@ -22,3 +22,12 @@ members = [
 fearless_simd = "1.0.0"
 gdsverify = { package = "gpurify", git = "https://github.com/UW-ASIC/GPurify" }
 gdsverify-geom = { package = "gpurify-geom", git = "https://github.com/UW-ASIC/GPurify" }
+# Substrate2 (UC Berkeley), pinned: `macro_master` re-exports it and adds
+# Philis's features on top. Bump the rev on purpose; its 0.x API moves.
+substrate = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+sky130 = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+layir = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+gdsconv = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+gds = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+scir = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+spice = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }

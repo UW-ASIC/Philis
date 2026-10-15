@@ -7,6 +7,17 @@ edition = "2021"
 pnr_core = { path = "../core" }
 analog = { path = "../analog" }
 cells = { path = "../cells" }
+verify = { path = "../../backend/verify" }
+substrate = { workspace = true }
+layir = { workspace = true }
+scir = { workspace = true }
+spice = { workspace = true }
+gdsconv = { workspace = true }
+gds = { workspace = true }
+sky130 = { workspace = true }
+arcstr = "1"
+rust_decimal = "1"
+unicase = "2"
 
-[dev-dependencies]
+[build-dependencies]
 verify = { path = "../../backend/verify" }

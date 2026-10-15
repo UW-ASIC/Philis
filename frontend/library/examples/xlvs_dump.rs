@@ -9,7 +9,7 @@
 //! `cargo run -p library --example xlvs_dump -- <deck.json> <outdir>`
 
 use library::{elaborate, ElabConfig};
-use macro_master::{
+use macro_master::legacy::{
     variants::Mos, AlignMode, Block, CompBuilder, Composition, GenError, InOut, Input, Io, Output,
     PortInfo, Process, Signal,
 };

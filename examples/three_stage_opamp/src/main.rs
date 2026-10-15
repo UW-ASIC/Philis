@@ -44,7 +44,7 @@ fn main() {
     // ── The part of the design the *user* does themselves ──
     // Register a pre-drawn macro for the output PMOS `M8` under its instance name.
     // It is drawn by a `cells::Cell` generator (`cells::mosfet::Mosfet`); a
-    // `macro_master::Composition` could assemble it from parts too. The library uses it
+    // `macro_master::legacy::Composition` could assemble it from parts too. The library uses it
     // verbatim and auto-generates M1–M7, M9.
     let mut macros = Macros::default();
     macros.register("M8", user_output_pmos(&pdk));

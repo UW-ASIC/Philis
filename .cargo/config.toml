@@ -1,0 +1,4 @@
+# Substrate2's manifests name this registry on every internal dependency;
+# without it cargo skips each of their packages as malformed, even through git.
+[registries]
+substrate = { index = "https://github.com/substrate-labs/crates-index" }
