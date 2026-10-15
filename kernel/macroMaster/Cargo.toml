@@ -13,6 +13,11 @@ layir = { workspace = true }
 scir = { workspace = true }
 spice = { workspace = true }
 gdsconv = { workspace = true }
-
-[dev-dependencies]
+gds = { workspace = true }
 sky130 = { workspace = true }
+arcstr = "1"
+rust_decimal = "1"
+unicase = "2"
+
+[build-dependencies]
+verify = { path = "../../backend/verify" }

@@ -5,6 +5,9 @@
 //! its IRs ([`layir`], [`scir`], [`spice`]). Write generators the Substrate
 //! way; this crate adds what Philis brings on top of it:
 //!
+//! - [`pdk`]: typed PDKs for every Philis deck (gf180mcu, ihp_sg13g2, asap7
+//!   generated from their decks; sky130 is upstream's) and a [`pdk::Mos`]
+//!   block drawn by Philis's generators on any of them.
 //! - [`signoff`]: in-process DRC/ERC/LVS/PEX of a Substrate block through
 //!   GPurify, for any PDK `verify` has a deck for.
 //!
@@ -22,4 +25,5 @@ pub use scir;
 pub use spice;
 
 pub mod legacy;
+pub mod pdk;
 pub mod signoff;

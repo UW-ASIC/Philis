@@ -1,6 +1,10 @@
 //! In-process signoff of a Substrate block through GPurify (`verify`).
 //!
-//! [`check`] takes the block's exported LayIR library (in its PDK's layer
+//! [`run`] signs off a block on its [`PhilisPdk`]: it exports the layout and
+//! the schematic (through the PDK's netlist schema to [`Spice`]) and returns a
+//! [`Report`] split by check, as `tools/pegasus` splits DRC from LVS.
+//!
+//! [`check`] is the step underneath, for libraries already exported: it takes the block's exported LayIR library (in its PDK's layer
 //! type), the PDK's layer → GDS map, its SCIR netlist converted to the
 //! [`Spice`] schema, and a `verify` [`Pdk`]; it runs DRC/ERC/LVS/PEX in one
 //! pass and returns `verify`'s [`Signoff`].
@@ -9,8 +13,8 @@
 //!   pair it carries. A shape on a pair the deck does not draw is not checked:
 //!   it is a [`Coverage::skipped_rules`](verify::Coverage) row
 //!   `layout.unmapped_layer`, never dropped silently.
-//! - **Pins**: one label per top-cell port, at the centre of the port's first
-//!   shape, on that shape's layer.
+//! - **Pins**: a label at the centre of every shape of every top-cell port,
+//!   on that shape's layer (a MOS's two body taps are both `B`).
 //! - **Reference**: the SCIR hierarchy is flattened to cards. A device's kind
 //!   comes from the deck's recogniser for its model ([`Pdk::model_kind`]); a
 //!   MOS goes in as `nf·m` cards of per-finger `w/nf`, as Philis's own
@@ -25,7 +29,12 @@ use scir::{ChildId, ParamValue, SignalId};
 use spice::{Primitive, Spice};
 use substrate::geometry::bbox::Bbox;
 use substrate::geometry::transform::{TransformRef, Transformation};
+use substrate::context::Context;
+use substrate::layout::Layout;
+use substrate::schematic::Schematic;
 use verify::{Intent, LabeledPin, Pdk, RefDeviceIn, RefInput, RefKind, Signoff};
+
+use crate::pdk::PhilisPdk;
 
 /// Why a block could not be handed to the checker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +49,8 @@ pub enum Error {
     Primitive(String),
     /// A port or instance connection the netlist leaves unresolved.
     Netlist(String),
+    /// Substrate failed to generate or export the block.
+    Substrate(String),
 }
 
 impl std::fmt::Display for Error {
@@ -50,11 +61,91 @@ impl std::fmt::Display for Error {
             Self::UnknownModel(m) => write!(f, "no deck recogniser for model `{m}`"),
             Self::Primitive(p) => write!(f, "unsupported primitive: {p}"),
             Self::Netlist(s) => write!(f, "netlist: {s}"),
+            Self::Substrate(s) => write!(f, "substrate: {s}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// One failed rule: `{rule}:{layer}` as the deck names it (`engine/…` for a
+/// check that could not run), and its [`verify::shortfall`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleCheck {
+    pub name: String,
+    pub margin: i64,
+}
+
+/// A signoff's result, by check.
+#[derive(Default)]
+pub struct Report {
+    pub drc: Vec<RuleCheck>,
+    pub erc: Vec<RuleCheck>,
+    /// LVS mismatches, and one `lvs-coverage/…` row per device kind LVS
+    /// could not compare.
+    pub lvs: Vec<RuleCheck>,
+    /// Engine failures and every other domain (antenna, EM, …).
+    pub other: Vec<RuleCheck>,
+    /// Rows the deck states as warnings: never a failure.
+    pub warnings: Vec<RuleCheck>,
+    /// What this run did not check (never a pass).
+    pub coverage: verify::Coverage,
+    /// Extracted capacitance between labelled nets, fF.
+    pub caps: verify::CapMatrix,
+}
+
+impl Report {
+    /// Every check ran and passed, and LVS compared every device.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.drc.is_empty() && self.erc.is_empty() && self.lvs_matches()
+    }
+
+    /// The layout matches the schematic, every device compared.
+    #[must_use]
+    pub fn lvs_matches(&self) -> bool {
+        self.lvs.is_empty() && self.other.is_empty() && self.coverage.unverified.is_empty()
+    }
+
+    /// Every failed check, `name (margin)`, for a report or an assert.
+    #[must_use]
+    pub fn failures(&self) -> Vec<String> {
+        [&self.drc, &self.erc, &self.lvs, &self.other].into_iter().flatten().map(|c| format!("{} ({})", c.name, c.margin)).collect()
+    }
+}
+
+impl From<Signoff> for Report {
+    fn from(s: Signoff) -> Self {
+        let mut r = Report { coverage: s.coverage, caps: s.caps, ..Report::default() };
+        let row = |v: pnr_core::Violation| RuleCheck { name: v.rule, margin: v.margin };
+        r.warnings = s.warnings.into_iter().map(row).collect();
+        for v in s.report.hard_violations {
+            let bucket = match v.rule.split('/').next().unwrap_or("") {
+                "drc" => &mut r.drc,
+                "erc" => &mut r.erc,
+                "lvs" | "lvs-coverage" => &mut r.lvs,
+                _ => &mut r.other,
+            };
+            bucket.push(row(v));
+        }
+        r
+    }
+}
+
+/// Sign off `block` on its PDK `P`, against its own schematic.
+///
+/// # Errors
+/// The block failing to generate or export, or anything [`check`] rejects.
+pub fn run<P, B>(ctx: &Context, block: B) -> Result<Report, Error>
+where
+    P: PhilisPdk,
+    B: Layout<Schema = P> + Schematic<Schema = P> + Clone,
+{
+    let sub = |e: substrate::error::Error| Error::Substrate(e.to_string());
+    let layout = ctx.export_layir(block.clone()).map_err(sub)?;
+    let netlist = P::export_spice(ctx, block).map_err(sub)?;
+    Ok(check(&layout.layir, P::gds, &netlist, P::deck())?.into())
+}
 
 /// Full signoff of `layout` against `schematic` on `pdk`. `gds` maps a layout
 /// layer to its GDS drawing pair (sky130: `Sky130Layer::gds_layer`).
@@ -112,20 +203,22 @@ fn geometry<L: Clone>(
         shapes.push(Shape { layer, rect: rect(r) });
     }
 
-    let mut pins = Vec::new();
+    let mut pins: Vec<LabeledPin> = Vec::new();
     for (name, port) in lib.cell(top).ports() {
-        let Some(s) = port.elements().find_map(|e| match e {
+        for s in port.elements().filter_map(|e| match e {
             Element::Shape(s) => Some(s),
             Element::Text(_) => None,
-        }) else {
-            continue;
-        };
-        let g = gds(s.layer());
-        let Some(layer) = deck_layer(g) else {
-            return Err(Error::Netlist(format!("port `{name}` is on GDS {g}, which no deck layer draws")));
-        };
-        let c = s.shape().bbox_rect().center();
-        pins.push(LabeledPin { name: name.to_string(), layer: layer.0, x: c.x as i32, y: c.y as i32 });
+        }) {
+            let g = gds(s.layer());
+            let Some(layer) = deck_layer(g) else {
+                return Err(Error::Netlist(format!("port `{name}` is on GDS {g}, which no deck layer draws")));
+            };
+            let c = s.shape().bbox_rect().center();
+            let pin = LabeledPin { name: name.to_string(), layer: layer.0, x: c.x as i32, y: c.y as i32 };
+            if !pins.iter().any(|q| (q.layer, q.x, q.y) == (pin.layer, pin.x, pin.y)) {
+                pins.push(pin);
+            }
+        }
     }
 
     let mut unmapped: Unmapped = unmapped.into_iter().collect();

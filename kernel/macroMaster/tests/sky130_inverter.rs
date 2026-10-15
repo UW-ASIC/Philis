@@ -123,17 +123,9 @@ fn inverter_signs_off_clean_on_sky130() {
     let ctx = Context::builder().install(Sky130::open("/nonexistent")).build();
     let dut = Inverter { nw: 1_200, pw: 2_400 };
 
-    let layout = ctx.export_layir(dut).expect("layout");
-    let schematic = ctx
-        .export_scir(ConvertSchema::<_, Spice>::new(ConvertSchema::<_, Sky130OpenSchema>::new(dut)))
-        .expect("schematic");
-    let pdk = verify::Pdk::builtin("sky130").expect("sky130 deck");
-
-    let s = macro_master::signoff::check(&layout.layir, Sky130Layer::gds_layer, &schematic.scir, &pdk).expect("signoff runs");
-    println!("{}", s.coverage);
-    let hard: Vec<_> = s.report.hard_violations.iter().map(|v| format!("{} ({})", v.rule, v.margin)).collect();
-    assert!(hard.is_empty(), "not clean: {hard:#?}");
-    assert!(s.coverage.unverified.is_empty(), "devices LVS did not compare: {:?}", s.coverage.unverified);
+    let r = macro_master::signoff::run(&ctx, dut).expect("signoff runs");
+    println!("{}", r.coverage);
+    assert!(r.is_clean(), "not clean: {:#?}\n{}", r.failures(), r.coverage);
 }
 
 /// The clean pass above is not vacuous: a schematic NMOS narrower than the

@@ -2229,14 +2229,18 @@ name = "macro_master"
 version = "0.1.0"
 dependencies = [
  "analog",
+ "arcstr",
  "cells",
+ "gds",
  "gdsconv",
  "layir",
  "pnr_core",
+ "rust_decimal",
  "scir",
  "sky130",
  "spice",
  "substrate",
+ "unicase",
  "verify",
 ]
 

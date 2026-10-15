@@ -28,5 +28,6 @@ substrate = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d960
 sky130 = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
 layir = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
 gdsconv = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
+gds = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
 scir = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }
 spice = { git = "https://github.com/ucb-substrate/substrate2", rev = "01d9600f946437d3bc18806a6517e35001b68251" }

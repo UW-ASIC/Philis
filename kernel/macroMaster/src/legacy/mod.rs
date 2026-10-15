@@ -13,7 +13,7 @@
 //! declares its devices, the schematic [`Netlist`]. Routing and signoff are the
 //! caller's (`library::elaborate`).
 
-mod adapter;
+pub(crate) mod adapter;
 
 pub use pnr_core::Process;
 
