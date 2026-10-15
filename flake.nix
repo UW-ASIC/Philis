@@ -38,12 +38,20 @@
           version = "0.1.0";
           src = ./.;
 
-          cargoLock = {
+          # Vendoring runs `cargo metadata` inside each git checkout, where Substrate2's
+          # manifests name a `substrate` registry no config there defines: hand it a
+          # cargo that knows the registry (Philis's own build reads .cargo/config.toml).
+          cargoDeps = (pkgs.rustPlatform.importCargoLock.override {
+            cargo = pkgs.writeShellScriptBin "cargo" ''
+              export CARGO_REGISTRIES_SUBSTRATE_INDEX=https://github.com/substrate-labs/crates-index
+              exec ${pkgs.cargo}/bin/cargo "$@"
+            '';
+          }) {
             lockFile = ./Cargo.lock;
             # GPurify is a git dependency, so its source is not content-addressed by
             # crates.io and nix needs the hash spelled out.
             outputHashes = {
-              "gpurify-0.1.0" = "sha256-/Vac085qczozWZ352X2poKrHQhKP+9qASQZV6mbHFIA=";
+              "gpurify-0.1.0" = "sha256-CF7k80QDIDnVXl7vwn+KFGnVP8BAoVKvTuiS6sdVVU4=";
               # Substrate2: one hash covers every crate of the repo.
               "substrate-0.10.3" = "sha256-6tfY+N5bZUAc4uixQHMpiu/mubZCALObk4Llxy0m/RI=";
             };

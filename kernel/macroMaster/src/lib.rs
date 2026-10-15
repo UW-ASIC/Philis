@@ -6,8 +6,9 @@
 //! way; this crate adds what Philis brings on top of it:
 //!
 //! - [`pdk`]: typed PDKs for every Philis deck (gf180mcu, ihp_sg13g2, asap7
-//!   generated from their decks; sky130 is upstream's) and a [`pdk::Mos`]
-//!   block drawn by Philis's generators on any of them.
+//!   generated from their decks; sky130 is upstream's), the [`pdk::Mos`]
+//!   primitive on any of them, and the [`pdk::MosTile`] layout on the
+//!   generated ones.
 //! - [`signoff`]: in-process DRC/ERC/LVS/PEX of a Substrate block through
 //!   GPurify, for any PDK `verify` has a deck for.
 //!
@@ -15,8 +16,8 @@
 //! in the code they expand to, so a crate that uses them also depends on
 //! `substrate` directly (`substrate = { workspace = true }`).
 //!
-//! [`legacy`] is the pre-Substrate API (`DeviceGen`/`Composition`), kept
-//! until its callers move over (plan-09 P7).
+//! [`legacy`] is the pre-Substrate API (`DeviceGen`/`Composition`) Philis's
+//! flow builds on; moving Philis off it is Philis's business.
 
 pub use substrate::*;
 

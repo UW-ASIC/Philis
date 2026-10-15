@@ -7,10 +7,17 @@
 //! - sky130 is Substrate2's own [`sky130::Sky130`], with [`PhilisPdk`]
 //!   implemented on it.
 //!
-//! [`Mos`] is one transistor on any of them: its schematic is the PDK's MOS
-//! primitive, and its layout is drawn by Philis's `cells` generator (planar,
-//! or fins on a deck with a `fin` layer), with the markers a flavoured model's
-//! recogniser needs.
+//! Devices follow Substrate's split (upstream sky130's `Nfet01v8` vs
+//! `NmosTile`): a schematic primitive and a layout tile are separate blocks,
+//! and the block that composes them draws the joins.
+//!
+//! - [`Mos`]: one transistor's schematic primitive, on any of the four.
+//! - [`MosTile`]: its layout on a generated PDK ([`DrawnPdk`]), drawn by
+//!   Philis's `cells` generator (planar, or fins on a deck with a `fin`
+//!   layer, with the markers a flavoured model's recogniser needs). Each
+//!   terminal is an array with one entry per region the drawing leaves
+//!   unjoined (a two-finger planar device's two sources). sky130 uses
+//!   upstream's own tiles.
 //!
 //! Units are nm. A [`Mos`]'s `w` is the total width over its `nf` fingers, as
 //! in SPICE.
@@ -39,7 +46,7 @@ use substrate::schematic::{ConvertSchema, PrimitiveBinding, Schematic};
 use substrate::types::codegen::{PortGeometryBundle, View};
 use substrate::types::layout::PortGeometry;
 use substrate::types::schematic::IoNodeBundle;
-use substrate::types::MosIo;
+use substrate::types::{Array, ArrayBundle, InOut, Input, Io, MosIo, Signal};
 use substrate::{layout, schematic};
 use unicase::UniCase;
 
@@ -85,7 +92,7 @@ impl<M: MosModel> Primitive<M> {
     /// The SPICE card: an `M` card of the deck's model, lengths in metres.
     ///
     /// ponytail: the card form each simulator's model files want (`X` subckt
-    /// vs `M`, `nfin`) is plan-09 P6's; LVS reads this one.
+    /// vs `M`, `nfin`) is still open (plan-09 Next); LVS reads this one.
     fn to_spice(&self) -> spice::Primitive {
         let Primitive::Mos { model, w, l, nf } = *self;
         let p = |k: &str, v: Decimal| (UniCase::new(ArcStr::from(k)), scir::ParamValue::Numeric(v));
@@ -146,17 +153,126 @@ impl<M: MosModel> Schematic for Mos<M> {
     }
 }
 
-impl<M: MosModel> Layout for Mos<M> {
+/// A PDK whose devices Philis's `cells` generators draw (the generated
+/// ones; sky130 has upstream's tiles).
+pub trait DrawnPdk: PhilisPdk {}
+
+/// [`MosTile`]'s terminals: per terminal, one entry per region the drawing
+/// leaves unjoined, left to right.
+#[derive(Debug, Clone, Io)]
+pub struct MosTileIo {
+    pub d: InOut<Array<Signal>>,
+    pub g: Input<Array<Signal>>,
+    pub s: InOut<Array<Signal>>,
+    pub b: InOut<Array<Signal>>,
+}
+
+/// One transistor's layout, drawn by `cells`: `w` total width over `nf`
+/// fingers, `l` length, nm. Its schematic is [`Mos`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MosTile<M>(pub Mos<M>);
+
+impl<M: MosModel> Hash for MosTile<M> {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.hash(h);
+    }
+}
+
+/// The terminals [`MosTileIo`] carries, in field order.
+const TERMINALS: [&str; 4] = ["D", "G", "S", "B"];
+
+impl<M: MosModel> MosTile<M>
+where
+    M::Pdk: DrawnPdk,
+{
+    fn draw(&self) -> Macro {
+        let m = self.0;
+        draw_mos(M::Pdk::deck(), m.model.name(), m.model.is_pmos(), m.w, m.l, m.nf)
+    }
+}
+
+impl<M: MosModel> Block for MosTile<M>
+where
+    M::Pdk: DrawnPdk,
+{
+    type Io = MosTileIo;
+
+    fn name(&self) -> ArcStr {
+        arcstr::format!("{}_tile", self.0.name())
+    }
+
+    fn io(&self) -> MosTileIo {
+        let regions = regions(&self.draw());
+        let n = |t: &str| Array::new(regions.iter().filter(|(term, _)| term == t).count(), Signal::new());
+        MosTileIo { d: InOut(n("D")), g: Input(n("G")), s: InOut(n("S")), b: InOut(n("B")) }
+    }
+}
+
+impl<M: MosModel> Layout for MosTile<M>
+where
+    M::Pdk: DrawnPdk,
+{
     type Schema = M::Pdk;
-    type Bundle = View<MosIo, PortGeometryBundle<M::Pdk>>;
+    type Bundle = View<MosTileIo, PortGeometryBundle<M::Pdk>>;
     type Data = ();
 
     fn layout(&self, cell: &mut layout::CellBuilder<M::Pdk>) -> substrate::error::Result<(Self::Bundle, ())> {
-        let mac = draw_mos(M::Pdk::deck(), self.model.name(), self.model.is_pmos(), self.w, self.l, self.nf);
-        let mut ports = replay::<M::Pdk>(cell, &mac)?;
-        let mut port = |t: &str| ports.remove(t).ok_or_else(|| error(format!("{}: the generator drew no `{t}` pin", self.name())));
-        Ok((CellBundle::<Self> { d: port("D")?, g: port("G")?, s: port("S")?, b: port("B")? }, ()))
+        let mac = self.draw();
+        let layer = layer_map::<M::Pdk>();
+        for s in &mac.shapes {
+            cell.draw(layir::Shape::new(layer(s.layer)?, rect(s.rect)))?;
+        }
+        let mut arrays: Vec<Vec<PortGeometry<_>>> = vec![Vec::new(); TERMINALS.len()];
+        for (term, pins) in regions(&mac) {
+            let shapes = pins.iter().map(|p| Ok(layir::Shape::new(layer(p.layer)?, rect(p.at)))).collect::<substrate::error::Result<Vec<_>>>()?;
+            let mut shapes = shapes.into_iter();
+            let mut g = PortGeometry::new(shapes.next().expect("a region has a pin"));
+            g.unnamed_shapes.extend(shapes);
+            arrays[TERMINALS.iter().position(|t| *t == term).expect("a MOS terminal")].push(g);
+        }
+        let mut arrays = arrays.into_iter().map(|v| ArrayBundle::new(Signal, v));
+        let mut next = || arrays.next().expect("one array per terminal");
+        Ok((CellBundle::<Self> { d: next(), g: next(), s: next(), b: next() }, ()))
     }
+}
+
+/// The drawing's pins grouped into regions: same terminal, joined through
+/// shapes on the pin's own layer. In `TERMINALS` order, then left to right.
+fn regions(mac: &Macro) -> Vec<(String, Vec<pnr_core::Pin>)> {
+    let touch = |a: pnr_core::Rect, b: pnr_core::Rect| a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h;
+    // Union-find over the shapes of each layer, so a pin's island is the
+    // component of a shape it touches.
+    let shapes = &mac.shapes;
+    let mut parent: Vec<usize> = (0..shapes.len()).collect();
+    fn find(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    for i in 0..shapes.len() {
+        for j in i + 1..shapes.len() {
+            if shapes[i].layer == shapes[j].layer && touch(shapes[i].rect, shapes[j].rect) {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+    }
+    let mut out: Vec<(String, Option<usize>, Vec<pnr_core::Pin>)> = Vec::new();
+    let mut pins: Vec<&pnr_core::Pin> = mac.pins.iter().collect();
+    pins.sort_by_key(|p| (p.at.x, p.at.y));
+    for p in pins {
+        let term = p.name.rsplit(':').next().unwrap_or(&p.name).to_ascii_uppercase();
+        let island = (0..shapes.len()).find(|&i| shapes[i].layer == p.layer && touch(shapes[i].rect, p.at)).map(|i| find(&mut parent, i));
+        match out.iter_mut().find(|(t, isl, _)| *t == term && island.is_some() && *isl == island) {
+            Some((_, _, v)) => v.push(p.clone()),
+            None => out.push((term, island, vec![p.clone()])),
+        }
+    }
+    let mut out: Vec<_> = out.into_iter().map(|(t, _, v)| (t, v)).collect();
+    out.sort_by_key(|(t, _)| TERMINALS.iter().position(|x| x == t).unwrap_or(TERMINALS.len()));
+    out
 }
 
 /// The `cells` drawing of one MOS: fins on a deck with a `fin` layer, else
@@ -170,39 +286,21 @@ fn draw_mos(pdk: &verify::Pdk, model: &str, pmos: bool, w: i64, l: i64, nf: i64)
     if process.layer("fin").is_some() {
         crate::legacy::adapter::draw::<cells::finfet::FinFet>(kind, finger, l as i32, &[nf], false, process, |_| true)
     } else {
-        crate::legacy::adapter::draw::<cells::mosfet::Mosfet>(kind, finger, l as i32, &[nf], false, process, |m| m.nf == nf)
+        crate::legacy::adapter::draw::<cells::mosfet::Mosfet>(kind, finger, l as i32, &[nf], false, process, |m| m.nf == nf && m.rows == 1)
     }
 }
 
-/// Draw `mac` into `cell`; returns each terminal's pins (`d0:D` → `D`) as
-/// port geometry, the first pin primary.
-fn replay<P: PhilisPdk>(
-    cell: &mut layout::CellBuilder<P>,
-    mac: &Macro,
-) -> substrate::error::Result<HashMap<String, PortGeometry<<P as layout::schema::Schema>::Layer>>> {
+/// Deck layer → `P`'s layout layer, through the GDS pair.
+fn layer_map<P: PhilisPdk>() -> impl Fn(LayerId) -> substrate::error::Result<<P as layout::schema::Schema>::Layer> {
     let table = P::deck().layer_gds();
-    let layer = |id: LayerId| {
+    move |id: LayerId| {
         let (l, d) = table.get(id.0 as usize).copied().unwrap_or((0, 0));
         P::from_gds(GdsLayer(l, d)).ok_or_else(|| error(format!("{}: deck layer {} (GDS {l}/{d}) has no layout layer", P::DECK, id.0)))
-    };
-    let rect = |r: pnr_core::Rect| {
-        Rect::from_sides(i64::from(r.x), i64::from(r.y), i64::from(r.x + r.w), i64::from(r.y + r.h))
-    };
-    for s in &mac.shapes {
-        cell.draw(layir::Shape::new(layer(s.layer)?, rect(s.rect)))?;
     }
-    let mut ports: HashMap<String, PortGeometry<_>> = HashMap::new();
-    for p in &mac.pins {
-        let term = p.name.rsplit(':').next().unwrap_or(&p.name).to_ascii_uppercase();
-        let shape = layir::Shape::new(layer(p.layer)?, rect(p.at));
-        match ports.get_mut(&term) {
-            Some(g) => g.unnamed_shapes.push(shape),
-            None => {
-                ports.insert(term, PortGeometry::new(shape));
-            }
-        }
-    }
-    Ok(ports)
+}
+
+fn rect(r: pnr_core::Rect) -> Rect {
+    Rect::from_sides(i64::from(r.x), i64::from(r.y), i64::from(r.x + r.w), i64::from(r.y + r.h))
 }
 
 fn error(msg: String) -> substrate::error::Error {
@@ -324,6 +422,8 @@ macro_rules! define_pdk {
                     Ok(())
                 }
             }
+
+            impl DrawnPdk for $ty {}
 
             impl PhilisPdk for $ty {
                 const DECK: &'static str = $deck;

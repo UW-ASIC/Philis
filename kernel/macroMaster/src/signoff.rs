@@ -4,6 +4,8 @@
 //! the schematic (through the PDK's netlist schema to [`Spice`]) and returns a
 //! [`Report`] split by check, as `tools/pegasus` splits DRC from LVS.
 //!
+//! [`run_layout`] is DRC and ERC alone, for a layout-only block (a tile).
+//!
 //! [`check`] is the step underneath, for libraries already exported: it takes the block's exported LayIR library (in its PDK's layer
 //! type), the PDK's layer → GDS map, its SCIR netlist converted to the
 //! [`Spice`] schema, and a `verify` [`Pdk`]; it runs DRC/ERC/LVS/PEX in one
@@ -95,10 +97,17 @@ pub struct Report {
 }
 
 impl Report {
-    /// Every check ran and passed, and LVS compared every device.
+    /// Every check ran and passed, and LVS compared every device (so never
+    /// for a [`run_layout`] report).
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.drc.is_empty() && self.erc.is_empty() && self.lvs_matches()
+        self.layout_clean() && self.lvs_matches() && !self.coverage.skipped_rules.iter().any(|(r, _)| r == "lvs")
+    }
+
+    /// DRC and ERC passed: all a [`run_layout`] report can say.
+    #[must_use]
+    pub fn layout_clean(&self) -> bool {
+        self.drc.is_empty() && self.erc.is_empty() && self.other.is_empty()
     }
 
     /// The layout matches the schematic, every device compared.
@@ -145,6 +154,37 @@ where
     let layout = ctx.export_layir(block.clone()).map_err(sub)?;
     let netlist = P::export_spice(ctx, block).map_err(sub)?;
     Ok(check(&layout.layir, P::gds, &netlist, P::deck())?.into())
+}
+
+/// DRC and ERC of a layout-only block (a tile). With no schematic there is
+/// no LVS: that is a [`Coverage::skipped_rules`](verify::Coverage) row, never
+/// a pass.
+///
+/// # Errors
+/// The block failing to generate or export, or a layout [`check`] rejects.
+pub fn run_layout<P, B>(ctx: &Context, block: B) -> Result<Report, Error>
+where
+    P: PhilisPdk,
+    B: Layout<Schema = P>,
+{
+    let layout = ctx.export_layir(block).map_err(|e| Error::Substrate(e.to_string()))?;
+    let pdk = P::deck();
+    let (shapes, pins, unmapped) = geometry(&layout.layir, &P::gds, pdk)?;
+    let mut r = Report::default();
+    let findings = verify::drc(&shapes, &pins, pdk).into_iter().map(|f| ("drc", f)).chain(verify::erc(&shapes, &pins, pdk).into_iter().map(|f| ("erc", f)));
+    for (domain, f) in findings {
+        let row = RuleCheck { name: format!("{domain}/{}:{}", f.rule, f.layer), margin: f.margin };
+        match (f.warning, domain) {
+            (true, _) => r.warnings.push(row),
+            (false, "drc") => r.drc.push(row),
+            (false, _) => r.erc.push(row),
+        }
+    }
+    r.coverage.skipped_rules.push(("lvs".into(), "layout-only block: no schematic to compare".into()));
+    for (l, n) in unmapped {
+        r.coverage.skipped_rules.push(("layout.unmapped_layer".into(), format!("GDS {l}: {n} shapes not checked")));
+    }
+    Ok(r)
 }
 
 /// Full signoff of `layout` against `schematic` on `pdk`. `gds` maps a layout

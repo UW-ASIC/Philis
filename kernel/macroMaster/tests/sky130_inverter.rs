@@ -1,7 +1,8 @@
 //! plan-09 P0: a Substrate2 block signs off through `macro_master::signoff`.
 //!
-//! The inverter is Substrate2's `examples/latest/sky130_inverter` (schematic
-//! and layout), unchanged but for imports.
+//! The inverter is Substrate2's `examples/latest/sky130_inverter`: its layout
+//! unchanged but for imports, its schematic on the PDK-generic
+//! `macro_master::pdk::Mos` primitive instead of upstream's `Nfet01v8`.
 //! Copyright (c) 2023, Substrate Labs. BSD 3-Clause License.
 
 use macro_master::block::Block;
@@ -24,7 +25,8 @@ use macro_master::types::schematic::IoNodeBundle;
 use macro_master::types::{InOut, Input, Io, Output, Signal};
 use sky130::layers::Sky130Layer;
 use sky130::layout::{NtapTile, PtapTile};
-use sky130::mos::{GateDir, MosLength, Nfet01v8, NmosTile, Pfet01v8, PmosTile};
+use macro_master::pdk::Mos;
+use sky130::mos::{GateDir, MosKind, MosLength, NmosTile, PmosTile};
 use sky130::{Sky130, Sky130OpenSchema};
 
 #[derive(Io, Clone, Default, Debug)]
@@ -48,13 +50,13 @@ impl Schematic for Inverter {
     type Schema = Sky130;
     type NestedData = ();
     fn schematic(&self, io: &IoNodeBundle<Self>, cell: &mut CellBuilder<<Self as Schematic>::Schema>) -> Result<Self::NestedData> {
-        let nmos = cell.instantiate(Nfet01v8::new((self.nw, 150)));
+        let nmos = cell.instantiate(Mos::new(MosKind::Nfet01v8, self.nw, 150, 1));
         cell.connect(io.dout, nmos.io().d);
         cell.connect(io.din, nmos.io().g);
         cell.connect(io.vss, nmos.io().s);
         cell.connect(io.vss, nmos.io().b);
 
-        let pmos = cell.instantiate(Pfet01v8::new((self.pw, 150)));
+        let pmos = cell.instantiate(Mos::new(MosKind::Pfet01v8, self.pw, 150, 1));
         cell.connect(io.dout, pmos.io().d);
         cell.connect(io.din, pmos.io().g);
         cell.connect(io.vdd, pmos.io().s);
